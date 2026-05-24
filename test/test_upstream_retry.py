@@ -4,7 +4,12 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from services.openai_backend_api import FAST_UPSTREAM_RETRY_ATTEMPTS, FAST_UPSTREAM_TIMEOUT_SECS, OpenAIBackendAPI
+from services.openai_backend_api import (
+    FAST_UPSTREAM_RETRY_ATTEMPTS,
+    FAST_UPSTREAM_TIMEOUT_SECS,
+    ImagePollTimeoutError,
+    OpenAIBackendAPI,
+)
 from services.protocol import conversation
 from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput
 from utils.helper import CHANNEL_BUSY_MESSAGE, UpstreamHTTPError
@@ -129,6 +134,25 @@ class UpstreamRetryTests(unittest.TestCase):
                 )))
 
         self.assertEqual(str(ctx.exception), CHANNEL_BUSY_MESSAGE)
+
+    def test_image_pool_releases_account_and_sanitizes_poll_timeout(self):
+        fake_accounts = FakeAccountService(["token-a"])
+
+        def fake_stream_image_outputs(backend, request, index=1, total=1):
+            raise ImagePollTimeoutError("ChatGPT 生图超时（已等待 120 秒）。")
+            yield
+
+        with mock.patch.object(conversation, "account_service", fake_accounts), \
+             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs):
+            with self.assertRaises(ImageGenerationError) as ctx:
+                list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                    model="gpt-image-2",
+                    prompt="test",
+                )))
+
+        self.assertEqual(str(ctx.exception), conversation.IMAGE_POLL_TIMEOUT_MESSAGE)
+        self.assertEqual(ctx.exception.code, "upstream_timeout")
+        self.assertEqual(fake_accounts.image_results, [("token-a", False)])
 
     def test_image_pool_enters_rescue_after_initial_probe_limit(self):
         fake_accounts = FakeAccountService(["token-a", "token-b", "token-c"])

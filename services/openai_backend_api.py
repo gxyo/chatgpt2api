@@ -855,13 +855,12 @@ class OpenAIBackendAPI:
             "conversation_id": conversation_id,
             "timeout_secs": timeout_secs,
             "attempts_made": attempt,
+            "reason": "no_image_result",
             # attempts_made == 0 means the initial_wait consumed the entire budget — no HTTP attempted.
             "initial_wait_exhausted_budget": attempt == 0,
         })
         raise ImagePollTimeoutError(
-            f"ChatGPT 生图超时（已等待 {timeout_secs} 秒）。"
-            f"当前超时阈值可在 config.json 中调大 image_poll_timeout_secs，"
-            f"也可能是账号被限流或生图队列拥堵导致。"
+            f"image generation result did not appear after {timeout_secs} seconds"
         )
 
     def _get_file_download_url(self, file_id: str) -> str:

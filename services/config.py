@@ -36,6 +36,7 @@ DEFAULT_IMAGE_STORAGE = {
     "webdav_root_path": "chatgpt2api/images",
     "public_base_url": "",
 }
+DEFAULT_IMAGE_POLL_TIMEOUT_SECS = 75
 
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
@@ -222,9 +223,9 @@ class ConfigStore:
     @property
     def image_poll_timeout_secs(self) -> int:
         try:
-            return max(1, int(self.data.get("image_poll_timeout_secs", 120)))
+            return max(1, int(self.data.get("image_poll_timeout_secs", DEFAULT_IMAGE_POLL_TIMEOUT_SECS)))
         except (TypeError, ValueError):
-            return 120
+            return DEFAULT_IMAGE_POLL_TIMEOUT_SECS
 
     @property
     def image_poll_interval_secs(self) -> float:

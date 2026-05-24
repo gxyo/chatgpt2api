@@ -54,6 +54,7 @@ MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS = 3
 TRANSIENT_TEXT_RESCUE_WINDOW_SECS = 12.0
 TRANSIENT_IMAGE_RESCUE_WINDOW_SECS = 20.0
 TRANSIENT_RESCUE_SLEEP_SECS = 2.0
+IMAGE_POLL_TIMEOUT_MESSAGE = "当前生图任务处理超时，请稍后重试"
 
 
 def is_token_invalid_error(message: str) -> bool:
@@ -733,8 +734,9 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     return
                 account_service.mark_image_result(token, True)
                 break
-            except ImagePollTimeoutError:
-                raise
+            except ImagePollTimeoutError as exc:
+                account_service.mark_image_result(token, False)
+                raise ImageGenerationError(IMAGE_POLL_TIMEOUT_MESSAGE, code="upstream_timeout") from exc
             except ImageGenerationError:
                 account_service.mark_image_result(token, False)
                 raise
