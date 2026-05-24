@@ -29,6 +29,7 @@ from services.sub2api_service import (
     sub2api_config,
     sub2api_import_service,
 )
+from utils.helper import public_error_message
 
 
 
@@ -388,7 +389,7 @@ def create_router() -> APIRouter:
         try:
             groups = await run_in_threadpool(sub2api_list_remote_groups, server)
         except Exception as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            raise HTTPException(status_code=502, detail={"error": public_error_message(exc)}) from exc
         return {"server_id": server_id, "groups": groups}
 
     @router.get("/api/sub2api/servers/{server_id}/accounts")
@@ -400,7 +401,7 @@ def create_router() -> APIRouter:
         try:
             accounts = await run_in_threadpool(sub2api_list_remote_accounts, server)
         except Exception as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            raise HTTPException(status_code=502, detail={"error": public_error_message(exc)}) from exc
         return {"server_id": server_id, "accounts": accounts}
 
     @router.post("/api/sub2api/servers/{server_id}/import")

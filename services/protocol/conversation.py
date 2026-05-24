@@ -13,7 +13,13 @@ from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
-from utils.helper import IMAGE_MODELS, extract_image_from_message_content
+from utils.helper import (
+    CHANNEL_BUSY_MESSAGE,
+    IMAGE_MODELS,
+    extract_image_from_message_content,
+    is_retriable_upstream_error,
+    public_error_message,
+)
 from utils.log import logger
 
 
@@ -58,8 +64,10 @@ def image_stream_error_message(message: str) -> str:
     lower = text.lower()
     if is_token_invalid_error(text):
         return "image generation failed"
+    if any(f"status={status}" in lower or f"http {status}" in lower for status in (429, 500, 502, 503, 504)):
+        return CHANNEL_BUSY_MESSAGE
     if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:
-        return "upstream image connection failed, please retry later"
+        return CHANNEL_BUSY_MESSAGE
     return text or "image generation failed"
 
 
@@ -501,12 +509,18 @@ def text_backend() -> OpenAIBackendAPI:
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
     attempted_tokens: set[str] = set()
     token = getattr(backend, "access_token", "")
+    attempted_anon = False
+    last_transient_error = False
     emitted = False
     while True:
         if token and token in attempted_tokens:
-            raise RuntimeError("no available text account")
+            raise RuntimeError(CHANNEL_BUSY_MESSAGE if last_transient_error else "no available text account")
         if token:
             attempted_tokens.add(token)
+        elif attempted_anon:
+            raise RuntimeError(CHANNEL_BUSY_MESSAGE if last_transient_error else "no available text account")
+        else:
+            attempted_anon = True
         try:
             active_backend = OpenAIBackendAPI(access_token=token)
             for event in conversation_events(active_backend, messages=request.messages, model=request.model, prompt=request.prompt):
@@ -525,6 +539,19 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                 token = account_service.get_text_access_token(attempted_tokens)
                 if token:
                     continue
+            if is_retriable_upstream_error(exc):
+                last_transient_error = True
+                logger.warning({
+                    "event": "text_stream_transient_fail",
+                    "request_token": token,
+                    "emitted": emitted,
+                    "error": error_message,
+                })
+                if token and not emitted:
+                    token = account_service.get_text_access_token(attempted_tokens)
+                    if token:
+                        continue
+                raise RuntimeError(CHANNEL_BUSY_MESSAGE) from exc
             raise
 
 
@@ -615,13 +642,18 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
 
     emitted = False
     last_error = ""
+    last_transient_error = False
     for index in range(1, request.n + 1):
+        attempted_tokens: set[str] = set()
         while True:
             try:
-                token = account_service.get_available_access_token()
+                token = account_service.get_available_access_token(attempted_tokens)
+                attempted_tokens.add(token)
             except RuntimeError as exc:
                 if emitted:
                     return
+                if last_transient_error or is_retriable_upstream_error(exc):
+                    raise ImageGenerationError(CHANNEL_BUSY_MESSAGE) from exc
                 raise ImageGenerationError(str(exc) or "image generation failed") from exc
 
             emitted_for_token = False
@@ -654,14 +686,27 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 raise
             except Exception as exc:
                 account_service.mark_image_result(token, False)
-                last_error = str(exc)
-                logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
+                transient = is_retriable_upstream_error(exc)
+                last_error = public_error_message(exc) if transient else str(exc)
+                last_transient_error = last_transient_error or transient
+                logger.warning({
+                    "event": "image_stream_fail",
+                    "request_token": token,
+                    "error": str(exc),
+                    "transient": transient,
+                })
                 if not emitted_for_token and is_token_invalid_error(last_error):
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
+                if not emitted_for_token and transient:
+                    continue
+                if transient:
+                    raise ImageGenerationError(CHANNEL_BUSY_MESSAGE) from exc
                 raise ImageGenerationError(image_stream_error_message(last_error)) from exc
 
     if not emitted:
+        if last_transient_error:
+            raise ImageGenerationError(CHANNEL_BUSY_MESSAGE)
         if not last_error:
             last_error = "no account in the pool could generate images — check account quota and rate-limit status"
         raise ImageGenerationError(image_stream_error_message(last_error))

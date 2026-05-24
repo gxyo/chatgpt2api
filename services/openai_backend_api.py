@@ -15,7 +15,7 @@ from PIL import Image
 from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
-from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid
+from utils.helper import UpstreamHTTPError, ensure_ok, is_retriable_upstream_error, iter_sse_payloads, new_uuid
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 from utils.turnstile import solve_turnstile_token
@@ -43,6 +43,9 @@ DEFAULT_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 DEFAULT_CLIENT_BUILD_NUMBER = "5955942"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+DEFAULT_UPSTREAM_RETRY_ATTEMPTS = 3
+DEFAULT_UPSTREAM_RETRY_BASE_DELAY_SECS = 0.5
+DEFAULT_UPSTREAM_RETRY_MAX_DELAY_SECS = 6.0
 
 
 class OpenAIBackendAPI:
@@ -145,6 +148,53 @@ class OpenAIBackendAPI:
             headers.update(extra)
         return headers
 
+    def _request_with_retries(
+            self,
+            method: str,
+            url_or_path: str,
+            context: str,
+            *,
+            attempts: int = DEFAULT_UPSTREAM_RETRY_ATTEMPTS,
+            **kwargs: Any,
+    ) -> requests.Response:
+        """对上游短暂 5xx/429 和网络抖动做有限重试。"""
+        url = url_or_path if url_or_path.startswith(("http://", "https://")) else self.base_url + url_or_path
+        attempts = max(1, int(attempts or 1))
+        last_exc: BaseException | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = getattr(self.session, method)(url, **kwargs)
+                ensure_ok(response, context)
+                return response
+            except Exception as exc:
+                last_exc = exc
+                if not is_retriable_upstream_error(exc) or attempt >= attempts:
+                    raise
+                retry_after = exc.retry_after if isinstance(exc, UpstreamHTTPError) else None
+                delay = self._retry_delay(attempt, retry_after)
+                logger.warning({
+                    "event": "upstream_request_retry",
+                    "context": context,
+                    "method": method.upper(),
+                    "attempt": attempt,
+                    "max_attempts": attempts,
+                    "sleep_secs": round(delay, 2),
+                    "status_code": getattr(exc, "status_code", None),
+                    "error": str(exc),
+                })
+                if delay > 0:
+                    time.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"{context} failed")
+
+    @staticmethod
+    def _retry_delay(attempt: int, retry_after: int | None = None) -> float:
+        if retry_after is not None:
+            return min(max(0, retry_after), DEFAULT_UPSTREAM_RETRY_MAX_DELAY_SECS)
+        delay = DEFAULT_UPSTREAM_RETRY_BASE_DELAY_SECS * (2 ** max(0, attempt - 1))
+        return min(delay, DEFAULT_UPSTREAM_RETRY_MAX_DELAY_SECS) + random.uniform(0, 0.25)
+
     @staticmethod
     def _extract_quota_and_restore_at(limits_progress: list[Any]) -> tuple[int, str | None, bool]:
         for item in limits_progress:
@@ -154,40 +204,50 @@ class OpenAIBackendAPI:
 
     def _get_me(self) -> Dict[str, Any]:
         path = "/backend-api/me"
-        response = self.session.get(self.base_url + path, headers=self._headers(path), timeout=20)
-        if response.status_code != 200:
-            if response.status_code == 401:
-                raise InvalidAccessTokenError(f"{path} failed: HTTP {response.status_code}")
-            raise RuntimeError(f"{path} failed: HTTP {response.status_code}")
+        try:
+            response = self._request_with_retries("get", path, path, headers=self._headers(path), timeout=20)
+        except UpstreamHTTPError as exc:
+            if exc.status_code == 401:
+                raise InvalidAccessTokenError(f"{path} failed: HTTP {exc.status_code}") from exc
+            raise
         return response.json()
 
     def _get_conversation_init(self) -> Dict[str, Any]:
         path = "/backend-api/conversation/init"
-        response = self.session.post(
-            self.base_url + path,
-            headers=self._headers(path, {"Content-Type": "application/json"}),
-            json={
-                "gizmo_id": None,
-                "requested_default_model": None,
-                "conversation_id": None,
-                "timezone_offset_min": -480,
-            },
-            timeout=20,
-        )
-        if response.status_code != 200:
-            if response.status_code == 401:
-                raise InvalidAccessTokenError(f"{path} failed: HTTP {response.status_code}")
-            raise RuntimeError(f"{path} failed: HTTP {response.status_code}")
+        try:
+            response = self._request_with_retries(
+                "post",
+                path,
+                path,
+                headers=self._headers(path, {"Content-Type": "application/json"}),
+                json={
+                    "gizmo_id": None,
+                    "requested_default_model": None,
+                    "conversation_id": None,
+                    "timezone_offset_min": -480,
+                },
+                timeout=20,
+            )
+        except UpstreamHTTPError as exc:
+            if exc.status_code == 401:
+                raise InvalidAccessTokenError(f"{path} failed: HTTP {exc.status_code}") from exc
+            raise
         return response.json()
 
     def _get_default_account(self) -> Dict[str, Any]:
         route = "/backend-api/accounts/check/v4-2023-04-27"
-        response = self.session.get(self.base_url + route + "?timezone_offset_min=-480", headers=self._headers(route),
-                                    timeout=20)
-        if response.status_code != 200:
-            if response.status_code == 401:
-                raise InvalidAccessTokenError(f"{route} failed: HTTP {response.status_code}")
-            raise RuntimeError(f"/backend-api/accounts/check failed: HTTP {response.status_code}")
+        try:
+            response = self._request_with_retries(
+                "get",
+                route + "?timezone_offset_min=-480",
+                "/backend-api/accounts/check",
+                headers=self._headers(route),
+                timeout=20,
+            )
+        except UpstreamHTTPError as exc:
+            if exc.status_code == 401:
+                raise InvalidAccessTokenError(f"{route} failed: HTTP {exc.status_code}") from exc
+            raise
         payload = response.json()
         logger.debug({"event": "backend_user_info_account_payload", "account_payload": payload})
         return ((payload.get("accounts") or {}).get("default") or {}).get("account") or {}
@@ -446,13 +506,14 @@ class OpenAIBackendAPI:
             "supported_encodings": ["v1"],
             "client_contextual_info": {"app_name": "chatgpt.com"},
         }
-        response = self.session.post(
-            self.base_url + path,
+        response = self._request_with_retries(
+            "post",
+            path,
+            path,
             headers=self._image_headers(path, requirements),
             json=payload,
             timeout=60,
         )
-        ensure_ok(response, path)
         return response.json().get("conduit_token", "")
 
     def _decode_image_base64(self, image: str) -> bytes:
@@ -487,18 +548,21 @@ class OpenAIBackendAPI:
         width, height = image.size
         mime_type = Image.MIME.get(image.format, "image/png")
         path = "/backend-api/files"
-        response = self.session.post(
-            self.base_url + path,
+        response = self._request_with_retries(
+            "post",
+            path,
+            path,
             headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
             json={"file_name": file_name, "file_size": len(data), "use_case": "multimodal", "width": width,
                   "height": height},
             timeout=60,
         )
-        ensure_ok(response, path)
         upload_meta = response.json()
         time.sleep(0.5)
-        response = self.session.put(
+        response = self._request_with_retries(
+            "put",
             upload_meta["upload_url"],
+            "image_upload",
             headers={
                 "Content-Type": mime_type,
                 "x-ms-blob-type": "BlockBlob",
@@ -512,15 +576,15 @@ class OpenAIBackendAPI:
             data=data,
             timeout=120,
         )
-        ensure_ok(response, "image_upload")
         path = f"/backend-api/files/{upload_meta['file_id']}/uploaded"
-        response = self.session.post(
-            self.base_url + path,
+        response = self._request_with_retries(
+            "post",
+            path,
+            path,
             headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
             data="{}",
             timeout=60,
         )
-        ensure_ok(response, path)
         return {
             "file_id": upload_meta["file_id"],
             "file_name": file_name,
@@ -593,22 +657,27 @@ class OpenAIBackendAPI:
             "force_parallel_switch": "auto",
         }
         path = "/backend-api/f/conversation"
-        response = self.session.post(
-            self.base_url + path,
+        response = self._request_with_retries(
+            "post",
+            path,
+            path,
             headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
             json=payload,
             timeout=300,
             stream=True,
         )
-        ensure_ok(response, path)
         return response
 
     def _get_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """获取完整 conversation 详情。"""
         path = f"/backend-api/conversation/{conversation_id}"
-        response = self.session.get(self.base_url + path, headers=self._headers(path, {"Accept": "application/json"}),
-                                    timeout=60)
-        ensure_ok(response, path)
+        response = self._request_with_retries(
+            "get",
+            path,
+            path,
+            headers=self._headers(path, {"Accept": "application/json"}),
+            timeout=60,
+        )
         return response.json()
 
     def _extract_image_tool_records(self, data: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -754,18 +823,26 @@ class OpenAIBackendAPI:
     def _get_file_download_url(self, file_id: str) -> str:
         """获取文件下载地址。"""
         path = f"/backend-api/files/{file_id}/download"
-        response = self.session.get(self.base_url + path, headers=self._headers(path, {"Accept": "application/json"}),
-                                    timeout=60)
-        ensure_ok(response, path)
+        response = self._request_with_retries(
+            "get",
+            path,
+            path,
+            headers=self._headers(path, {"Accept": "application/json"}),
+            timeout=60,
+        )
         data = response.json()
         return data.get("download_url") or data.get("url") or ""
 
     def _get_attachment_download_url(self, conversation_id: str, attachment_id: str) -> str:
         """通过 conversation 附件接口获取下载地址。"""
         path = f"/backend-api/conversation/{conversation_id}/attachment/{attachment_id}/download"
-        response = self.session.get(self.base_url + path, headers=self._headers(path, {"Accept": "application/json"}),
-                                    timeout=60)
-        ensure_ok(response, path)
+        response = self._request_with_retries(
+            "get",
+            path,
+            path,
+            headers=self._headers(path, {"Accept": "application/json"}),
+            timeout=60,
+        )
         data = response.json()
         return data.get("download_url") or data.get("url") or ""
 
@@ -861,8 +938,7 @@ class OpenAIBackendAPI:
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
         images = []
         for url in urls:
-            response = self.session.get(url, timeout=120)
-            ensure_ok(response, "image_download")
+            response = self._request_with_retries("get", url, "image_download", timeout=120)
             images.append(response.content)
         return images
 
@@ -884,14 +960,15 @@ class OpenAIBackendAPI:
         requirements = self._get_chat_requirements()
         path, timezone = self._chat_target()
         payload = self._conversation_payload(normalized, model, timezone)
-        response = self.session.post(
-            self.base_url + path,
+        response = self._request_with_retries(
+            "post",
+            path,
+            path,
             headers=self._conversation_headers(path, requirements),
             json=payload,
             timeout=300,
             stream=True,
         )
-        ensure_ok(response, path)
         try:
             yield from iter_sse_payloads(response)
         finally:
@@ -917,12 +994,13 @@ class OpenAIBackendAPI:
 
     def _bootstrap(self) -> None:
         """预热首页，并提取 PoW 相关脚本引用。"""
-        response = self.session.get(
-            self.base_url + "/",
+        response = self._request_with_retries(
+            "get",
+            "/",
+            "bootstrap",
             headers=self._bootstrap_headers(),
             timeout=30,
         )
-        ensure_ok(response, "bootstrap")
         self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
         if not self.pow_script_sources:
             self.pow_script_sources = [DEFAULT_POW_SCRIPT]
@@ -932,13 +1010,14 @@ class OpenAIBackendAPI:
         path = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
         context = "auth_chat_requirements" if self.access_token else "noauth_chat_requirements"
         body = {"p": build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)}
-        response = self.session.post(
-            self.base_url + path,
+        response = self._request_with_retries(
+            "post",
+            path,
+            context,
             headers=self._headers(path, {"Content-Type": "application/json"}),
             json=body,
             timeout=30,
         )
-        ensure_ok(response, context)
         requirements = self._build_requirements(response.json(), "" if self.access_token else body["p"])
         if not requirements.token:
             message = "missing auth chat requirements token" if self.access_token else "missing chat requirements token"
@@ -958,12 +1037,13 @@ class OpenAIBackendAPI:
         )
         route = "/backend-api/models" if self.access_token else "/backend-anon/models"
         context = "auth_models" if self.access_token else "anon_models"
-        response = self.session.get(
-            self.base_url + path,
+        response = self._request_with_retries(
+            "get",
+            path,
+            context,
             headers=self._headers(route),
             timeout=30,
         )
-        ensure_ok(response, context)
         data = []
         seen = set()
         for item in response.json().get("models", []):

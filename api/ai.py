@@ -16,6 +16,7 @@ from services.protocol import (
     openai_v1_models,
     openai_v1_response,
 )
+from utils.helper import public_error_message
 
 
 class ImageGenerationRequest(BaseModel):
@@ -72,7 +73,7 @@ def create_router() -> APIRouter:
         try:
             return await run_in_threadpool(openai_v1_models.list_models)
         except Exception as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            raise HTTPException(status_code=502, detail={"error": public_error_message(exc)}) from exc
 
     @router.post("/v1/images/generations")
     async def generate_images(

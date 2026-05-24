@@ -12,7 +12,7 @@ from services.log_service import (
     log_service,
 )
 from services.storage.base import StorageBackend
-from utils.helper import anonymize_token
+from utils.helper import anonymize_token, is_retriable_upstream_error
 
 
 class AccountService:
@@ -141,14 +141,22 @@ class AccountService:
                 self._image_inflight[access_token] = current_inflight - 1
             self._image_slot_condition.notify_all()
 
-    def get_available_access_token(self) -> str:
-        attempted_tokens: set[str] = set()
+    def get_available_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+        attempted_tokens: set[str] = set(excluded_tokens or set())
+        last_retriable_error: Exception | None = None
         while True:
-            access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens)
+            try:
+                access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens)
+            except RuntimeError:
+                if last_retriable_error is not None:
+                    raise last_retriable_error
+                raise
             attempted_tokens.add(access_token)
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
-            except Exception:
+            except Exception as exc:
+                if is_retriable_upstream_error(exc):
+                    last_retriable_error = exc
                 self.release_image_slot(access_token)
                 continue
             if self._is_image_account_available(account or {}):

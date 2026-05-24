@@ -13,6 +13,8 @@ from utils.log import logger
 
 IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+CHANNEL_BUSY_MESSAGE = "当前渠道拥堵请稍后再试"
+RETRYABLE_UPSTREAM_STATUS_CODES = {429, 500, 502, 503, 504}
 
 SUPPORTED_JSON_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
 MAX_JSON_IMAGE_BYTES = 10 * 1024 * 1024
@@ -154,6 +156,18 @@ def ensure_ok(response: requests.Response, context: str) -> None:
     raise UpstreamHTTPError(context, response.status_code, body, retry_after=retry_after)
 
 
+def is_retriable_upstream_error(exc: BaseException) -> bool:
+    if isinstance(exc, UpstreamHTTPError):
+        return exc.status_code in RETRYABLE_UPSTREAM_STATUS_CODES
+    return isinstance(exc, requests.exceptions.RequestException)
+
+
+def public_error_message(exc: BaseException) -> str:
+    if is_retriable_upstream_error(exc):
+        return CHANNEL_BUSY_MESSAGE
+    return str(exc) or "request failed"
+
+
 def sse_json_stream(items) -> Iterator[str]:
     yield ": stream-open\n\n"
     try:
@@ -166,7 +180,7 @@ def sse_json_stream(items) -> Iterator[str]:
             "error": str(exc),
         })
         error = exc.to_openai_error() if hasattr(exc, "to_openai_error") else {
-            "error": {"message": str(exc), "type": exc.__class__.__name__}
+            "error": {"message": public_error_message(exc), "type": exc.__class__.__name__}
         }
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
@@ -184,7 +198,7 @@ def anthropic_sse_stream(items) -> Iterator[str]:
             "error_type": exc.__class__.__name__,
             "error": str(exc),
         })
-        error = {"type": "error", "error": {"type": exc.__class__.__name__, "message": str(exc)}}
+        error = {"type": "error", "error": {"type": exc.__class__.__name__, "message": public_error_message(exc)}}
         yield "event: error\n"
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
