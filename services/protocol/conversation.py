@@ -49,6 +49,13 @@ class ImageGenerationError(Exception):
         }
 
 
+MAX_INITIAL_TRANSIENT_TEXT_ACCOUNT_ATTEMPTS = 2
+MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS = 3
+TRANSIENT_TEXT_RESCUE_WINDOW_SECS = 12.0
+TRANSIENT_IMAGE_RESCUE_WINDOW_SECS = 20.0
+TRANSIENT_RESCUE_SLEEP_SECS = 2.0
+
+
 def is_token_invalid_error(message: str) -> bool:
     text = str(message or "").lower()
     return (
@@ -69,6 +76,15 @@ def image_stream_error_message(message: str) -> str:
     if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:
         return CHANNEL_BUSY_MESSAGE
     return text or "image generation failed"
+
+
+def transient_rescue_wait(deadline: float, attempt: int) -> bool:
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        return False
+    if attempt > 0:
+        time.sleep(min(TRANSIENT_RESCUE_SLEEP_SECS, remaining))
+    return time.time() < deadline
 
 
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
@@ -511,16 +527,34 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
     token = getattr(backend, "access_token", "")
     attempted_anon = False
     last_transient_error = False
+    transient_attempts = 0
+    rescue_deadline = 0.0
+    rescue_attempts = 0
     emitted = False
     while True:
-        if token and token in attempted_tokens:
-            raise RuntimeError(CHANNEL_BUSY_MESSAGE if last_transient_error else "no available text account")
-        if token:
-            attempted_tokens.add(token)
-        elif attempted_anon:
-            raise RuntimeError(CHANNEL_BUSY_MESSAGE if last_transient_error else "no available text account")
+        in_rescue = rescue_deadline > 0
+        if in_rescue:
+            if not transient_rescue_wait(rescue_deadline, rescue_attempts):
+                raise RuntimeError(CHANNEL_BUSY_MESSAGE)
+            rescue_attempts += 1
+            token = account_service.get_text_access_token()
+            if not token:
+                raise RuntimeError(CHANNEL_BUSY_MESSAGE)
         else:
-            attempted_anon = True
+            if token and token in attempted_tokens:
+                if last_transient_error:
+                    rescue_deadline = time.time() + TRANSIENT_TEXT_RESCUE_WINDOW_SECS
+                    continue
+                raise RuntimeError("no available text account")
+            if token:
+                attempted_tokens.add(token)
+            elif attempted_anon:
+                if last_transient_error:
+                    rescue_deadline = time.time() + TRANSIENT_TEXT_RESCUE_WINDOW_SECS
+                    continue
+                raise RuntimeError("no available text account")
+            else:
+                attempted_anon = True
         try:
             active_backend = OpenAIBackendAPI(access_token=token)
             for event in conversation_events(active_backend, messages=request.messages, model=request.model, prompt=request.prompt):
@@ -541,12 +575,20 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                     continue
             if is_retriable_upstream_error(exc):
                 last_transient_error = True
+                transient_attempts += 1
                 logger.warning({
                     "event": "text_stream_transient_fail",
                     "request_token": token,
                     "emitted": emitted,
+                    "transient_attempts": transient_attempts,
+                    "rescue": in_rescue,
                     "error": error_message,
                 })
+                if in_rescue:
+                    continue
+                if transient_attempts >= MAX_INITIAL_TRANSIENT_TEXT_ACCOUNT_ATTEMPTS:
+                    rescue_deadline = time.time() + TRANSIENT_TEXT_RESCUE_WINDOW_SECS
+                    continue
                 if token and not emitted:
                     token = account_service.get_text_access_token(attempted_tokens)
                     if token:
@@ -645,14 +687,26 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     last_transient_error = False
     for index in range(1, request.n + 1):
         attempted_tokens: set[str] = set()
+        transient_attempts = 0
+        rescue_deadline = 0.0
+        rescue_attempts = 0
         while True:
+            in_rescue = rescue_deadline > 0
+            if in_rescue and not transient_rescue_wait(rescue_deadline, rescue_attempts):
+                raise ImageGenerationError(CHANNEL_BUSY_MESSAGE)
+            if in_rescue:
+                rescue_attempts += 1
             try:
-                token = account_service.get_available_access_token(attempted_tokens)
-                attempted_tokens.add(token)
+                token = account_service.get_available_access_token(set() if in_rescue else attempted_tokens)
+                if not in_rescue:
+                    attempted_tokens.add(token)
             except RuntimeError as exc:
                 if emitted:
                     return
                 if last_transient_error or is_retriable_upstream_error(exc):
+                    if not in_rescue:
+                        rescue_deadline = time.time() + TRANSIENT_IMAGE_RESCUE_WINDOW_SECS
+                        continue
                     raise ImageGenerationError(CHANNEL_BUSY_MESSAGE) from exc
                 raise ImageGenerationError(str(exc) or "image generation failed") from exc
 
@@ -689,16 +743,25 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 transient = is_retriable_upstream_error(exc)
                 last_error = public_error_message(exc) if transient else str(exc)
                 last_transient_error = last_transient_error or transient
+                if transient:
+                    transient_attempts += 1
                 logger.warning({
                     "event": "image_stream_fail",
                     "request_token": token,
                     "error": str(exc),
                     "transient": transient,
+                    "transient_attempts": transient_attempts,
+                    "rescue": in_rescue,
                 })
                 if not emitted_for_token and is_token_invalid_error(last_error):
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
                 if not emitted_for_token and transient:
+                    if in_rescue:
+                        continue
+                    if transient_attempts >= MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS:
+                        rescue_deadline = time.time() + TRANSIENT_IMAGE_RESCUE_WINDOW_SECS
+                        continue
                     continue
                 if transient:
                     raise ImageGenerationError(CHANNEL_BUSY_MESSAGE) from exc

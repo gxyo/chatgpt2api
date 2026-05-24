@@ -12,7 +12,7 @@ from services.log_service import (
     log_service,
 )
 from services.storage.base import StorageBackend
-from utils.helper import anonymize_token, is_retriable_upstream_error
+from utils.helper import anonymize_token
 
 
 class AccountService:
@@ -142,26 +142,13 @@ class AccountService:
             self._image_slot_condition.notify_all()
 
     def get_available_access_token(self, excluded_tokens: set[str] | None = None) -> str:
-        attempted_tokens: set[str] = set(excluded_tokens or set())
-        last_retriable_error: Exception | None = None
-        while True:
-            try:
-                access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens)
-            except RuntimeError:
-                if last_retriable_error is not None:
-                    raise last_retriable_error
-                raise
-            attempted_tokens.add(access_token)
-            try:
-                account = self.fetch_remote_info(access_token, "get_available_access_token")
-            except Exception as exc:
-                if is_retriable_upstream_error(exc):
-                    last_retriable_error = exc
-                self.release_image_slot(access_token)
-                continue
-            if self._is_image_account_available(account or {}):
-                return access_token
-            self.release_image_slot(access_token)
+        """Return a cached-ready image account without remote probing.
+
+        Remote account refresh is intentionally kept out of the hot request path:
+        a transient upstream outage during quota probing should not make users wait
+        before the real generation attempt even starts.
+        """
+        return self._acquire_next_candidate_token(excluded_tokens=set(excluded_tokens or set()))
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
         excluded = set(excluded_tokens or set())

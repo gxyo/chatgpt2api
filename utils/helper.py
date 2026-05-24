@@ -13,7 +13,7 @@ from utils.log import logger
 
 IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
-CHANNEL_BUSY_MESSAGE = "当前渠道拥堵请稍后再试"
+CHANNEL_BUSY_MESSAGE = "当前渠道拥堵，请稍后再试"
 RETRYABLE_UPSTREAM_STATUS_CODES = {429, 500, 502, 503, 504}
 
 SUPPORTED_JSON_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}

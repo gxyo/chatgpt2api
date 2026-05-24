@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from services.openai_backend_api import OpenAIBackendAPI
+from services.openai_backend_api import FAST_UPSTREAM_RETRY_ATTEMPTS, FAST_UPSTREAM_TIMEOUT_SECS, OpenAIBackendAPI
 from services.protocol import conversation
 from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput
 from utils.helper import CHANNEL_BUSY_MESSAGE, UpstreamHTTPError
@@ -25,11 +25,11 @@ class FakeResponse:
 class FakeSession:
     def __init__(self, responses: list[FakeResponse]):
         self.responses = list(responses)
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, dict]] = []
         self.headers: dict[str, str] = {}
 
     def post(self, url: str, **kwargs):
-        self.calls.append(("post", url))
+        self.calls.append(("post", url, kwargs))
         return self.responses.pop(0)
 
 
@@ -38,11 +38,13 @@ class FakeAccountService:
         self.tokens = tokens
         self.image_results: list[tuple[str, bool]] = []
         self.text_used: list[str] = []
+        self.selected_image_tokens: list[str] = []
 
     def get_available_access_token(self, excluded_tokens=None):
         excluded = set(excluded_tokens or set())
         for token in self.tokens:
             if token not in excluded:
+                self.selected_image_tokens.append(token)
                 return token
         raise RuntimeError("no available image quota")
 
@@ -76,6 +78,21 @@ class UpstreamRetryTests(unittest.TestCase):
 
         self.assertEqual(requirements.token, "sentinel-token")
         self.assertEqual(len(api.session.calls), 2)
+        self.assertTrue(all(call[2].get("timeout") == FAST_UPSTREAM_TIMEOUT_SECS for call in api.session.calls))
+
+    def test_chat_requirements_uses_fast_attempt_limit(self):
+        api = OpenAIBackendAPI()
+        api.session = FakeSession([
+            FakeResponse(503, text=""),
+            FakeResponse(503, text=""),
+            FakeResponse(200, {"token": "sentinel-token"}),
+        ])
+
+        with mock.patch("services.openai_backend_api.time.sleep", lambda _: None):
+            with self.assertRaises(UpstreamHTTPError):
+                api._get_chat_requirements()
+
+        self.assertEqual(len(api.session.calls), FAST_UPSTREAM_RETRY_ATTEMPTS)
 
     def test_image_pool_switches_account_on_transient_503(self):
         fake_accounts = FakeAccountService(["token-a", "token-b"])
@@ -103,7 +120,8 @@ class UpstreamRetryTests(unittest.TestCase):
             yield
 
         with mock.patch.object(conversation, "account_service", fake_accounts), \
-             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs):
+             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs), \
+             mock.patch.object(conversation, "TRANSIENT_IMAGE_RESCUE_WINDOW_SECS", 0):
             with self.assertRaises(ImageGenerationError) as ctx:
                 list(conversation.stream_image_outputs_with_pool(ConversationRequest(
                     model="gpt-image-2",
@@ -112,6 +130,50 @@ class UpstreamRetryTests(unittest.TestCase):
 
         self.assertEqual(str(ctx.exception), CHANNEL_BUSY_MESSAGE)
 
+    def test_image_pool_enters_rescue_after_initial_probe_limit(self):
+        fake_accounts = FakeAccountService(["token-a", "token-b", "token-c"])
+
+        def fake_stream_image_outputs(backend, request, index=1, total=1):
+            raise UpstreamHTTPError("auth_chat_requirements", 503, "")
+            yield
+
+        with mock.patch.object(conversation, "account_service", fake_accounts), \
+             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs), \
+             mock.patch.object(conversation, "TRANSIENT_IMAGE_RESCUE_WINDOW_SECS", 0):
+            with self.assertRaises(ImageGenerationError) as ctx:
+                list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                    model="gpt-image-2",
+                    prompt="test",
+                )))
+
+        self.assertEqual(str(ctx.exception), CHANNEL_BUSY_MESSAGE)
+        self.assertEqual(fake_accounts.image_results, [("token-a", False), ("token-b", False), ("token-c", False)])
+
+    def test_image_pool_rescue_window_can_recover_after_initial_failures(self):
+        fake_accounts = FakeAccountService(["token-a", "token-b", "token-c"])
+        calls = 0
+
+        def fake_stream_image_outputs(backend, request, index=1, total=1):
+            nonlocal calls
+            calls += 1
+            if calls <= 3:
+                raise UpstreamHTTPError("auth_chat_requirements", 503, "")
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        with mock.patch.object(conversation, "account_service", fake_accounts), \
+             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs), \
+             mock.patch.object(conversation, "time") as fake_time:
+            fake_time.time.return_value = 1000.0
+            fake_time.sleep.side_effect = lambda _: None
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="test",
+            )))
+
+        self.assertEqual(outputs[0].kind, "result")
+        self.assertEqual(calls, 4)
+        self.assertEqual(fake_accounts.image_results[-1], ("token-a", True))
+
     def test_image_pool_sanitizes_transient_account_lookup_failure(self):
         fake_accounts = SimpleNamespace(
             get_available_access_token=lambda excluded_tokens=None: (_ for _ in ()).throw(
@@ -119,7 +181,8 @@ class UpstreamRetryTests(unittest.TestCase):
             )
         )
 
-        with mock.patch.object(conversation, "account_service", fake_accounts):
+        with mock.patch.object(conversation, "account_service", fake_accounts), \
+             mock.patch.object(conversation, "TRANSIENT_IMAGE_RESCUE_WINDOW_SECS", 0):
             with self.assertRaises(ImageGenerationError) as ctx:
                 list(conversation.stream_image_outputs_with_pool(ConversationRequest(
                     model="gpt-image-2",

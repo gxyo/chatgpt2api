@@ -46,6 +46,12 @@ CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 DEFAULT_UPSTREAM_RETRY_ATTEMPTS = 3
 DEFAULT_UPSTREAM_RETRY_BASE_DELAY_SECS = 0.5
 DEFAULT_UPSTREAM_RETRY_MAX_DELAY_SECS = 6.0
+FAST_UPSTREAM_RETRY_ATTEMPTS = 2
+FAST_UPSTREAM_TIMEOUT_SECS = 4.0
+FAST_UPSTREAM_RETRY_MAX_DELAY_SECS = 1.0
+ACCOUNT_INFO_TIMEOUT_SECS = 5.0
+CONVERSATION_CONNECT_TIMEOUT_SECS = 30.0
+POLL_CONVERSATION_TIMEOUT_SECS = 8.0
 
 
 class OpenAIBackendAPI:
@@ -155,6 +161,8 @@ class OpenAIBackendAPI:
             context: str,
             *,
             attempts: int = DEFAULT_UPSTREAM_RETRY_ATTEMPTS,
+            retry_base_delay: float = DEFAULT_UPSTREAM_RETRY_BASE_DELAY_SECS,
+            retry_max_delay: float = DEFAULT_UPSTREAM_RETRY_MAX_DELAY_SECS,
             **kwargs: Any,
     ) -> requests.Response:
         """对上游短暂 5xx/429 和网络抖动做有限重试。"""
@@ -171,7 +179,7 @@ class OpenAIBackendAPI:
                 if not is_retriable_upstream_error(exc) or attempt >= attempts:
                     raise
                 retry_after = exc.retry_after if isinstance(exc, UpstreamHTTPError) else None
-                delay = self._retry_delay(attempt, retry_after)
+                delay = self._retry_delay(attempt, retry_after, retry_base_delay, retry_max_delay)
                 logger.warning({
                     "event": "upstream_request_retry",
                     "context": context,
@@ -189,11 +197,36 @@ class OpenAIBackendAPI:
         raise RuntimeError(f"{context} failed")
 
     @staticmethod
-    def _retry_delay(attempt: int, retry_after: int | None = None) -> float:
+    def _retry_delay(
+            attempt: int,
+            retry_after: int | None = None,
+            base_delay: float = DEFAULT_UPSTREAM_RETRY_BASE_DELAY_SECS,
+            max_delay: float = DEFAULT_UPSTREAM_RETRY_MAX_DELAY_SECS,
+    ) -> float:
         if retry_after is not None:
-            return min(max(0, retry_after), DEFAULT_UPSTREAM_RETRY_MAX_DELAY_SECS)
-        delay = DEFAULT_UPSTREAM_RETRY_BASE_DELAY_SECS * (2 ** max(0, attempt - 1))
-        return min(delay, DEFAULT_UPSTREAM_RETRY_MAX_DELAY_SECS) + random.uniform(0, 0.25)
+            return min(max(0, retry_after), max_delay)
+        delay = base_delay * (2 ** max(0, attempt - 1))
+        return min(delay, max_delay) + random.uniform(0, min(0.25, max_delay * 0.25))
+
+    def _fast_request(
+            self,
+            method: str,
+            url_or_path: str,
+            context: str,
+            *,
+            attempts: int = FAST_UPSTREAM_RETRY_ATTEMPTS,
+            timeout: float = FAST_UPSTREAM_TIMEOUT_SECS,
+            **kwargs: Any,
+    ) -> requests.Response:
+        kwargs.setdefault("timeout", timeout)
+        return self._request_with_retries(
+            method,
+            url_or_path,
+            context,
+            attempts=attempts,
+            retry_max_delay=FAST_UPSTREAM_RETRY_MAX_DELAY_SECS,
+            **kwargs,
+        )
 
     @staticmethod
     def _extract_quota_and_restore_at(limits_progress: list[Any]) -> tuple[int, str | None, bool]:
@@ -205,7 +238,14 @@ class OpenAIBackendAPI:
     def _get_me(self) -> Dict[str, Any]:
         path = "/backend-api/me"
         try:
-            response = self._request_with_retries("get", path, path, headers=self._headers(path), timeout=20)
+            response = self._fast_request(
+                "get",
+                path,
+                path,
+                attempts=1,
+                timeout=ACCOUNT_INFO_TIMEOUT_SECS,
+                headers=self._headers(path),
+            )
         except UpstreamHTTPError as exc:
             if exc.status_code == 401:
                 raise InvalidAccessTokenError(f"{path} failed: HTTP {exc.status_code}") from exc
@@ -215,10 +255,12 @@ class OpenAIBackendAPI:
     def _get_conversation_init(self) -> Dict[str, Any]:
         path = "/backend-api/conversation/init"
         try:
-            response = self._request_with_retries(
+            response = self._fast_request(
                 "post",
                 path,
                 path,
+                attempts=1,
+                timeout=ACCOUNT_INFO_TIMEOUT_SECS,
                 headers=self._headers(path, {"Content-Type": "application/json"}),
                 json={
                     "gizmo_id": None,
@@ -226,7 +268,6 @@ class OpenAIBackendAPI:
                     "conversation_id": None,
                     "timezone_offset_min": -480,
                 },
-                timeout=20,
             )
         except UpstreamHTTPError as exc:
             if exc.status_code == 401:
@@ -237,12 +278,13 @@ class OpenAIBackendAPI:
     def _get_default_account(self) -> Dict[str, Any]:
         route = "/backend-api/accounts/check/v4-2023-04-27"
         try:
-            response = self._request_with_retries(
+            response = self._fast_request(
                 "get",
                 route + "?timezone_offset_min=-480",
                 "/backend-api/accounts/check",
+                attempts=1,
+                timeout=ACCOUNT_INFO_TIMEOUT_SECS,
                 headers=self._headers(route),
-                timeout=20,
             )
         except UpstreamHTTPError as exc:
             if exc.status_code == 401:
@@ -506,13 +548,13 @@ class OpenAIBackendAPI:
             "supported_encodings": ["v1"],
             "client_contextual_info": {"app_name": "chatgpt.com"},
         }
-        response = self._request_with_retries(
+        response = self._fast_request(
             "post",
             path,
             path,
+            timeout=8.0,
             headers=self._image_headers(path, requirements),
             json=payload,
-            timeout=60,
         )
         return response.json().get("conduit_token", "")
 
@@ -548,14 +590,14 @@ class OpenAIBackendAPI:
         width, height = image.size
         mime_type = Image.MIME.get(image.format, "image/png")
         path = "/backend-api/files"
-        response = self._request_with_retries(
+        response = self._fast_request(
             "post",
             path,
             path,
+            timeout=10.0,
             headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
             json={"file_name": file_name, "file_size": len(data), "use_case": "multimodal", "width": width,
                   "height": height},
-            timeout=60,
         )
         upload_meta = response.json()
         time.sleep(0.5)
@@ -563,6 +605,7 @@ class OpenAIBackendAPI:
             "put",
             upload_meta["upload_url"],
             "image_upload",
+            attempts=1,
             headers={
                 "Content-Type": mime_type,
                 "x-ms-blob-type": "BlockBlob",
@@ -577,13 +620,13 @@ class OpenAIBackendAPI:
             timeout=120,
         )
         path = f"/backend-api/files/{upload_meta['file_id']}/uploaded"
-        response = self._request_with_retries(
+        response = self._fast_request(
             "post",
             path,
             path,
+            timeout=10.0,
             headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
             data="{}",
-            timeout=60,
         )
         return {
             "file_id": upload_meta["file_id"],
@@ -657,13 +700,13 @@ class OpenAIBackendAPI:
             "force_parallel_switch": "auto",
         }
         path = "/backend-api/f/conversation"
-        response = self._request_with_retries(
+        response = self._fast_request(
             "post",
             path,
             path,
+            timeout=CONVERSATION_CONNECT_TIMEOUT_SECS,
             headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
             json=payload,
-            timeout=300,
             stream=True,
         )
         return response
@@ -675,8 +718,9 @@ class OpenAIBackendAPI:
             "get",
             path,
             path,
+            attempts=1,
             headers=self._headers(path, {"Accept": "application/json"}),
-            timeout=60,
+            timeout=POLL_CONVERSATION_TIMEOUT_SECS,
         )
         return response.json()
 
@@ -823,12 +867,12 @@ class OpenAIBackendAPI:
     def _get_file_download_url(self, file_id: str) -> str:
         """获取文件下载地址。"""
         path = f"/backend-api/files/{file_id}/download"
-        response = self._request_with_retries(
+        response = self._fast_request(
             "get",
             path,
             path,
+            timeout=15.0,
             headers=self._headers(path, {"Accept": "application/json"}),
-            timeout=60,
         )
         data = response.json()
         return data.get("download_url") or data.get("url") or ""
@@ -836,12 +880,12 @@ class OpenAIBackendAPI:
     def _get_attachment_download_url(self, conversation_id: str, attachment_id: str) -> str:
         """通过 conversation 附件接口获取下载地址。"""
         path = f"/backend-api/conversation/{conversation_id}/attachment/{attachment_id}/download"
-        response = self._request_with_retries(
+        response = self._fast_request(
             "get",
             path,
             path,
+            timeout=15.0,
             headers=self._headers(path, {"Accept": "application/json"}),
-            timeout=60,
         )
         data = response.json()
         return data.get("download_url") or data.get("url") or ""
@@ -938,7 +982,7 @@ class OpenAIBackendAPI:
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
         images = []
         for url in urls:
-            response = self._request_with_retries("get", url, "image_download", timeout=120)
+            response = self._request_with_retries("get", url, "image_download", attempts=2, timeout=60)
             images.append(response.content)
         return images
 
@@ -960,13 +1004,13 @@ class OpenAIBackendAPI:
         requirements = self._get_chat_requirements()
         path, timezone = self._chat_target()
         payload = self._conversation_payload(normalized, model, timezone)
-        response = self._request_with_retries(
+        response = self._fast_request(
             "post",
             path,
             path,
+            timeout=CONVERSATION_CONNECT_TIMEOUT_SECS,
             headers=self._conversation_headers(path, requirements),
             json=payload,
-            timeout=300,
             stream=True,
         )
         try:
@@ -994,12 +1038,11 @@ class OpenAIBackendAPI:
 
     def _bootstrap(self) -> None:
         """预热首页，并提取 PoW 相关脚本引用。"""
-        response = self._request_with_retries(
+        response = self._fast_request(
             "get",
             "/",
             "bootstrap",
             headers=self._bootstrap_headers(),
-            timeout=30,
         )
         self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
         if not self.pow_script_sources:
@@ -1010,13 +1053,12 @@ class OpenAIBackendAPI:
         path = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
         context = "auth_chat_requirements" if self.access_token else "noauth_chat_requirements"
         body = {"p": build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)}
-        response = self._request_with_retries(
+        response = self._fast_request(
             "post",
             path,
             context,
             headers=self._headers(path, {"Content-Type": "application/json"}),
             json=body,
-            timeout=30,
         )
         requirements = self._build_requirements(response.json(), "" if self.access_token else body["p"])
         if not requirements.token:
@@ -1037,12 +1079,11 @@ class OpenAIBackendAPI:
         )
         route = "/backend-api/models" if self.access_token else "/backend-anon/models"
         context = "auth_models" if self.access_token else "anon_models"
-        response = self._request_with_retries(
+        response = self._fast_request(
             "get",
             path,
             context,
             headers=self._headers(route),
-            timeout=30,
         )
         data = []
         seen = set()
