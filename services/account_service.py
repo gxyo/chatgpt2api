@@ -15,6 +15,8 @@ from services.log_service import (
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
+ACCOUNT_REFRESH_MAX_WORKERS = 6
+
 
 class AccountService:
     """账号池服务，使用 token -> account 的 dict 保存账号。"""
@@ -389,7 +391,7 @@ class AccountService:
 
         refreshed = 0
         errors = []
-        max_workers = min(10, len(access_tokens))
+        max_workers = min(ACCOUNT_REFRESH_MAX_WORKERS, len(access_tokens))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {

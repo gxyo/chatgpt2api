@@ -53,7 +53,8 @@ DEFAULT_UPSTREAM_RETRY_MAX_DELAY_SECS = 6.0
 FAST_UPSTREAM_RETRY_ATTEMPTS = 2
 FAST_UPSTREAM_TIMEOUT_SECS = 4.0
 FAST_UPSTREAM_RETRY_MAX_DELAY_SECS = 1.0
-ACCOUNT_INFO_TIMEOUT_SECS = 5.0
+ACCOUNT_INFO_TIMEOUT_SECS = 8.0
+ACCOUNT_INFO_RETRY_ATTEMPTS = 2
 CONVERSATION_CONNECT_TIMEOUT_SECS = 30.0
 POLL_CONVERSATION_TIMEOUT_SECS = 8.0
 
@@ -287,7 +288,7 @@ class OpenAIBackendAPI:
                 "get",
                 path,
                 path,
-                attempts=1,
+                attempts=ACCOUNT_INFO_RETRY_ATTEMPTS,
                 timeout=ACCOUNT_INFO_TIMEOUT_SECS,
                 headers=self._headers(path),
             )
@@ -304,7 +305,7 @@ class OpenAIBackendAPI:
                 "post",
                 path,
                 path,
-                attempts=1,
+                attempts=ACCOUNT_INFO_RETRY_ATTEMPTS,
                 timeout=ACCOUNT_INFO_TIMEOUT_SECS,
                 headers=self._headers(path, {"Content-Type": "application/json"}),
                 json={
@@ -327,7 +328,7 @@ class OpenAIBackendAPI:
                 "get",
                 route + "?timezone_offset_min=-480",
                 "/backend-api/accounts/check",
-                attempts=1,
+                attempts=ACCOUNT_INFO_RETRY_ATTEMPTS,
                 timeout=ACCOUNT_INFO_TIMEOUT_SECS,
                 headers=self._headers(route),
             )

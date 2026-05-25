@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from services.openai_backend_api import (
+    ACCOUNT_INFO_RETRY_ATTEMPTS,
+    ACCOUNT_INFO_TIMEOUT_SECS,
     FAST_UPSTREAM_RETRY_ATTEMPTS,
     FAST_UPSTREAM_TIMEOUT_SECS,
     ImagePollTimeoutError,
@@ -36,6 +38,10 @@ class FakeSession:
 
     def post(self, url: str, **kwargs):
         self.calls.append(("post", url, kwargs))
+        return self.responses.pop(0)
+
+    def get(self, url: str, **kwargs):
+        self.calls.append(("get", url, kwargs))
         return self.responses.pop(0)
 
 
@@ -99,6 +105,20 @@ class UpstreamRetryTests(unittest.TestCase):
                 api._get_chat_requirements()
 
         self.assertEqual(len(api.session.calls), FAST_UPSTREAM_RETRY_ATTEMPTS)
+
+    def test_account_info_retries_transient_failures_with_longer_timeout(self):
+        api = OpenAIBackendAPI("token-a")
+        api.session = FakeSession([
+            FakeResponse(503, text=""),
+            FakeResponse(200, {"email": "alice@example.com"}),
+        ])
+
+        with mock.patch("services.openai_backend_api.time.sleep", lambda _: None):
+            payload = api._get_me()
+
+        self.assertEqual(payload["email"], "alice@example.com")
+        self.assertEqual(len(api.session.calls), ACCOUNT_INFO_RETRY_ATTEMPTS)
+        self.assertTrue(all(call[2].get("timeout") == ACCOUNT_INFO_TIMEOUT_SECS for call in api.session.calls))
 
     def test_image_pool_switches_account_on_transient_503(self):
         fake_accounts = FakeAccountService(["token-a", "token-b"])
