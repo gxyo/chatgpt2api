@@ -59,6 +59,11 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     return max(minimum, normalized)
 
 
+def _normalize_refresh_all_interval(value: object) -> int:
+    interval = _normalize_positive_int(value, 0, 0)
+    return 0 if interval <= 0 else max(10, interval)
+
+
 def _normalize_backup_include(value: object) -> dict[str, bool]:
     source = value if isinstance(value, dict) else {}
     normalized = dict(DEFAULT_BACKUP_INCLUDE)
@@ -129,6 +134,7 @@ def _validate_image_storage_settings(settings: dict[str, object]) -> None:
 class LoadedSettings:
     auth_key: str
     refresh_account_interval_minute: int
+    refresh_all_accounts_interval_minute: int
 
 
 def _normalize_auth_key(value: object) -> str:
@@ -165,14 +171,13 @@ def _load_settings() -> LoadedSettings:
             "请在环境变量 CHATGPT2API_AUTH_KEY 中设置，或者在 config.json 中填写 auth-key。"
         )
 
-    try:
-        refresh_interval = int(raw_config.get("refresh_account_interval_minute", 5))
-    except (TypeError, ValueError):
-        refresh_interval = 5
+    refresh_interval = _normalize_positive_int(raw_config.get("refresh_account_interval_minute"), 5, 1)
+    refresh_all_interval = _normalize_refresh_all_interval(raw_config.get("refresh_all_accounts_interval_minute"))
 
     return LoadedSettings(
         auth_key=auth_key,
         refresh_account_interval_minute=refresh_interval,
+        refresh_all_accounts_interval_minute=refresh_all_interval,
     )
 
 
@@ -208,10 +213,11 @@ class ConfigStore:
 
     @property
     def refresh_account_interval_minute(self) -> int:
-        try:
-            return int(self.data.get("refresh_account_interval_minute", 5))
-        except (TypeError, ValueError):
-            return 5
+        return _normalize_positive_int(self.data.get("refresh_account_interval_minute"), 5, 1)
+
+    @property
+    def refresh_all_accounts_interval_minute(self) -> int:
+        return _normalize_refresh_all_interval(self.data.get("refresh_all_accounts_interval_minute"))
 
     @property
     def image_retention_days(self) -> int:
@@ -332,6 +338,7 @@ class ConfigStore:
     def get(self) -> dict[str, object]:
         data = dict(self.data)
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
+        data["refresh_all_accounts_interval_minute"] = self.refresh_all_accounts_interval_minute
         data["image_retention_days"] = self.image_retention_days
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
@@ -354,6 +361,14 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
+        if "refresh_account_interval_minute" in next_data:
+            next_data["refresh_account_interval_minute"] = _normalize_positive_int(
+                next_data.get("refresh_account_interval_minute"), 5, 1
+            )
+        if "refresh_all_accounts_interval_minute" in next_data:
+            next_data["refresh_all_accounts_interval_minute"] = _normalize_refresh_all_interval(
+                next_data.get("refresh_all_accounts_interval_minute")
+            )
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:

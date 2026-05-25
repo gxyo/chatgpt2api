@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 
 from fastapi import HTTPException, Request
 
@@ -12,6 +12,8 @@ from utils.helper import public_error_message
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
+DISABLED_REFRESH_POLL_SECONDS = 60
+AUTO_ACCOUNT_REFRESH_LOCK = Lock()
 
 
 def extract_bearer_token(authorization: str | None) -> str:
@@ -81,20 +83,45 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
-    interval_seconds = config.refresh_account_interval_minute * 60
-
     def worker() -> None:
         while not stop_event.is_set():
             try:
                 limited_tokens = account_service.list_limited_tokens()
                 if limited_tokens:
                     print(f"[account-limited-watcher] checking {len(limited_tokens)} limited accounts")
-                    account_service.refresh_accounts(limited_tokens)
+                    with AUTO_ACCOUNT_REFRESH_LOCK:
+                        account_service.refresh_accounts(limited_tokens)
             except Exception as exc:
                 print(f"[account-limited-watcher] fail {exc}")
-            stop_event.wait(interval_seconds)
+            stop_event.wait(config.refresh_account_interval_minute * 60)
 
     thread = Thread(target=worker, name="limited-account-watcher", daemon=True)
+    thread.start()
+    return thread
+
+
+def start_all_account_watcher(stop_event: Event) -> Thread:
+    def worker() -> None:
+        while not stop_event.is_set():
+            interval_minutes = config.refresh_all_accounts_interval_minute
+            if interval_minutes <= 0:
+                stop_event.wait(DISABLED_REFRESH_POLL_SECONDS)
+                continue
+
+            try:
+                refreshable_tokens = account_service.list_refreshable_tokens()
+                if refreshable_tokens:
+                    print(f"[account-all-watcher] refreshing {len(refreshable_tokens)} non-disabled accounts")
+                    with AUTO_ACCOUNT_REFRESH_LOCK:
+                        account_service.refresh_accounts(refreshable_tokens)
+            except Exception as exc:
+                print(f"[account-all-watcher] fail {exc}")
+
+            interval_minutes = config.refresh_all_accounts_interval_minute
+            wait_seconds = interval_minutes * 60 if interval_minutes > 0 else DISABLED_REFRESH_POLL_SECONDS
+            stop_event.wait(wait_seconds)
+
+    thread = Thread(target=worker, name="all-account-watcher", daemon=True)
     thread.start()
     return thread
 

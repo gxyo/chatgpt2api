@@ -49,6 +49,7 @@ class ConfigLoadingTests(unittest.TestCase):
 
                 self.assertEqual(settings.auth_key, os_auth_key)
                 self.assertEqual(settings.refresh_account_interval_minute, 5)
+                self.assertEqual(settings.refresh_all_accounts_interval_minute, 0)
             finally:
                 module.BASE_DIR = old_base_dir
                 module.DATA_DIR = old_data_dir
@@ -57,6 +58,33 @@ class ConfigLoadingTests(unittest.TestCase):
                     module.os.environ.pop("CHATGPT2API_AUTH_KEY", None)
                 else:
                     module.os.environ["CHATGPT2API_AUTH_KEY"] = old_env_auth_key
+
+    def test_refresh_all_interval_defaults_to_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+
+            store = self.config_module.ConfigStore(config_file)
+
+            self.assertEqual(store.refresh_all_accounts_interval_minute, 0)
+            self.assertEqual(store.get()["refresh_all_accounts_interval_minute"], 0)
+
+    def test_refresh_intervals_are_normalized_when_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            config = store.update({
+                "refresh_account_interval_minute": 0,
+                "refresh_all_accounts_interval_minute": 1,
+            })
+            saved = json.loads(config_file.read_text(encoding="utf-8"))
+
+            self.assertEqual(config["refresh_account_interval_minute"], 1)
+            self.assertEqual(config["refresh_all_accounts_interval_minute"], 10)
+            self.assertEqual(saved["refresh_account_interval_minute"], 1)
+            self.assertEqual(saved["refresh_all_accounts_interval_minute"], 10)
 
 
 if __name__ == "__main__":

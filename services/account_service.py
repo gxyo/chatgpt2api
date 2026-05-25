@@ -249,6 +249,15 @@ class AccountService:
                    and (token := item.get("access_token") or "")
             ]
 
+    def list_refreshable_tokens(self) -> list[str]:
+        with self._lock:
+            return [
+                token
+                for item in self._accounts.values()
+                if item.get("status") != "禁用"
+                   and (token := item.get("access_token") or "")
+            ]
+
     def add_account_items(self, items: list[dict]) -> dict:
         tokens = [str(item.get("access_token") or "").strip() for item in items if isinstance(item, dict)]
         return self.add_accounts(tokens)

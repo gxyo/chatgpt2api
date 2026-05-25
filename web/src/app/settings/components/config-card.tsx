@@ -23,6 +23,7 @@ export function ConfigCard() {
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
+  const setRefreshAllAccountsIntervalMinute = useSettingsStore((state) => state.setRefreshAllAccountsIntervalMinute);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
@@ -82,14 +83,24 @@ export function ConfigCard() {
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
-            <label className="text-sm text-stone-700">账号刷新间隔</label>
+            <label className="text-sm text-stone-700">限流账号检查间隔</label>
             <Input
               value={String(config?.refresh_account_interval_minute || "")}
               onChange={(event) => setRefreshAccountIntervalMinute(event.target.value)}
               placeholder="分钟"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">单位分钟，控制账号自动刷新频率。</p>
+            <p className="text-xs text-stone-500">单位分钟，只检查限流账号是否恢复。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">全部账号刷新间隔</label>
+            <Input
+              value={String(config?.refresh_all_accounts_interval_minute ?? "")}
+              onChange={(event) => setRefreshAllAccountsIntervalMinute(event.target.value)}
+              placeholder="0 表示关闭"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位分钟，自动刷新所有非禁用账号；0 表示关闭，非 0 最少 10 分钟。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">全局代理</label>

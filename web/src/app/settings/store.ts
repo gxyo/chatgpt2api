@@ -38,6 +38,14 @@ export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
+function normalizeRefreshAllInterval(value: unknown) {
+  const interval = Number(value || 0);
+  if (!Number.isFinite(interval) || interval <= 0) {
+    return 0;
+  }
+  return Math.max(10, interval);
+}
+
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
   const imageStorage = typeof config.image_storage === "object" && config.image_storage
     ? config.image_storage as ImageStorageSettings
@@ -84,6 +92,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
   return {
     ...config,
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
+    refresh_all_accounts_interval_minute: normalizeRefreshAllInterval(config.refresh_all_accounts_interval_minute),
     image_retention_days: Number(config.image_retention_days || 30),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 75),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
@@ -201,6 +210,7 @@ type SettingsStore = {
   removeBackup: (key: string) => Promise<void>;
   testBackup: () => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
+  setRefreshAllAccountsIntervalMinute: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
@@ -337,6 +347,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const data = await updateSettingsConfig({
         ...config,
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
+        refresh_all_accounts_interval_minute: normalizeRefreshAllInterval(config.refresh_all_accounts_interval_minute),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 75),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
@@ -396,6 +407,20 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         config: {
           ...state.config,
           refresh_account_interval_minute: value,
+        },
+      };
+    });
+  },
+
+  setRefreshAllAccountsIntervalMinute: (value) => {
+    set((state) => {
+      if (!state.config) {
+        return {};
+      }
+      return {
+        config: {
+          ...state.config,
+          refresh_all_accounts_interval_minute: value,
         },
       };
     });
