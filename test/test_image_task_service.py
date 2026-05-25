@@ -26,12 +26,13 @@ def wait_for_task(service: ImageTaskService, identity: dict[str, object], task_i
 
 
 class ImageTaskServiceTests(unittest.TestCase):
-    def make_service(self, path: Path, handler=None) -> ImageTaskService:
+    def make_service(self, path: Path, handler=None, timeout_secs: float = 30) -> ImageTaskService:
         return ImageTaskService(
             path,
             generation_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/image.png"}]}),
             edit_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/edit.png"}]}),
             retention_days_getter=lambda: 30,
+            timeout_secs_getter=lambda: timeout_secs,
         )
 
     def test_duplicate_submit_uses_existing_task(self):
@@ -143,6 +144,30 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
             self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
+
+    def test_task_uses_configured_hard_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            seen_payload = {}
+
+            def handler(payload):
+                seen_payload.update(payload)
+                time.sleep(0.5)
+                return {"data": [{"url": "http://example.test/late.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler, timeout_secs=0.05)
+            service.submit_generation(
+                OWNER,
+                client_task_id="timeout-task",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+
+            task = wait_for_task(service, OWNER, "timeout-task", "error", timeout=1.0)
+
+            self.assertIn("超时", task.get("error", ""))
+            self.assertEqual(seen_payload.get("timeout_secs"), 0.05)
 
 
 if __name__ == "__main__":

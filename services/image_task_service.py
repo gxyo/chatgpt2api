@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 from collections.abc import Callable
@@ -19,6 +20,7 @@ TASK_STATUS_SUCCESS = "success"
 TASK_STATUS_ERROR = "error"
 TERMINAL_STATUSES = {TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}
 UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
+TASK_TIMEOUT_MESSAGE = "图片任务处理超时，请稍后重试"
 
 
 def _now_iso() -> str:
@@ -41,6 +43,14 @@ def _timestamp(value: object) -> float:
 
 def _clean(value: object, default: str = "") -> str:
     return str(value or default).strip()
+
+
+def _positive_float(value: object, default: float, minimum: float = 0.001) -> float:
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        normalized = default
+    return max(minimum, normalized)
 
 
 def _owner_id(identity: dict[str, object]) -> str:
@@ -86,11 +96,13 @@ class ImageTaskService:
         generation_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_generations.handle,
         edit_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_edit.handle,
         retention_days_getter: Callable[[], int] | None = None,
+        timeout_secs_getter: Callable[[], float] | None = None,
     ):
         self.path = path
         self.generation_handler = generation_handler
         self.edit_handler = edit_handler
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
+        self.timeout_secs_getter = timeout_secs_getter or (lambda: float(config.image_poll_timeout_secs))
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +130,7 @@ class ImageTaskService:
             "size": size,
             "response_format": "url",
             "base_url": base_url,
+            "timeout_secs": self._timeout_secs(),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
@@ -140,6 +153,7 @@ class ImageTaskService:
             "size": size,
             "response_format": "url",
             "base_url": base_url,
+            "timeout_secs": self._timeout_secs(),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 
@@ -225,7 +239,8 @@ class ImageTaskService:
         self._update_task(key, status=TASK_STATUS_RUNNING, error="")
         try:
             handler = self.edit_handler if mode == "edit" else self.generation_handler
-            result = handler(payload)
+            timeout_secs = _positive_float(payload.get("timeout_secs"), self._timeout_secs())
+            result = self._run_handler_with_timeout(handler, payload, timeout_secs)
             if not isinstance(result, dict):
                 raise RuntimeError("image task returned streaming result unexpectedly")
             data = result.get("data")
@@ -259,6 +274,33 @@ class ImageTaskService:
                 status="failed",
                 error=error_message,
             )
+
+    def _timeout_secs(self) -> float:
+        return _positive_float(self.timeout_secs_getter(), float(config.image_poll_timeout_secs))
+
+    def _run_handler_with_timeout(
+        self,
+        handler: Callable[[dict[str, Any]], dict[str, Any]],
+        payload: dict[str, Any],
+        timeout_secs: float,
+    ) -> dict[str, Any]:
+        result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+        def target() -> None:
+            try:
+                result_queue.put(("result", handler(payload)))
+            except BaseException as exc:
+                result_queue.put(("error", exc))
+
+        thread = threading.Thread(target=target, name="image-handler", daemon=True)
+        thread.start()
+        try:
+            kind, value = result_queue.get(timeout=timeout_secs)
+        except queue.Empty as exc:
+            raise TimeoutError(f"{TASK_TIMEOUT_MESSAGE}（已等待 {timeout_secs:g} 秒）") from exc
+        if kind == "error":
+            raise value
+        return value
 
     def _log_call(
         self,

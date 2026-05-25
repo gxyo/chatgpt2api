@@ -7,6 +7,7 @@ from services.protocol.conversation import (
     ImageGenerationError,
     collect_image_outputs,
     encode_images,
+    image_request_deadline,
     stream_image_chunks,
     stream_image_outputs_with_pool,
 )
@@ -32,6 +33,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         base_url=base_url,
         images=encoded_images,
         message_as_error=True,
+        deadline=image_request_deadline(body.get("timeout_secs")),
     ))
     if body.get("stream"):
         return stream_image_chunks(outputs)

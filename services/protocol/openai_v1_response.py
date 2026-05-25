@@ -11,6 +11,7 @@ from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
     encode_images,
+    image_request_deadline,
     stream_image_outputs_with_pool,
     stream_text_deltas,
     text_backend,
@@ -205,6 +206,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         size=None if images else "1:1",
         response_format="b64_json",
         images=images,
+        deadline=image_request_deadline(body.get("timeout_secs")),
     ))
     yield from stream_image_response(image_outputs, prompt, model)
 

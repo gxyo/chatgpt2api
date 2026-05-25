@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -45,7 +46,7 @@ class FakeAccountService:
         self.text_used: list[str] = []
         self.selected_image_tokens: list[str] = []
 
-    def get_available_access_token(self, excluded_tokens=None):
+    def get_available_access_token(self, excluded_tokens=None, deadline=None):
         excluded = set(excluded_tokens or set())
         for token in self.tokens:
             if token not in excluded:
@@ -154,6 +155,21 @@ class UpstreamRetryTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "upstream_timeout")
         self.assertEqual(fake_accounts.image_results, [("token-a", False)])
 
+    def test_image_pool_deadline_stops_before_account_lookup(self):
+        fake_accounts = FakeAccountService(["token-a"])
+
+        with mock.patch.object(conversation, "account_service", fake_accounts):
+            with self.assertRaises(ImageGenerationError) as ctx:
+                list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                    model="gpt-image-2",
+                    prompt="test",
+                    deadline=time.monotonic() - 1,
+                )))
+
+        self.assertEqual(str(ctx.exception), conversation.IMAGE_POLL_TIMEOUT_MESSAGE)
+        self.assertEqual(ctx.exception.code, "upstream_timeout")
+        self.assertEqual(fake_accounts.selected_image_tokens, [])
+
     def test_image_pool_enters_rescue_after_initial_probe_limit(self):
         fake_accounts = FakeAccountService(["token-a", "token-b", "token-c"])
 
@@ -200,7 +216,7 @@ class UpstreamRetryTests(unittest.TestCase):
 
     def test_image_pool_sanitizes_transient_account_lookup_failure(self):
         fake_accounts = SimpleNamespace(
-            get_available_access_token=lambda excluded_tokens=None: (_ for _ in ()).throw(
+            get_available_access_token=lambda excluded_tokens=None, deadline=None: (_ for _ in ()).throw(
                 UpstreamHTTPError("/backend-api/me", 503, "")
             )
         )

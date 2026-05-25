@@ -5,6 +5,7 @@ from threading import Condition, Lock
 from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 
 from services.config import config
 from services.log_service import (
@@ -24,7 +25,8 @@ class AccountService:
         self._image_slot_condition = Condition(self._lock)
         self._index = 0
         self._accounts = self._load_accounts()
-        self._image_inflight: dict[str, int] = {}
+        self._image_inflight: dict[str, list[float]] = {}
+        self._image_expired_slots: dict[str, int] = {}
         self._cumulative_total = self._load_cumulative_total()
 
     def _get_cumulative_file(self) -> Path:
@@ -110,14 +112,34 @@ class AccountService:
         ]
 
     def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+        self._prune_expired_image_slots_locked()
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
             for token in self._list_ready_candidate_tokens(excluded_tokens)
-            if int(self._image_inflight.get(token, 0)) < max_concurrency
+            if len(self._image_inflight.get(token, [])) < max_concurrency
         ]
 
-    def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def _image_slot_lease_timeout_secs(self) -> float:
+        return max(30.0, float(config.image_poll_timeout_secs) * 1.2)
+
+    def _prune_expired_image_slots_locked(self) -> None:
+        if not self._image_inflight:
+            return
+        now = time.monotonic()
+        lease_timeout = self._image_slot_lease_timeout_secs()
+        for token in list(self._image_inflight):
+            current_slots = self._image_inflight.get(token, [])
+            slots = [started for started in current_slots if now - started < lease_timeout]
+            expired = len(current_slots) - len(slots)
+            if expired > 0:
+                self._image_expired_slots[token] = int(self._image_expired_slots.get(token, 0)) + expired
+            if slots:
+                self._image_inflight[token] = slots
+            else:
+                self._image_inflight.pop(token, None)
+
+    def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None, deadline: float | None = None) -> str:
         with self._image_slot_condition:
             while True:
                 if not self._list_ready_candidate_tokens(excluded_tokens):
@@ -126,29 +148,43 @@ class AccountService:
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
                     self._index += 1
-                    self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
+                    self._image_inflight.setdefault(access_token, []).append(time.monotonic())
                     return access_token
-                self._image_slot_condition.wait(timeout=1.0)
+                wait_timeout = 1.0
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("image account slot wait timed out")
+                    wait_timeout = min(wait_timeout, remaining)
+                self._image_slot_condition.wait(timeout=wait_timeout)
 
     def release_image_slot(self, access_token: str) -> None:
         if not access_token:
             return
         with self._image_slot_condition:
-            current_inflight = int(self._image_inflight.get(access_token, 0))
-            if current_inflight <= 1:
+            expired = int(self._image_expired_slots.get(access_token, 0))
+            if expired > 0:
+                if expired <= 1:
+                    self._image_expired_slots.pop(access_token, None)
+                else:
+                    self._image_expired_slots[access_token] = expired - 1
+                self._image_slot_condition.notify_all()
+                return
+            slots = self._image_inflight.get(access_token, [])
+            if len(slots) <= 1:
                 self._image_inflight.pop(access_token, None)
             else:
-                self._image_inflight[access_token] = current_inflight - 1
+                self._image_inflight[access_token] = slots[1:]
             self._image_slot_condition.notify_all()
 
-    def get_available_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def get_available_access_token(self, excluded_tokens: set[str] | None = None, deadline: float | None = None) -> str:
         """Return a cached-ready image account without remote probing.
 
         Remote account refresh is intentionally kept out of the hot request path:
         a transient upstream outage during quota probing should not make users wait
         before the real generation attempt even starts.
         """
-        return self._acquire_next_candidate_token(excluded_tokens=set(excluded_tokens or set()))
+        return self._acquire_next_candidate_token(excluded_tokens=set(excluded_tokens or set()), deadline=deadline)
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
         excluded = set(excluded_tokens or set())
@@ -257,6 +293,7 @@ class AccountService:
             removed = sum(self._accounts.pop(token, None) is not None for token in target_set)
             for token in target_set:
                 self._image_inflight.pop(token, None)
+                self._image_expired_slots.pop(token, None)
             if removed:
                 if self._accounts:
                     self._index %= len(self._accounts)

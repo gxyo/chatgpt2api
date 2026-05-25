@@ -79,13 +79,34 @@ def image_stream_error_message(message: str) -> str:
     return text or "image generation failed"
 
 
-def transient_rescue_wait(deadline: float, attempt: int) -> bool:
+def transient_rescue_wait(deadline: float, attempt: int, request_deadline: float | None = None) -> bool:
     remaining = deadline - time.time()
+    if request_deadline is not None:
+        remaining = min(remaining, request_deadline - time.monotonic())
     if remaining <= 0:
         return False
     if attempt > 0:
         time.sleep(min(TRANSIENT_RESCUE_SLEEP_SECS, remaining))
+    if request_deadline is not None and time.monotonic() >= request_deadline:
+        return False
     return time.time() < deadline
+
+
+def image_request_deadline(timeout_secs: object = None) -> float:
+    try:
+        seconds = float(timeout_secs)
+    except (TypeError, ValueError):
+        seconds = float(config.image_poll_timeout_secs)
+    return time.monotonic() + max(0.001, seconds)
+
+
+def image_deadline_expired(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def ensure_image_deadline(deadline: float | None) -> None:
+    if image_deadline_expired(deadline):
+        raise ImageGenerationError(IMAGE_POLL_TIMEOUT_MESSAGE, code="upstream_timeout")
 
 
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
@@ -243,6 +264,7 @@ class ConversationRequest:
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
+    deadline: float | None = None
 
 
 @dataclass
@@ -693,15 +715,21 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
         rescue_attempts = 0
         while True:
             in_rescue = rescue_deadline > 0
-            if in_rescue and not transient_rescue_wait(rescue_deadline, rescue_attempts):
+            ensure_image_deadline(request.deadline)
+            if in_rescue and not transient_rescue_wait(rescue_deadline, rescue_attempts, request.deadline):
+                ensure_image_deadline(request.deadline)
                 raise ImageGenerationError(CHANNEL_BUSY_MESSAGE)
             if in_rescue:
                 rescue_attempts += 1
             try:
-                token = account_service.get_available_access_token(set() if in_rescue else attempted_tokens)
+                token = account_service.get_available_access_token(
+                    set() if in_rescue else attempted_tokens,
+                    deadline=request.deadline,
+                )
                 if not in_rescue:
                     attempted_tokens.add(token)
             except RuntimeError as exc:
+                ensure_image_deadline(request.deadline)
                 if emitted:
                     return
                 if last_transient_error or is_retriable_upstream_error(exc):
@@ -715,8 +743,10 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             returned_message = False
             returned_result = False
             try:
-                backend = OpenAIBackendAPI(access_token=token)
+                ensure_image_deadline(request.deadline)
+                backend = OpenAIBackendAPI(access_token=token, deadline=request.deadline)
                 for output in stream_image_outputs(backend, request, index, request.n):
+                    ensure_image_deadline(request.deadline)
                     if output.kind == "message" and request.message_as_error:
                         raise ImageGenerationError(
                             output.text or "Image generation was rejected by upstream policy.",

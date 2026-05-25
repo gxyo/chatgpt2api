@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -65,6 +66,21 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(updated["quota"], 0)
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
+
+    def test_stale_image_slot_does_not_block_account_forever(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account("token-1", {"status": "正常", "quota": 1})
+
+            self.assertEqual(service.get_available_access_token(), "token-1")
+            service._image_inflight["token-1"] = [time.monotonic() - 10000]
+
+            self.assertEqual(service.get_available_access_token(), "token-1")
+            service.release_image_slot("token-1")
+            self.assertEqual(len(service._image_inflight["token-1"]), 1)
+            service.release_image_slot("token-1")
+            self.assertNotIn("token-1", service._image_inflight)
 
 
 class TokenLogTests(unittest.TestCase):

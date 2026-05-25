@@ -5,6 +5,7 @@ from typing import Any, Iterator
 from services.protocol.conversation import (
     ConversationRequest,
     collect_image_outputs,
+    image_request_deadline,
     stream_image_chunks,
     stream_image_outputs_with_pool,
 )
@@ -25,6 +26,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         response_format=response_format,
         base_url=base_url,
         message_as_error=True,
+        deadline=image_request_deadline(body.get("timeout_secs")),
     ))
     if body.get("stream"):
         return stream_image_chunks(outputs)

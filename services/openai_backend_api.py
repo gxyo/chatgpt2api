@@ -29,6 +29,10 @@ class ImagePollTimeoutError(RuntimeError):
     pass
 
 
+class ImageRequestTimeoutError(ImagePollTimeoutError):
+    pass
+
+
 @dataclass
 class ChatRequirements:
     """保存一次对话请求所需的 sentinel token。"""
@@ -66,7 +70,7 @@ class OpenAIBackendAPI:
     - 协议兼容转换放在 `services.protocol`
     """
 
-    def __init__(self, access_token: str = "") -> None:
+    def __init__(self, access_token: str = "", deadline: float | None = None) -> None:
         """初始化后端客户端。
 
         参数：
@@ -76,6 +80,7 @@ class OpenAIBackendAPI:
         self.client_version = DEFAULT_CLIENT_VERSION
         self.client_build_number = DEFAULT_CLIENT_BUILD_NUMBER
         self.access_token = access_token
+        self.deadline = deadline
         self.fp = self._build_fp()
         self.user_agent = self.fp["user-agent"]
         self.device_id = self.fp["oai-device-id"]
@@ -145,6 +150,39 @@ class OpenAIBackendAPI:
         fp.setdefault("sec-ch-ua-platform", '"Windows"')
         return fp
 
+    def _remaining_deadline_secs(self) -> float | None:
+        if self.deadline is None:
+            return None
+        remaining = float(self.deadline) - time.monotonic()
+        if remaining <= 0:
+            raise ImageRequestTimeoutError("image request deadline exceeded")
+        return remaining
+
+    def _timeout_with_deadline(self, timeout: object = None) -> float:
+        remaining = self._remaining_deadline_secs()
+        if remaining is None:
+            try:
+                return float(timeout) if timeout is not None else 30.0
+            except (TypeError, ValueError):
+                return 30.0
+        if timeout is None:
+            return max(0.001, remaining)
+        try:
+            requested = float(timeout)
+        except (TypeError, ValueError):
+            requested = remaining
+        return max(0.001, min(requested, remaining))
+
+    def _sleep_with_deadline(self, seconds: float) -> None:
+        if seconds <= 0:
+            self._remaining_deadline_secs()
+            return
+        remaining = self._remaining_deadline_secs()
+        sleep_for = seconds if remaining is None else min(seconds, remaining)
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        self._remaining_deadline_secs()
+
     def _headers(self, path: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """构造请求头，并补上 web 端要求的 target path/route。"""
         headers = dict(self.session.headers)
@@ -169,9 +207,13 @@ class OpenAIBackendAPI:
         url = url_or_path if url_or_path.startswith(("http://", "https://")) else self.base_url + url_or_path
         attempts = max(1, int(attempts or 1))
         last_exc: BaseException | None = None
+        base_kwargs = dict(kwargs)
         for attempt in range(1, attempts + 1):
             try:
-                response = getattr(self.session, method)(url, **kwargs)
+                request_kwargs = dict(base_kwargs)
+                if "timeout" in request_kwargs or self.deadline is not None:
+                    request_kwargs["timeout"] = self._timeout_with_deadline(request_kwargs.get("timeout"))
+                response = getattr(self.session, method)(url, **request_kwargs)
                 ensure_ok(response, context)
                 return response
             except Exception as exc:
@@ -180,6 +222,9 @@ class OpenAIBackendAPI:
                     raise
                 retry_after = exc.retry_after if isinstance(exc, UpstreamHTTPError) else None
                 delay = self._retry_delay(attempt, retry_after, retry_base_delay, retry_max_delay)
+                remaining = self._remaining_deadline_secs()
+                if remaining is not None:
+                    delay = min(delay, remaining)
                 logger.warning({
                     "event": "upstream_request_retry",
                     "context": context,
@@ -191,7 +236,7 @@ class OpenAIBackendAPI:
                     "error": str(exc),
                 })
                 if delay > 0:
-                    time.sleep(delay)
+                    self._sleep_with_deadline(delay)
         if last_exc is not None:
             raise last_exc
         raise RuntimeError(f"{context} failed")
@@ -600,7 +645,7 @@ class OpenAIBackendAPI:
                   "height": height},
         )
         upload_meta = response.json()
-        time.sleep(0.5)
+        self._sleep_with_deadline(0.5)
         response = self._request_with_retries(
             "put",
             upload_meta["upload_url"],
@@ -768,6 +813,9 @@ class OpenAIBackendAPI:
           (capped at 16s, +jitter) honoring Retry-After when present.
         - All sleeps stay within timeout_secs; on exhaustion raises ImagePollTimeoutError.
         """
+        remaining = self._remaining_deadline_secs()
+        if remaining is not None:
+            timeout_secs = min(timeout_secs, remaining)
         start = time.time()
         attempt = 0
         interval = float(config.image_poll_interval_secs)
@@ -787,7 +835,7 @@ class OpenAIBackendAPI:
             jitter = random.uniform(0, min(2.0, initial_wait * 0.2))
             sleep_for = min(initial_wait + jitter, max(0.0, _remaining()))
             if sleep_for > 0:
-                time.sleep(sleep_for)
+                self._sleep_with_deadline(sleep_for)
 
         def _retry_sleep(reason: str, status_code: int | None, error: str | None, retry_after: int | None) -> bool:
             # retry_after=0 means "retry immediately" — must not be coerced via falsy check.
@@ -809,7 +857,7 @@ class OpenAIBackendAPI:
             if error is not None:
                 log_payload["error"] = error
             logger.warning(log_payload)
-            time.sleep(sleep_for)
+            self._sleep_with_deadline(sleep_for)
             return True
 
         while _remaining() > 0:
@@ -849,7 +897,7 @@ class OpenAIBackendAPI:
                           "elapsed_secs": round(time.time() - start, 1)})
             wait = min(interval, max(0.0, _remaining()))
             if wait > 0:
-                time.sleep(wait)
+                self._sleep_with_deadline(wait)
         logger.info({
             "event": "image_poll_timeout",
             "conversation_id": conversation_id,
@@ -1013,7 +1061,9 @@ class OpenAIBackendAPI:
             stream=True,
         )
         try:
-            yield from iter_sse_payloads(response)
+            for payload in iter_sse_payloads(response):
+                self._remaining_deadline_secs()
+                yield payload
         finally:
             response.close()
 
