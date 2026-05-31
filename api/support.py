@@ -83,19 +83,36 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
+    interval_seconds = config.refresh_account_interval_minute * 60
+
     def worker() -> None:
         while not stop_event.is_set():
             try:
                 limited_tokens = account_service.list_limited_tokens()
-                if limited_tokens:
-                    print(f"[account-limited-watcher] checking {len(limited_tokens)} limited accounts")
+                expiring_tokens = account_service.list_expiring_access_tokens()
+                keepalive_tokens = account_service.list_refresh_token_keepalive_tokens()
+                tokens = list(dict.fromkeys([*limited_tokens, *expiring_tokens]))
+                expiring_token_set = set(expiring_tokens)
+                keepalive_tokens = [token for token in keepalive_tokens if token not in expiring_token_set]
+                if tokens:
+                    print(
+                        "[account-watcher] checking "
+                        f"{len(limited_tokens)} limited accounts, "
+                        f"{len(expiring_tokens)} expiring access tokens"
+                    )
                     with AUTO_ACCOUNT_REFRESH_LOCK:
-                        account_service.refresh_accounts(limited_tokens)
+                        account_service.refresh_accounts(tokens)
+                if keepalive_tokens:
+                    print(f"[account-watcher] keepalive {len(keepalive_tokens)} refresh tokens")
+                    with AUTO_ACCOUNT_REFRESH_LOCK:
+                        result = account_service.keepalive_refresh_tokens(keepalive_tokens)
+                    if result.get("errors"):
+                        print(f"[account-watcher] keepalive errors: {result['errors']}")
             except Exception as exc:
-                print(f"[account-limited-watcher] fail {exc}")
-            stop_event.wait(config.refresh_account_interval_minute * 60)
+                print(f"[account-watcher] fail {exc}")
+            stop_event.wait(interval_seconds)
 
-    thread = Thread(target=worker, name="limited-account-watcher", daemon=True)
+    thread = Thread(target=worker, name="account-watcher", daemon=True)
     thread.start()
     return thread
 
