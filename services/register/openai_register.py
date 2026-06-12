@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import random
 import secrets
@@ -14,11 +12,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from curl_cffi import requests
+import requests as std_requests
+import urllib3
+from curl_cffi import requests as curl_requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from services.account_service import account_service
 from services.register import mail_provider
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 base_dir = Path(__file__).resolve().parent
 config = {
     "mail": {
@@ -59,7 +62,6 @@ register_log_sink = None
 
 common_headers = {
     "accept": "application/json",
-    "accept-encoding": "gzip, deflate, br",
     "accept-language": "en-US,en;q=0.9",
     "cache-control": "no-cache",
     "connection": "keep-alive",
@@ -84,7 +86,6 @@ common_headers = {
 
 navigate_headers = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "accept-encoding": "gzip, deflate, br",
     "accept-language": "en-US,en;q=0.9",
     "cache-control": "max-age=0",
     "connection": "keep-alive",
@@ -195,11 +196,15 @@ def _is_cloudflare_challenge(resp) -> bool:
         return False
     text = str(getattr(resp, "text", "") or "").lower()
     headers = getattr(resp, "headers", {}) or {}
-    server = str(headers.get("server") or "").lower()
+    cf_mitigated = str(headers.get("cf-mitigated") or "").lower()
+    cf_chl_headers = [str(name).lower() for name in headers.keys() if str(name).lower().startswith("cf-chl")]
     return (
-        "cloudflare" in server
+        cf_mitigated == "challenge"
+        or bool(cf_chl_headers)
         or "challenges.cloudflare.com" in text
         or "<title>just a moment" in text
+        or "/cdn-cgi/challenge-platform/" in text
+        or "cf-browser-verification" in text
     )
 
 
@@ -214,20 +219,32 @@ def wait_for_code(mailbox: dict) -> str | None:
 from utils.sentinel import SentinelTokenGenerator, build_sentinel_token as _build_sentinel_token_tuple  # noqa: F401
 
 
-def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -> str:
+def build_sentinel_token(session: Any, device_id: str, flow: str) -> str:
     """请求 sentinel token，返回 sentinel header 字符串（兼容旧接口）。"""
     sentinel_val, _oai_sc_val = _build_sentinel_token_tuple(session, device_id, flow, user_agent=user_agent, sec_ch_ua=sec_ch_ua)
     return sentinel_val
 
 
+def _is_socks_proxy(proxy: str) -> bool:
+    candidate = str(proxy or "").strip().lower()
+    return candidate.startswith(("socks4://", "socks4a://", "socks5://", "socks5h://"))
+
+
 def create_session(proxy: str = "") -> Any:
-    kwargs = {"impersonate": "chrome", "verify": False}
+    if _is_socks_proxy(proxy):
+        return curl_requests.Session(impersonate="chrome", verify=False, proxy=proxy)
+    session = std_requests.Session()
+    retry = Retry(total=2, connect=2, read=2, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504))
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.verify = False
     if proxy:
-        kwargs["proxy"] = proxy
-    return requests.Session(**kwargs)
+        session.proxies.update({"http": proxy, "https": proxy})
+    return session
 
 
-def request_with_local_retry(session: requests.Session, method: str, url: str, retry_attempts: int = 3, **kwargs):
+def request_with_local_retry(session: Any, method: str, url: str, retry_attempts: int = 3, **kwargs):
     last_error = ""
     for _ in range(max(1, retry_attempts)):
         try:
@@ -238,7 +255,7 @@ def request_with_local_retry(session: requests.Session, method: str, url: str, r
     return None, last_error
 
 
-def validate_otp(session: requests.Session, device_id: str, code: str):
+def validate_otp(session: Any, device_id: str, code: str):
     headers = dict(common_headers)
     headers["referer"] = f"{auth_base}/email-verification"
     headers["oai-device-id"] = device_id
@@ -264,7 +281,7 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
 
 
-def request_platform_oauth_token(session: requests.Session, code: str, code_verifier: str) -> dict | None:
+def request_platform_oauth_token(session: Any, code: str, code_verifier: str) -> dict | None:
     headers = {
         "accept": "*/*",
         "accept-language": "zh-CN,zh;q=0.9",
