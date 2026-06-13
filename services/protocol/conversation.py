@@ -81,10 +81,15 @@ def is_token_invalid_error(message: str) -> bool:
     text = str(message or "").lower()
     return (
         "token_invalidated" in text
+        or "token invalidated" in text
         or "token_revoked" in text
         or "authentication token has been invalidated" in text
         or "invalidated oauth token" in text
     )
+
+
+def is_token_auth_error(exc: BaseException, message: str) -> bool:
+    return getattr(exc, "status_code", None) == 401 or is_token_invalid_error(message)
 
 
 def is_tls_connection_error(message: str) -> bool:
@@ -1359,6 +1364,12 @@ def _generate_single_image(
                     rescue_deadline = time.time() + TRANSIENT_IMAGE_RESCUE_WINDOW_SECS
                     continue
                 raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email) from exc
+            if poll_timeout_retry_count > 0:
+                raise ImageGenerationError(
+                    IMAGE_POLL_TIMEOUT_MESSAGE,
+                    code="upstream_timeout",
+                    account_email=account_email,
+                ) from exc
             raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
 
         emitted_for_token = False
@@ -1522,13 +1533,36 @@ def _generate_single_image(
                 "transient_attempts": transient_attempts,
                 "rescue": in_rescue,
             })
-            if not emitted_for_token and is_token_invalid_error(last_error):
-                refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
+            if not emitted_for_token and is_token_auth_error(exc, last_error):
+                try:
+                    refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
+                except Exception as refresh_exc:
+                    refreshed_token = ""
+                    logger.warning({
+                        "event": "image_stream_token_refresh_failed",
+                        "request_token": token,
+                        "account_email": account_email,
+                        "index": index,
+                        "error": str(refresh_exc)[:200],
+                    })
                 if refreshed_token and refreshed_token != token:
-                    token = refreshed_token
+                    logger.warning({
+                        "event": "image_stream_token_refreshed_retry",
+                        "request_token": token,
+                        "refreshed_token": refreshed_token,
+                        "account_email": account_email,
+                        "index": index,
+                    })
                     continue
-                    account_service.remove_invalid_token(token, "image_stream")
-                    continue
+                account_service.remove_invalid_token(token, "image_stream")
+                logger.warning({
+                    "event": "image_stream_invalid_token_switch_account",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "index": index,
+                    "error": last_error[:200],
+                })
+                continue
             if not emitted_for_token and transient:
                 if in_rescue:
                     continue

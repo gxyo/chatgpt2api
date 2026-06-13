@@ -51,8 +51,9 @@ class FakeAccountService:
         self.image_results: list[tuple[str, bool]] = []
         self.text_used: list[str] = []
         self.selected_image_tokens: list[str] = []
+        self.removed_invalid_tokens: list[tuple[str, str]] = []
 
-    def get_available_access_token(self, excluded_tokens=None, deadline=None):
+    def get_available_access_token(self, excluded_tokens=None, deadline=None, **kwargs):
         excluded = set(excluded_tokens or set())
         for token in self.tokens:
             if token not in excluded:
@@ -60,11 +61,19 @@ class FakeAccountService:
                 return token
         raise RuntimeError("no available image quota")
 
+    def get_account(self, access_token: str):
+        return {"email": f"{access_token}@example.test"}
+
     def mark_image_result(self, access_token: str, success: bool):
         self.image_results.append((access_token, success))
 
     def remove_invalid_token(self, access_token: str, event: str):
+        self.removed_invalid_tokens.append((access_token, event))
+        self.tokens = [token for token in self.tokens if token != access_token]
         return False
+
+    def refresh_access_token(self, access_token: str, *, force: bool = False, event: str = "refresh_access_token"):
+        return access_token
 
     def get_text_access_token(self, excluded_tokens=None):
         excluded = set(excluded_tokens or set())
@@ -137,6 +146,25 @@ class UpstreamRetryTests(unittest.TestCase):
 
         self.assertEqual(outputs[0].kind, "result")
         self.assertEqual(fake_accounts.image_results, [("token-a", False), ("token-b", True)])
+
+    def test_image_pool_switches_account_on_invalid_token_before_output(self):
+        fake_accounts = FakeAccountService(["token-a", "token-b"])
+
+        def fake_stream_image_outputs(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                raise RuntimeError("token invalidated (/backend-api/conversation)")
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        with mock.patch.object(conversation, "account_service", fake_accounts), \
+             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs):
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="test",
+            )))
+
+        self.assertEqual(outputs[0].kind, "result")
+        self.assertEqual(fake_accounts.image_results, [("token-a", False), ("token-b", True)])
+        self.assertEqual(fake_accounts.removed_invalid_tokens, [("token-a", "image_stream")])
 
     def test_image_pool_returns_busy_message_when_all_accounts_503(self):
         fake_accounts = FakeAccountService(["token-a"])
@@ -236,7 +264,7 @@ class UpstreamRetryTests(unittest.TestCase):
 
     def test_image_pool_sanitizes_transient_account_lookup_failure(self):
         fake_accounts = SimpleNamespace(
-            get_available_access_token=lambda excluded_tokens=None, deadline=None: (_ for _ in ()).throw(
+            get_available_access_token=lambda excluded_tokens=None, deadline=None, **kwargs: (_ for _ in ()).throw(
                 UpstreamHTTPError("/backend-api/me", 503, "")
             )
         )
