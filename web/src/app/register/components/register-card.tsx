@@ -81,7 +81,7 @@ export function RegisterCard() {
 
           <div className="flex items-start gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">
             <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-            <span>如果注册日志出现 Cloudflare 拦截，可在设置页启用 FlareSolverr 清障；相关 Docker 容器需要先启动。</span>
+            <span>如果注册日志出现 Cloudflare 拦截，请更换注册代理或出口 IP 后重试。</span>
           </div>
 
           <div className="grid gap-4 md:grid-cols-3">
