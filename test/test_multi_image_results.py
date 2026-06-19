@@ -6,7 +6,7 @@ from unittest import mock
 
 from services.config import config
 from services.openai_backend_api import OpenAIBackendAPI
-from services.protocol.conversation import ImageOutput, extract_conversation_ids
+from services.protocol.conversation import ImageGenerationError, ImageOutput, extract_conversation_ids
 from services.protocol.openai_v1_response import stream_image_response
 
 
@@ -119,7 +119,12 @@ class MultiImageResultTests(unittest.TestCase):
         ])
 
         with (
-            mock.patch.dict(config.data, {"image_poll_initial_wait_secs": 0, "image_poll_interval_secs": 0.5}),
+            mock.patch.dict(config.data, {
+                "image_check_before_hit_enabled": True,
+                "image_settle_enabled": True,
+                "image_poll_initial_wait_secs": 0,
+                "image_poll_interval_secs": 0.5,
+            }),
             mock.patch("services.openai_backend_api.time.sleep", lambda _seconds: None),
         ):
             file_ids, sediment_ids = backend._poll_image_results("conv-1", timeout_secs=10)
@@ -174,6 +179,13 @@ class MultiImageResultTests(unittest.TestCase):
 
         self.assertEqual([event["output_index"] for event in done_events], [0, 1])
         self.assertEqual([item["result"] for item in completed["output"]], [first, second])
+
+    def test_responses_stream_empty_image_outputs_raise_structured_error(self) -> None:
+        with self.assertRaises(ImageGenerationError) as ctx:
+            list(stream_image_response([], "draw", "gpt-image-2"))
+
+        self.assertEqual(str(ctx.exception), "upstream completed without returning an image result")
+        self.assertEqual(ctx.exception.code, "no_image_generated")
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from services.openai_backend_api import (
 )
 from services.protocol import conversation
 from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput
-from utils.helper import CHANNEL_BUSY_MESSAGE, UpstreamHTTPError
+from utils.helper import CHANNEL_BUSY_MESSAGE, UpstreamHTTPError, is_retriable_upstream_error, public_error_message
 
 
 class FakeResponse:
@@ -166,6 +166,30 @@ class UpstreamRetryTests(unittest.TestCase):
         self.assertEqual(fake_accounts.image_results, [("token-a", False), ("token-b", True)])
         self.assertEqual(fake_accounts.removed_invalid_tokens, [("token-a", "image_stream")])
 
+    def test_image_pool_switches_account_on_wrapped_invalid_token_error(self):
+        fake_accounts = FakeAccountService(["token-a", "token-b"])
+
+        def fake_stream_image_outputs(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                raise ImageGenerationError(
+                    "upstream authentication token is invalid",
+                    status_code=401,
+                    error_type="invalid_request_error",
+                    code="invalid_token",
+                )
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        with mock.patch.object(conversation, "account_service", fake_accounts), \
+             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs):
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="test",
+            )))
+
+        self.assertEqual(outputs[0].kind, "result")
+        self.assertEqual(fake_accounts.image_results, [("token-a", False), ("token-b", True)])
+        self.assertEqual(fake_accounts.removed_invalid_tokens, [("token-a", "image_stream")])
+
     def test_image_pool_returns_busy_message_when_all_accounts_503(self):
         fake_accounts = FakeAccountService(["token-a"])
 
@@ -183,6 +207,50 @@ class UpstreamRetryTests(unittest.TestCase):
                 )))
 
         self.assertEqual(str(ctx.exception), CHANNEL_BUSY_MESSAGE)
+
+    def test_bad_response_status_code_504_is_transient(self):
+        exc = RuntimeError("status_code=504, bad response status code 504")
+
+        self.assertTrue(is_retriable_upstream_error(exc))
+        self.assertEqual(public_error_message(exc), CHANNEL_BUSY_MESSAGE)
+
+    def test_image_text_reply_poll_uses_configured_timeout(self):
+        timeouts: list[float] = []
+
+        class FakeBackend:
+            def _poll_image_results(self, conversation_id, timeout_secs, initial_file_ids=None, initial_sediment_ids=None):
+                timeouts.append(timeout_secs)
+                raise ImagePollTimeoutError("poll timeout")
+
+            def resolve_conversation_image_urls(self, *args, **kwargs):
+                return []
+
+        request = ConversationRequest(model="gpt-image-2", prompt="test")
+        original_timeout = conversation.config.data.get("image_poll_timeout_secs")
+        conversation.config.data["image_poll_timeout_secs"] = 100
+        try:
+            with mock.patch.object(
+                conversation,
+                "conversation_events",
+                lambda *args, **kwargs: iter([
+                    {
+                        "conversation_id": "conv-1",
+                        "file_ids": [],
+                        "sediment_ids": [],
+                        "text": '{"referenced_image_ids":["file-a"]}',
+                        "turn_use_case": "image gen",
+                    }
+                ]),
+            ):
+                outputs = list(conversation.stream_image_outputs(FakeBackend(), request))
+        finally:
+            if original_timeout is None:
+                conversation.config.data.pop("image_poll_timeout_secs", None)
+            else:
+                conversation.config.data["image_poll_timeout_secs"] = original_timeout
+
+        self.assertEqual(timeouts, [100])
+        self.assertEqual(outputs[0].kind, "message")
 
     def test_image_pool_releases_account_and_sanitizes_poll_timeout(self):
         fake_accounts = FakeAccountService(["token-a"])

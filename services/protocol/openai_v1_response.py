@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
 from services.protocol.conversation import (
     ConversationRequest,
+    ImageGenerationError,
     ImageOutput,
     count_message_image_tokens,
     count_message_text_tokens,
@@ -375,7 +376,10 @@ def stream_image_response(
                 yield {"type": "response.output_item.done", "output_index": output_index, "item": item}
             yield response_completed(response_id, model, created, items, usage)
             return
-    raise RuntimeError("image generation failed")
+    raise ImageGenerationError(
+        "upstream completed without returning an image result",
+        code="no_image_generated",
+    )
 
 
 def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:

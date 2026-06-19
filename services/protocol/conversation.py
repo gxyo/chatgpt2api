@@ -89,7 +89,11 @@ def is_token_invalid_error(message: str) -> bool:
 
 
 def is_token_auth_error(exc: BaseException, message: str) -> bool:
-    return getattr(exc, "status_code", None) == 401 or is_token_invalid_error(message)
+    return (
+        getattr(exc, "status_code", None) == 401
+        or is_token_invalid_error(message)
+        or str(getattr(exc, "code", "") or "") in {"invalid_token", "token_invalid", "token_revoked"}
+    )
 
 
 def is_tls_connection_error(message: str) -> bool:
@@ -123,12 +127,12 @@ def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     lower = text.lower()
     if is_token_invalid_error(text):
-        return "image generation failed"
+        return "upstream authentication token is invalid"
     if any(f"status={status}" in lower or f"http {status}" in lower for status in (429, 500, 502, 503, 504)):
         return CHANNEL_BUSY_MESSAGE
     if is_tls_connection_error(text) or is_connection_timeout_error(text):
         return CHANNEL_BUSY_MESSAGE
-    return text or "image generation failed"
+    return text or "upstream completed without returning an image result"
 
 
 def transient_rescue_wait(deadline: float, attempt: int, request_deadline: float | None = None) -> bool:
@@ -154,6 +158,22 @@ def image_request_deadline(timeout_secs: object = None) -> float:
 
 def image_deadline_expired(deadline: float | None) -> bool:
     return deadline is not None and time.monotonic() >= deadline
+
+
+def remaining_image_deadline_secs(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
+def sleep_with_image_deadline(seconds: float, deadline: float | None) -> None:
+    if seconds <= 0:
+        return
+    remaining = remaining_image_deadline_secs(deadline)
+    if remaining is not None:
+        seconds = min(seconds, remaining)
+    if seconds > 0:
+        time.sleep(seconds)
 
 
 def ensure_image_deadline(deadline: float | None) -> None:
@@ -974,15 +994,12 @@ def stream_image_outputs(
                 "error": detailed_error,
             })
 
-    # 当检测到文本回复（含 referenced_image_ids）时，使用更长的超时来轮询图片结果。
-    # 因为上游可能将图片生成作为异步任务执行，SSE 流在工具完成前就断开了，
-    # 导致对话文档中尚未写入图片工具的响应记录。
+    # 当检测到文本回复（含 referenced_image_ids）时仍继续轮询图片结果，
+    # 但轮询预算必须尊重请求级 deadline / image_poll_timeout_secs。
     poll_timeout = config.image_poll_timeout_secs
     if is_text_reply and conversation_id:
-        # 文本回复场景下图片可能仍在异步生成，使用更长超时（默认 120s → 额外 180s = 300s）
-        poll_timeout = max(poll_timeout, 300)
         logger.info({
-            "event": "image_text_reply_extended_poll",
+            "event": "image_text_reply_poll",
             "conversation_id": conversation_id,
             "poll_timeout_secs": poll_timeout,
         })
@@ -1063,11 +1080,10 @@ def stream_image_outputs(
                 "conversation_id": conversation_id,
                 "message_preview": message[:200],
             })
-            # 文本回复场景下，图片可能需要 4-5 分钟才能异步生成完成。
-            # 使用 300s 超时并允许多次重试，避免因临时网络问题提前退出。
-            retry_poll_timeout = max(config.image_poll_timeout_secs, 300)
+            retry_poll_timeout = config.image_poll_timeout_secs
             MAX_POLL_RETRIES = 3
             for poll_attempt in range(1, MAX_POLL_RETRIES + 1):
+                ensure_image_deadline(request.deadline)
                 try:
                     polled_file_ids, polled_sediment_ids = backend._poll_image_results(
                         conversation_id,
@@ -1104,7 +1120,7 @@ def stream_image_outputs(
                             "poll_attempt": poll_attempt,
                             "backoff_secs": backoff,
                         })
-                        time.sleep(backoff)
+                        sleep_with_image_deadline(backoff, request.deadline)
                         continue
                     # 超时错误或重试次数用尽，停止重试
                     break
@@ -1168,10 +1184,11 @@ def stream_image_outputs(
             })
     if should_poll_for_image and conversation_id:
         # 图片可能仍在异步处理中（上游 SSE 流在图片生成完成前就结束了）。
-        # 使用 300s 超时并允许多次重试，避免因临时网络问题或图片尚未提交而提前退出。
-        retry_poll_timeout = max(config.image_poll_timeout_secs, 300)
+        # 后续轮询仍使用配置的超时预算，不强制延长到固定 300s。
+        retry_poll_timeout = config.image_poll_timeout_secs
         MAX_FALLBACK_POLL_RETRIES = 3
         for poll_attempt in range(1, MAX_FALLBACK_POLL_RETRIES + 1):
+            ensure_image_deadline(request.deadline)
             retry_wait_secs = min(30.0 * poll_attempt, config.image_poll_initial_wait_secs * poll_attempt)
             logger.info({
                 "event": "image_stream_retry_poll_after_wait",
@@ -1179,7 +1196,8 @@ def stream_image_outputs(
                 "retry_wait_secs": retry_wait_secs,
                 "poll_attempt": poll_attempt,
             })
-            time.sleep(retry_wait_secs)
+            sleep_with_image_deadline(retry_wait_secs, request.deadline)
+            ensure_image_deadline(request.deadline)
             try:
                 polled_file_ids, polled_sediment_ids = backend._poll_image_results(
                     conversation_id,
@@ -1216,7 +1234,7 @@ def stream_image_outputs(
                         "poll_attempt": poll_attempt,
                         "backoff_secs": backoff,
                     })
-                    time.sleep(backoff)
+                    sleep_with_image_deadline(backoff, request.deadline)
                     continue
                 # 超时错误或重试次数用尽，停止重试
                 break
@@ -1370,7 +1388,10 @@ def _generate_single_image(
                     code="upstream_timeout",
                     account_email=account_email,
                 ) from exc
-            raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
+            raise ImageGenerationError(
+                str(exc) or "upstream completed without returning an image result",
+                account_email=account_email,
+            ) from exc
 
         emitted_for_token = False
         returned_message = False
@@ -1479,6 +1500,36 @@ def _generate_single_image(
             if account_email and not getattr(exc, "account_email", ""):
                 exc.account_email = account_email
             error_text = str(exc)
+            if not emitted_for_token and is_token_auth_error(exc, error_text):
+                try:
+                    refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
+                except Exception as refresh_exc:
+                    refreshed_token = ""
+                    logger.warning({
+                        "event": "image_stream_token_refresh_failed",
+                        "request_token": token,
+                        "account_email": account_email,
+                        "index": index,
+                        "error": str(refresh_exc)[:200],
+                    })
+                if refreshed_token and refreshed_token != token:
+                    logger.warning({
+                        "event": "image_stream_token_refreshed_retry",
+                        "request_token": token,
+                        "refreshed_token": refreshed_token,
+                        "account_email": account_email,
+                        "index": index,
+                    })
+                    continue
+                account_service.remove_invalid_token(token, "image_stream")
+                logger.warning({
+                    "event": "image_stream_invalid_token_switch_account",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "index": index,
+                    "error": error_text[:200],
+                })
+                continue
             # 如果是模型返回文本而非图片，尝试换账号重试
             if is_model_text_reply_instead_of_image(error_text) and not emitted_for_token:
                 text_reply_retry_count += 1
@@ -1582,7 +1633,7 @@ def _generate_single_image(
                         "index": index,
                         "error": last_error[:200],
                     })
-                    time.sleep(min(2.0 * tls_retry_count, 10.0))
+                    sleep_with_image_deadline(min(2.0 * tls_retry_count, 10.0), request.deadline)
                     continue
             # 连接超时错误（curl 28）：同账号短等待重试，不切换账号
             if not emitted_for_token and is_connection_timeout_error(last_error):
@@ -1598,7 +1649,7 @@ def _generate_single_image(
                         "wait_secs": wait_secs,
                         "error": last_error[:200],
                     })
-                    time.sleep(wait_secs)
+                    sleep_with_image_deadline(wait_secs, request.deadline)
                     continue
             if transient:
                 raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email, conversation_id="") from exc

@@ -26,6 +26,10 @@ PUBLIC_IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 CHANNEL_BUSY_MESSAGE = "当前渠道拥堵，请稍后再试"
 RETRYABLE_UPSTREAM_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRYABLE_UPSTREAM_STATUS_RE = re.compile(
+    r"(?:status_code|status|http|response status code)\D*(429|500|502|503|504)\b",
+    re.IGNORECASE,
+)
 
 SUPPORTED_JSON_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
 MAX_JSON_IMAGE_BYTES = 10 * 1024 * 1024
@@ -196,7 +200,9 @@ def ensure_ok(response: requests.Response, context: str) -> None:
 def is_retriable_upstream_error(exc: BaseException) -> bool:
     if isinstance(exc, UpstreamHTTPError):
         return exc.status_code in RETRYABLE_UPSTREAM_STATUS_CODES
-    return isinstance(exc, requests.exceptions.RequestException)
+    if isinstance(exc, requests.exceptions.RequestException):
+        return True
+    return bool(RETRYABLE_UPSTREAM_STATUS_RE.search(str(exc or "")))
 
 
 def public_error_message(exc: BaseException) -> str:
