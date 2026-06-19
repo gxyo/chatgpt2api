@@ -139,7 +139,16 @@ class AccountService:
             return False
         if bool(account.get("image_quota_unknown")):
             return True
-        return int(account.get("quota") or 0) > 0
+        return AccountService._nonnegative_int(account.get("quota")) > 0
+
+    @staticmethod
+    def _nonnegative_int(value: object, default: int = 0) -> int:
+        if isinstance(value, (dict, list, tuple, set)):
+            return max(0, default)
+        try:
+            return max(0, int(value if value is not None else default))
+        except (TypeError, ValueError):
+            return max(0, default)
 
     @classmethod
     def _account_matches_plan_type(cls, account: dict, plan_type: str | None = None) -> bool:
@@ -222,7 +231,7 @@ class AccountService:
             normalized.pop("type", None)
         normalized["type"] = normalized.get("type") or "free"
         normalized["status"] = normalized.get("status") or "正常"
-        normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
+        normalized["quota"] = self._nonnegative_int(normalized.get("quota"))
         normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
         normalized["email"] = normalized.get("email") or None
         normalized["user_id"] = normalized.get("user_id") or None
@@ -235,9 +244,9 @@ class AccountService:
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
-        normalized["success"] = int(normalized.get("success") or 0)
-        normalized["fail"] = int(normalized.get("fail") or 0)
-        normalized["invalid_count"] = int(normalized.get("invalid_count") or 0)
+        normalized["success"] = self._nonnegative_int(normalized.get("success"))
+        normalized["fail"] = self._nonnegative_int(normalized.get("fail"))
+        normalized["invalid_count"] = self._nonnegative_int(normalized.get("invalid_count"))
         normalized["last_used_at"] = normalized.get("last_used_at")
         normalized["last_invalid_at"] = normalized.get("last_invalid_at") or None
         normalized["last_refresh_error"] = normalized.get("last_refresh_error") or None
@@ -1082,7 +1091,8 @@ class AccountService:
             for item in self._accounts.values():
                 account = dict(item)
                 token = account.get("access_token") or ""
-                account["image_inflight"] = int(self._image_inflight.get(token, 0))
+                inflight = self._image_inflight.get(token, [])
+                account["image_inflight"] = len(inflight) if isinstance(inflight, list) else self._nonnegative_int(inflight)
                 result.append(account)
             return result
 
@@ -1271,7 +1281,7 @@ class AccountService:
         if created_at is not None and (now - created_at).total_seconds() < self._NEW_ACCOUNT_INVALID_GRACE_SECONDS:
             return True
         last_invalid_at = self._parse_time(account.get("last_invalid_at"))
-        invalid_count = int(account.get("invalid_count") or 0)
+        invalid_count = self._nonnegative_int(account.get("invalid_count"))
         if invalid_count <= 1:
             return True
         if last_invalid_at is not None and (now - last_invalid_at).total_seconds() < self._INVALID_CONFIRM_SECONDS:
@@ -1293,7 +1303,7 @@ class AccountService:
                 return True
             should_defer = defer_invalid_removal and self._should_defer_invalid_token(current, now)
             next_item = dict(current)
-            next_item["invalid_count"] = int(next_item.get("invalid_count") or 0) + 1
+            next_item["invalid_count"] = self._nonnegative_int(next_item.get("invalid_count")) + 1
             next_item["last_invalid_at"] = now.isoformat()
             next_item["last_refresh_error"] = str(error or "invalid access token")
             next_item["last_refresh_error_at"] = now.isoformat()
@@ -1323,16 +1333,16 @@ class AccountService:
             next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             image_quota_unknown = bool(next_item.get("image_quota_unknown"))
             if success:
-                next_item["success"] = int(next_item.get("success") or 0) + 1
+                next_item["success"] = self._nonnegative_int(next_item.get("success")) + 1
                 if not image_quota_unknown:
-                    next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
+                    next_item["quota"] = max(0, self._nonnegative_int(next_item.get("quota")) - 1)
                 if not image_quota_unknown and next_item["quota"] == 0:
                     next_item["status"] = "限流"
                     next_item["restore_at"] = next_item.get("restore_at") or None
                 elif next_item.get("status") == "限流":
                     next_item["status"] = "正常"
             else:
-                next_item["fail"] = int(next_item.get("fail") or 0) + 1
+                next_item["fail"] = self._nonnegative_int(next_item.get("fail")) + 1
             account = self._normalize_account(next_item)
             if account is None:
                 return None
@@ -1404,7 +1414,7 @@ class AccountService:
         """刷新单个账号后，更新进度计数。"""
         account = self.get_account(token)
         status = str(account.get("status") or "正常").strip() if account else "正常"
-        quota = max(0, int(account.get("quota") or 0)) if account else 0
+        quota = self._nonnegative_int(account.get("quota")) if account else 0
 
         with self._refresh_progress_lock:
             progress = self._refresh_progress.get(progress_id)
@@ -1692,10 +1702,10 @@ class AccountService:
         limited = sum(1 for a in items if a.get("status") == "限流")
         abnormal = sum(1 for a in items if a.get("status") == "异常")
         disabled = sum(1 for a in items if a.get("status") == "禁用")
-        total_quota = sum(max(0, int(a.get("quota") or 0)) for a in items if a.get("status") == "正常")
+        total_quota = sum(self._nonnegative_int(a.get("quota")) for a in items if a.get("status") == "正常")
         unlimited = sum(1 for a in items if a.get("status") == "正常" and bool(a.get("image_quota_unknown")))
-        total_success = sum(int(a.get("success") or 0) for a in items)
-        total_fail = sum(int(a.get("fail") or 0) for a in items)
+        total_success = sum(self._nonnegative_int(a.get("success")) for a in items)
+        total_fail = sum(self._nonnegative_int(a.get("fail")) for a in items)
         by_type = {}
         for a in items:
             t = a.get("type", "unknown")

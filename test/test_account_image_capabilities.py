@@ -70,6 +70,41 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
 
+    def test_list_accounts_reports_inflight_slot_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service._image_inflight["token-1"] = [1.0, 2.0]
+
+            items = service.list_accounts()
+
+            self.assertEqual(items[0]["image_inflight"], 2)
+
+    def test_malformed_numeric_account_fields_are_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items(
+                [
+                    {
+                        "access_token": "token-1",
+                        "status": "正常",
+                        "quota": [],
+                        "success": {},
+                        "fail": (),
+                        "invalid_count": [],
+                    }
+                ]
+            )
+
+            account = service.get_account("token-1")
+            stats = service.get_stats()
+
+            self.assertEqual(account["quota"], 0)
+            self.assertEqual(account["success"], 0)
+            self.assertEqual(account["fail"], 0)
+            self.assertEqual(account["invalid_count"], 0)
+            self.assertEqual(stats["total_quota"], 0)
+
     def test_stale_image_slot_does_not_block_account_forever(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
