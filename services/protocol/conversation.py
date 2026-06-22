@@ -1451,8 +1451,8 @@ def _generate_single_image(
             account_service.mark_image_result(token, False)
             if account_email:
                 setattr(exc, "account_email", account_email)
-            # 轮询超时：换账号重试
-            if not emitted_for_token:
+            # 轮询超时：如果还没有拿到最终消息/图片，只丢弃本账号的进度并换号重试。
+            if not returned_message and not returned_result:
                 ensure_image_deadline(request.deadline)
                 poll_timeout_retry_count += 1
                 if poll_timeout_retry_count <= MAX_POLL_TIMEOUT_RETRIES:

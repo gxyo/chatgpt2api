@@ -105,6 +105,8 @@ FILE_ID_RE = re.compile(r"\b(file[-_](?!service\b)[A-Za-z0-9_-]+)\b")
 REAL_IMAGE_FILE_ID_RE = re.compile(r"\bfile_00000000[a-f0-9]{24}\b")
 SEDIMENT_ID_RE = re.compile(r"sediment://([A-Za-z0-9_-]+)")
 IMAGE_POLL_SETTLE_SECS = 2.0
+IMAGE_POLL_FAST_FAIL_STATUS_CODES = {502, 503, 504}
+IMAGE_POLL_FAST_FAIL_CONSECUTIVE_ERRORS = 2
 CODEX_RESPONSES_INSTRUCTIONS = (
     "Use the image_generation tool to create exactly one image for the user's request. "
     "Return the generated image result."
@@ -2242,6 +2244,8 @@ class OpenAIBackendAPI:
         last_hit_key: tuple[tuple[str, ...], tuple[str, ...]] | None = (
             (tuple(file_ids), tuple(sediment_ids)) if has_initial_ids else None
         )
+        consecutive_upstream_status = 0
+        last_upstream_status_code: int | None = None
         logger.info({
             "event": "image_poll_start",
             "conversation_id": conversation_id,
@@ -2320,6 +2324,29 @@ class OpenAIBackendAPI:
                 conversation = self._get_conversation(conversation_id)
             except UpstreamHTTPError as exc:
                 if exc.status_code in (429, 500, 502, 503, 504):
+                    if exc.status_code == last_upstream_status_code:
+                        consecutive_upstream_status += 1
+                    else:
+                        last_upstream_status_code = exc.status_code
+                        consecutive_upstream_status = 1
+                    if (
+                        exc.status_code in IMAGE_POLL_FAST_FAIL_STATUS_CODES
+                        and consecutive_upstream_status >= IMAGE_POLL_FAST_FAIL_CONSECUTIVE_ERRORS
+                        and not file_ids
+                        and not sediment_ids
+                    ):
+                        logger.warning({
+                            "event": "image_poll_fast_fail_upstream_status",
+                            "conversation_id": conversation_id,
+                            "status_code": exc.status_code,
+                            "consecutive_errors": consecutive_upstream_status,
+                        })
+                        fast_exc = ImagePollTimeoutError(
+                            f"ChatGPT 生图轮询连续返回 HTTP {exc.status_code}，已提前超时。"
+                        )
+                        setattr(fast_exc, "conversation_id", conversation_id or "")
+                        setattr(fast_exc, "upstream_status_code", exc.status_code)
+                        raise fast_exc from exc
                     if _retry_sleep("upstream_status", exc.status_code, None, exc.retry_after):
                         continue
                     break
@@ -2328,6 +2355,9 @@ class OpenAIBackendAPI:
                 if _retry_sleep("network", None, str(exc), None):
                     continue
                 break
+            else:
+                consecutive_upstream_status = 0
+                last_upstream_status_code = None
 
             for record in self._extract_image_tool_records(conversation):
                 for file_id in record["file_ids"]:

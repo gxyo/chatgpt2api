@@ -12,6 +12,7 @@ from services.openai_backend_api import (
     FAST_UPSTREAM_TIMEOUT_SECS,
     ImagePollTimeoutError,
     OpenAIBackendAPI,
+    config as backend_config,
 )
 from services.protocol import conversation
 from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput
@@ -213,6 +214,59 @@ class UpstreamRetryTests(unittest.TestCase):
 
         self.assertTrue(is_retriable_upstream_error(exc))
         self.assertEqual(public_error_message(exc), CHANNEL_BUSY_MESSAGE)
+
+    def test_image_poll_fast_fails_repeated_504(self):
+        api = OpenAIBackendAPI("token-a")
+        api.session = FakeSession([
+            FakeResponse(200, {"tasks": []}),
+            FakeResponse(504, text=""),
+            FakeResponse(200, {"tasks": []}),
+            FakeResponse(504, text=""),
+        ])
+        original_initial_wait = backend_config.data.get("image_poll_initial_wait_secs")
+        original_interval = backend_config.data.get("image_poll_interval_secs")
+        backend_config.data["image_poll_initial_wait_secs"] = 0
+        backend_config.data["image_poll_interval_secs"] = 0.5
+        try:
+            with mock.patch("services.openai_backend_api.time.sleep", lambda _: None):
+                with self.assertRaises(ImagePollTimeoutError) as ctx:
+                    api._poll_image_results("conv-504", timeout_secs=120)
+        finally:
+            if original_initial_wait is None:
+                backend_config.data.pop("image_poll_initial_wait_secs", None)
+            else:
+                backend_config.data["image_poll_initial_wait_secs"] = original_initial_wait
+            if original_interval is None:
+                backend_config.data.pop("image_poll_interval_secs", None)
+            else:
+                backend_config.data["image_poll_interval_secs"] = original_interval
+
+        self.assertIn("HTTP 504", str(ctx.exception))
+        self.assertEqual(getattr(ctx.exception, "conversation_id", ""), "conv-504")
+        conversation_calls = [
+            call for call in api.session.calls
+            if "/backend-api/conversation/conv-504" in call[1]
+        ]
+        self.assertEqual(len(conversation_calls), 2)
+
+    def test_image_pool_retries_poll_timeout_after_progress_only(self):
+        fake_accounts = FakeAccountService(["token-a", "token-b"])
+
+        def fake_stream_image_outputs(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                yield ImageOutput(kind="progress", model=request.model, index=index, total=total, text="starting")
+                raise ImagePollTimeoutError("ChatGPT 生图轮询连续返回 HTTP 504，已提前超时。")
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        with mock.patch.object(conversation, "account_service", fake_accounts), \
+             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs):
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="test",
+            )))
+
+        self.assertEqual(outputs[0].kind, "result")
+        self.assertEqual(fake_accounts.image_results, [("token-a", False), ("token-b", True)])
 
     def test_image_text_reply_poll_uses_configured_timeout(self):
         timeouts: list[float] = []
