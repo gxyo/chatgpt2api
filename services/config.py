@@ -108,7 +108,7 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
 
 def _normalize_refresh_all_interval(value: object) -> int:
     interval = _normalize_positive_int(value, 0, 0)
-    return 0 if interval <= 0 else max(10, interval)
+    return 0 if interval <= 0 else interval
 
 
 def _normalize_backup_include(value: object) -> dict[str, bool]:

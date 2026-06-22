@@ -82,9 +82,9 @@ class ConfigLoadingTests(unittest.TestCase):
             saved = json.loads(config_file.read_text(encoding="utf-8"))
 
             self.assertEqual(config["refresh_account_interval_minute"], 1)
-            self.assertEqual(config["refresh_all_accounts_interval_minute"], 10)
+            self.assertEqual(config["refresh_all_accounts_interval_minute"], 1)
             self.assertEqual(saved["refresh_account_interval_minute"], 1)
-            self.assertEqual(saved["refresh_all_accounts_interval_minute"], 10)
+            self.assertEqual(saved["refresh_all_accounts_interval_minute"], 1)
 
 
 if __name__ == "__main__":

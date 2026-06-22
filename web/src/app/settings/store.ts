@@ -48,7 +48,7 @@ function normalizeRefreshAllInterval(value: unknown) {
   if (!Number.isFinite(interval) || interval <= 0) {
     return 0;
   }
-  return Math.max(10, interval);
+  return Math.floor(interval);
 }
 
 const DEFAULT_PROXY_RUNTIME: ProxyRuntimeSettings = {
