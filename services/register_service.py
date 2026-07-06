@@ -236,8 +236,33 @@ class RegisterService:
             "current_available": len(normal),
         }
 
+    def _refresh_pool_before_check(self) -> bool:
+        tokens = account_service.list_tokens()
+        if not tokens:
+            self._append_log("检查前刷新账号信息和额度：号池为空，直接进入补号判断", "yellow")
+            return True
+        try:
+            self._append_log(f"检查前刷新账号信息和额度：开始刷新 {len(tokens)} 个账号", "yellow")
+            result = account_service.refresh_accounts(tokens, defer_invalid_removal=False)
+        except Exception as exc:
+            self._append_log(f"检查前刷新账号信息和额度失败，跳过本轮补号：{exc}", "red")
+            return False
+
+        errors = result.get("errors") if isinstance(result, dict) else []
+        error_count = len(errors) if isinstance(errors, list) else 0
+        refreshed = int(result.get("refreshed") or 0) if isinstance(result, dict) else 0
+        if error_count:
+            self._append_log(f"检查前刷新账号信息和额度完成：成功 {refreshed} 个，失败 {error_count} 个；继续按刷新后的号池判断", "yellow")
+        else:
+            self._append_log(f"检查前刷新账号信息和额度完成：成功 {refreshed} 个", "green")
+        return True
+
     def _target_reached(self, cfg: dict, submitted: int) -> bool:
         mode = str(cfg.get("mode") or "total")
+        if mode in {"quota", "available"} and not self._refresh_pool_before_check():
+            self._bump(**self._pool_metrics())
+            return True
+
         metrics = self._pool_metrics()
         self._bump(**metrics)
         if mode == "quota":
@@ -276,11 +301,19 @@ class RegisterService:
             futures = set()
             while True:
                 cfg = self.get()
-                while self.get()["enabled"] and not self._target_reached(cfg, submitted) and len(futures) < threads:
-                    submitted += 1
-                    futures.add(executor.submit(openai_register.worker, submitted))
+                mode = str(cfg.get("mode") or "total")
+                if self.get()["enabled"]:
+                    if mode == "total":
+                        total = int(cfg.get("total") or 1)
+                        while self.get()["enabled"] and submitted < total and len(futures) < threads:
+                            submitted += 1
+                            futures.add(executor.submit(openai_register.worker, submitted))
+                    elif not self._target_reached(cfg, submitted):
+                        while self.get()["enabled"] and len(futures) < threads:
+                            submitted += 1
+                            futures.add(executor.submit(openai_register.worker, submitted))
                 self._bump(running=len(futures), done=done, success=success, fail=fail)
-                if not futures and (not self.get()["enabled"] or str(cfg.get("mode") or "total") == "total"):
+                if not futures and (not self.get()["enabled"] or mode == "total"):
                     break
                 if not futures:
                     time.sleep(max(1, int(cfg.get("check_interval") or 5)))
