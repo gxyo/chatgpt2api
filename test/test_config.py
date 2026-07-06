@@ -49,7 +49,7 @@ class ConfigLoadingTests(unittest.TestCase):
 
                 self.assertEqual(settings.auth_key, os_auth_key)
                 self.assertEqual(settings.refresh_account_interval_minute, 5)
-                self.assertEqual(settings.refresh_all_accounts_interval_minute, 0)
+                self.assertIsNone(settings.refresh_all_accounts_interval_minute)
             finally:
                 module.BASE_DIR = old_base_dir
                 module.DATA_DIR = old_data_dir
@@ -66,10 +66,27 @@ class ConfigLoadingTests(unittest.TestCase):
 
             store = self.config_module.ConfigStore(config_file)
 
-            self.assertEqual(store.refresh_all_accounts_interval_minute, 0)
-            self.assertEqual(store.get()["refresh_all_accounts_interval_minute"], 0)
+            self.assertIsNone(store.refresh_all_accounts_interval_minute)
+            self.assertIsNone(store.get()["refresh_all_accounts_interval_minute"])
 
-    def test_refresh_intervals_are_normalized_when_saved(self) -> None:
+    def test_refresh_intervals_can_be_disabled_when_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            config = store.update({
+                "refresh_account_interval_minute": "",
+                "refresh_all_accounts_interval_minute": None,
+            })
+            saved = json.loads(config_file.read_text(encoding="utf-8"))
+
+            self.assertIsNone(config["refresh_account_interval_minute"])
+            self.assertIsNone(config["refresh_all_accounts_interval_minute"])
+            self.assertIsNone(saved["refresh_account_interval_minute"])
+            self.assertIsNone(saved["refresh_all_accounts_interval_minute"])
+
+    def test_refresh_interval_zero_is_treated_as_disabled_for_compatibility(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "config.json"
             config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
@@ -77,14 +94,25 @@ class ConfigLoadingTests(unittest.TestCase):
 
             config = store.update({
                 "refresh_account_interval_minute": 0,
-                "refresh_all_accounts_interval_minute": 1,
+                "refresh_all_accounts_interval_minute": 0,
             })
-            saved = json.loads(config_file.read_text(encoding="utf-8"))
 
-            self.assertEqual(config["refresh_account_interval_minute"], 1)
-            self.assertEqual(config["refresh_all_accounts_interval_minute"], 1)
-            self.assertEqual(saved["refresh_account_interval_minute"], 1)
-            self.assertEqual(saved["refresh_all_accounts_interval_minute"], 1)
+            self.assertIsNone(config["refresh_account_interval_minute"])
+            self.assertIsNone(config["refresh_all_accounts_interval_minute"])
+
+    def test_positive_refresh_intervals_are_saved_as_integers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            config = store.update({
+                "refresh_account_interval_minute": "60",
+                "refresh_all_accounts_interval_minute": "2",
+            })
+
+            self.assertEqual(config["refresh_account_interval_minute"], 60)
+            self.assertEqual(config["refresh_all_accounts_interval_minute"], 2)
 
 
 if __name__ == "__main__":

@@ -83,10 +83,13 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
-    interval_seconds = config.refresh_account_interval_minute * 60
-
     def worker() -> None:
         while not stop_event.is_set():
+            interval_minutes = config.refresh_account_interval_minute
+            if not interval_minutes or interval_minutes <= 0:
+                stop_event.wait(DISABLED_REFRESH_POLL_SECONDS)
+                continue
+
             try:
                 limited_tokens = account_service.list_limited_tokens()
                 normal_tokens = account_service.list_normal_tokens()
@@ -112,7 +115,10 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                         print(f"[account-watcher] keepalive errors: {result['errors']}")
             except Exception as exc:
                 print(f"[account-watcher] fail {exc}")
-            stop_event.wait(interval_seconds)
+
+            interval_minutes = config.refresh_account_interval_minute
+            wait_seconds = interval_minutes * 60 if interval_minutes and interval_minutes > 0 else DISABLED_REFRESH_POLL_SECONDS
+            stop_event.wait(wait_seconds)
 
     thread = Thread(target=worker, name="account-watcher", daemon=True)
     thread.start()
@@ -123,7 +129,7 @@ def start_all_account_watcher(stop_event: Event) -> Thread:
     def worker() -> None:
         while not stop_event.is_set():
             interval_minutes = config.refresh_all_accounts_interval_minute
-            if interval_minutes <= 0:
+            if not interval_minutes or interval_minutes <= 0:
                 stop_event.wait(DISABLED_REFRESH_POLL_SECONDS)
                 continue
 
@@ -137,7 +143,7 @@ def start_all_account_watcher(stop_event: Event) -> Thread:
                 print(f"[account-all-watcher] fail {exc}")
 
             interval_minutes = config.refresh_all_accounts_interval_minute
-            wait_seconds = interval_minutes * 60 if interval_minutes > 0 else DISABLED_REFRESH_POLL_SECONDS
+            wait_seconds = interval_minutes * 60 if interval_minutes and interval_minutes > 0 else DISABLED_REFRESH_POLL_SECONDS
             stop_event.wait(wait_seconds)
 
     thread = Thread(target=worker, name="all-account-watcher", daemon=True)

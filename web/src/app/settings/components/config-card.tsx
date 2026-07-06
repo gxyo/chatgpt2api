@@ -89,22 +89,22 @@ export function ConfigCard() {
           <div className="space-y-2">
             <label className="text-sm text-stone-700">限流账号检查间隔</label>
             <Input
-              value={String(config?.refresh_account_interval_minute || "")}
+              value={config?.refresh_account_interval_minute == null ? "" : String(config.refresh_account_interval_minute)}
               onChange={(event) => setRefreshAccountIntervalMinute(event.target.value)}
-              placeholder="分钟"
+              placeholder="留空关闭"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">单位分钟，只检查限流账号是否恢复。</p>
+            <p className="text-xs text-stone-500">单位分钟，留空表示不启用。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">全部账号刷新间隔</label>
             <Input
-              value={String(config?.refresh_all_accounts_interval_minute ?? "")}
+              value={config?.refresh_all_accounts_interval_minute == null ? "" : String(config.refresh_all_accounts_interval_minute)}
               onChange={(event) => setRefreshAllAccountsIntervalMinute(event.target.value)}
-              placeholder="0 表示关闭"
+              placeholder="留空关闭"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">单位分钟，自动刷新所有非禁用账号；0 表示关闭。</p>
+            <p className="text-xs text-stone-500">单位分钟，自动刷新所有非禁用账号；留空表示不启用。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">全局代理</label>
