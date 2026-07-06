@@ -48,6 +48,42 @@ class RegisterServiceTests(unittest.TestCase):
         finally:
             register_module.account_service = original_account_service
 
+    def test_available_mode_plans_missing_accounts_as_one_batch(self) -> None:
+        from services import register_service as register_module
+
+        fake_account_service = FakeAccountService()
+        fake_account_service.items = [
+            {"access_token": f"token-{index}", "status": "正常", "quota": 5}
+            for index in range(34)
+        ]
+
+        def refresh_accounts(tokens: list[str], defer_invalid_removal: bool = True) -> dict:
+            fake_account_service.refresh_calls.append({
+                "tokens": list(tokens),
+                "defer_invalid_removal": defer_invalid_removal,
+            })
+            return {"refreshed": len(tokens), "errors": [], "items": fake_account_service.items}
+
+        fake_account_service.list_tokens = lambda: [item["access_token"] for item in fake_account_service.items]
+        fake_account_service.refresh_accounts = refresh_accounts
+        original_account_service = register_module.account_service
+        try:
+            register_module.account_service = fake_account_service
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                service = register_module.RegisterService(Path(tmp_dir) / "register.json")
+
+                plan = service._target_plan(
+                    {"mode": "available", "target_available": 40, "target_quota": 1, "threads": 2},
+                    submitted=0,
+                    max_batch=2,
+                )
+
+            self.assertFalse(plan["reached"])
+            self.assertEqual(plan["batch_size"], 6)
+            self.assertEqual(len(fake_account_service.refresh_calls), 1)
+        finally:
+            register_module.account_service = original_account_service
+
 
 if __name__ == "__main__":
     unittest.main()

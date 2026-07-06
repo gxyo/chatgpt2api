@@ -257,23 +257,30 @@ class RegisterService:
             self._append_log(f"检查前刷新账号信息和额度完成：成功 {refreshed} 个", "green")
         return True
 
-    def _target_reached(self, cfg: dict, submitted: int) -> bool:
+    def _target_plan(self, cfg: dict, submitted: int, max_batch: int) -> dict:
         mode = str(cfg.get("mode") or "total")
         if mode in {"quota", "available"} and not self._refresh_pool_before_check():
             self._bump(**self._pool_metrics())
-            return True
+            return {"reached": True, "batch_size": 0}
 
         metrics = self._pool_metrics()
         self._bump(**metrics)
         if mode == "quota":
-            reached = metrics["current_quota"] >= int(cfg.get("target_quota") or 1)
+            target_quota = int(cfg.get("target_quota") or 1)
+            reached = metrics["current_quota"] >= target_quota
             self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，当前剩余额度={metrics['current_quota']}，目标额度={cfg.get('target_quota')}，{'跳过注册' if reached else '继续注册'}", "yellow")
-            return reached
+            quota_gap = max(0, target_quota - metrics["current_quota"])
+            return {"reached": reached, "batch_size": 0 if reached else min(max_batch, max(1, quota_gap))}
         if mode == "available":
-            reached = metrics["current_available"] >= int(cfg.get("target_available") or 1)
+            target_available = int(cfg.get("target_available") or 1)
+            reached = metrics["current_available"] >= target_available
             self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，目标账号={cfg.get('target_available')}，当前剩余额度={metrics['current_quota']}，{'跳过注册' if reached else '继续注册'}", "yellow")
-            return reached
-        return submitted >= int(cfg.get("total") or 1)
+            missing = max(0, target_available - metrics["current_available"])
+            return {"reached": reached, "batch_size": 0 if reached else missing}
+        return {"reached": submitted >= int(cfg.get("total") or 1), "batch_size": 0}
+
+    def _target_reached(self, cfg: dict, submitted: int) -> bool:
+        return bool(self._target_plan(cfg, submitted, max_batch=max(1, int(cfg.get("threads") or 1))).get("reached"))
 
     def _bump(self, **updates) -> None:
         with self._lock:
@@ -308,8 +315,12 @@ class RegisterService:
                         while self.get()["enabled"] and submitted < total and len(futures) < threads:
                             submitted += 1
                             futures.add(executor.submit(openai_register.worker, submitted))
-                    elif not self._target_reached(cfg, submitted):
-                        while self.get()["enabled"] and len(futures) < threads:
+                    elif not futures:
+                        plan = self._target_plan(cfg, submitted, max_batch=threads)
+                        batch_size = max(0, int(plan.get("batch_size") or 0))
+                        if batch_size > 0:
+                            self._append_log(f"本轮计划补号 {batch_size} 个，补完后再重新检查号池", "yellow")
+                        while self.get()["enabled"] and len(futures) < batch_size:
                             submitted += 1
                             futures.add(executor.submit(openai_register.worker, submitted))
                 self._bump(running=len(futures), done=done, success=success, fail=fail)
@@ -318,7 +329,11 @@ class RegisterService:
                 if not futures:
                     time.sleep(max(1, int(cfg.get("check_interval") or 5)))
                     continue
-                finished, futures = wait(futures, return_when=FIRST_COMPLETED)
+                if mode == "total":
+                    finished, futures = wait(futures, return_when=FIRST_COMPLETED)
+                else:
+                    finished, _ = wait(futures)
+                    futures = set()
                 for future in finished:
                     done += 1
                     try:
