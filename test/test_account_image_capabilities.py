@@ -14,7 +14,7 @@ from services.auth_service import AuthService
 from services.config import config
 from services.openai_backend_api import InvalidAccessTokenError
 from services.storage.json_storage import JSONStorageBackend
-from utils.helper import anonymize_token, split_image_model
+from utils.helper import UpstreamHTTPError, anonymize_token, split_image_model
 
 
 class AccountCapabilityTests(unittest.TestCase):
@@ -150,7 +150,7 @@ class AccountCapabilityTests(unittest.TestCase):
 
     def test_refresh_accounts_can_remove_invalid_token_without_confirmation_delay(self) -> None:
         original_value = config.data.get("auto_remove_invalid_accounts")
-        config.data["auto_remove_invalid_accounts"] = True
+        config.data["auto_remove_invalid_accounts"] = False
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
@@ -171,6 +171,66 @@ class AccountCapabilityTests(unittest.TestCase):
                 config.data.pop("auto_remove_invalid_accounts", None)
             else:
                 config.data["auto_remove_invalid_accounts"] = original_value
+
+    def test_force_refresh_removes_limited_and_zero_quota_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "limited-token", "status": "正常", "quota": 5},
+                {"access_token": "zero-token", "status": "正常", "quota": 5},
+                {"access_token": "healthy-token", "status": "正常", "quota": 5},
+            ])
+
+            def fake_user_info(access_token: str) -> dict:
+                if access_token == "limited-token":
+                    return {"status": "限流", "quota": 0}
+                if access_token == "zero-token":
+                    return {"status": "正常", "quota": 0}
+                return {"status": "正常", "quota": 3}
+
+            with patch(
+                "services.openai_backend_api.OpenAIBackendAPI.get_user_info",
+                lambda api: fake_user_info(api.access_token),
+            ):
+                result = service.refresh_accounts(
+                    ["limited-token", "zero-token", "healthy-token"],
+                    defer_invalid_removal=False,
+                )
+
+            self.assertEqual(result["refreshed"], 3)
+            self.assertIsNone(service.get_account("limited-token"))
+            self.assertIsNone(service.get_account("zero-token"))
+            self.assertIsNotNone(service.get_account("healthy-token"))
+            self.assertEqual([item["access_token"] for item in result["items"]], ["healthy-token"])
+
+    def test_force_refresh_removes_configured_http_error_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "delete-token", "status": "正常", "quota": 5},
+                {"access_token": "keep-token", "status": "正常", "quota": 5},
+                {"access_token": "stale-limited-token", "status": "限流", "quota": 0},
+            ])
+
+            def fake_user_info(access_token: str) -> dict:
+                if access_token == "delete-token":
+                    raise UpstreamHTTPError("/backend-api/me", 403, "forbidden")
+                raise UpstreamHTTPError("/backend-api/me", 429, "rate limited")
+
+            with patch(
+                "services.openai_backend_api.OpenAIBackendAPI.get_user_info",
+                lambda api: fake_user_info(api.access_token),
+            ):
+                result = service.refresh_accounts(
+                    ["delete-token", "keep-token", "stale-limited-token"],
+                    defer_invalid_removal=False,
+                )
+
+            self.assertEqual(result["refreshed"], 0)
+            self.assertEqual(len(result["errors"]), 3)
+            self.assertIsNone(service.get_account("delete-token"))
+            self.assertIsNone(service.get_account("stale-limited-token"))
+            self.assertIsNotNone(service.get_account("keep-token"))
 
     def test_refresh_accounts_defers_invalid_token_removal_by_default(self) -> None:
         original_value = config.data.get("auto_remove_invalid_accounts")

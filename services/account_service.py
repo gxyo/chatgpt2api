@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import secrets
 import time
 import uuid
@@ -21,6 +22,7 @@ from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
 ACCOUNT_REFRESH_MAX_WORKERS = 6
+FORCE_REFRESH_REMOVE_STATUS_CODES = {401, 402, 403, 502, 503, 504}
 
 
 class AccountService:
@@ -1072,6 +1074,16 @@ class AccountService:
             self.update_account(access_token, {"status": "异常", "quota": 0}, quiet=quiet)
         return removed
 
+    def force_remove_invalid_token(self, access_token: str, event: str, error: str = "") -> bool:
+        removed = self._delete_account_quietly(
+            access_token,
+            "一键刷新移除无效账号",
+            {"source": event, "error": str(error or "")},
+        )
+        if not removed and access_token:
+            self.update_account(access_token, {"status": "异常", "quota": 0}, quiet=True)
+        return removed
+
     def get_account(self, access_token: str) -> dict | None:
         if not access_token:
             return None
@@ -1235,6 +1247,68 @@ class AccountService:
             items = [dict(item) for item in self._accounts.values()]
         return {"removed": removed, "items": items}
 
+    def _delete_account_quietly(self, access_token: str, reason: str, details: dict[str, Any] | None = None) -> bool:
+        if not access_token:
+            return False
+        with self._lock:
+            access_token = self._resolve_access_token_locked(access_token)
+            current = self._accounts.pop(access_token, None)
+            if current is None:
+                return False
+            self._image_inflight.pop(access_token, None)
+            self._image_expired_slots.pop(access_token, None)
+            self._token_aliases = {
+                old: new
+                for old, new in self._token_aliases.items()
+                if old != access_token and new != access_token
+            }
+            if self._accounts:
+                self._index %= len(self._accounts)
+            else:
+                self._index = 0
+            self._save_accounts()
+        log_service.add(LOG_TYPE_ACCOUNT, reason, {"token": anonymize_token(access_token), **(details or {})})
+        return True
+
+    @staticmethod
+    def _refresh_error_status_code(exc: BaseException) -> int | None:
+        status_code = getattr(exc, "status_code", None)
+        try:
+            if status_code is not None:
+                return int(status_code)
+        except (TypeError, ValueError):
+            pass
+        message = str(exc or "")
+        match = re.search(r"(?:status|http|code)[=:\s_-]*(401|402|403|502|503|504)\b", message, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        match = re.search(r"\b(401|402|403|502|503|504)\b", message)
+        return int(match.group(1)) if match else None
+
+    def _force_refresh_should_remove_account(self, account: dict | None) -> tuple[bool, str]:
+        if not isinstance(account, dict):
+            return False, ""
+        status = str(account.get("status") or "").strip()
+        if status == "限流":
+            return True, "一键刷新移除限流账号"
+        if self._nonnegative_int(account.get("quota")) <= 0:
+            return True, "一键刷新移除额度为 0 的账号"
+        return False, ""
+
+    def _cleanup_force_refreshed_accounts(self, access_tokens: list[str]) -> None:
+        for token in access_tokens:
+            account = self.get_account(token)
+            should_remove, reason = self._force_refresh_should_remove_account(account)
+            if should_remove and account is not None:
+                self._delete_account_quietly(
+                    str(account.get("access_token") or token),
+                    reason,
+                    {
+                        "status": account.get("status"),
+                        "quota": self._nonnegative_int(account.get("quota")),
+                    },
+                )
+
     def update_account(self, access_token: str, updates: dict, quiet: bool = False) -> dict | None:
         if not access_token:
             return None
@@ -1381,7 +1455,10 @@ class AccountService:
                         str(retry_exc),
                         defer_invalid_removal=defer_invalid_removal,
                     ):
-                        self.remove_invalid_token(refreshed_token, event)
+                        if defer_invalid_removal:
+                            self.remove_invalid_token(refreshed_token, event)
+                        else:
+                            self.force_remove_invalid_token(refreshed_token, event, str(retry_exc))
                     raise
                 active_token = refreshed_token
             else:
@@ -1391,7 +1468,10 @@ class AccountService:
                     str(exc),
                     defer_invalid_removal=defer_invalid_removal,
                 ):
-                    self.remove_invalid_token(active_token, event)
+                    if defer_invalid_removal:
+                        self.remove_invalid_token(active_token, event)
+                    else:
+                        self.force_remove_invalid_token(active_token, event, str(exc))
                 raise
         self._record_refresh_success(active_token)
         return self.update_account(active_token, result)
@@ -1536,9 +1616,28 @@ class AccountService:
                     from services.protocol.conversation import is_tls_connection_error
                     if not is_tls_connection_error(error_str):
                         errors.append({"token": anonymize_token(token), "error": error_str})
+                    if not defer_invalid_removal:
+                        status_code = self._refresh_error_status_code(exc)
+                        if status_code in FORCE_REFRESH_REMOVE_STATUS_CODES:
+                            self._delete_account_quietly(
+                                token,
+                                f"一键刷新移除 HTTP {status_code} 错误账号",
+                                {"status_code": status_code, "error": error_str},
+                            )
                 else:
                     if account is not None:
                         refreshed += 1
+                    if not defer_invalid_removal:
+                        should_remove, reason = self._force_refresh_should_remove_account(account)
+                        if should_remove:
+                            self._delete_account_quietly(
+                                str(account.get("access_token") or token),
+                                reason,
+                                {
+                                    "status": account.get("status"),
+                                    "quota": self._nonnegative_int(account.get("quota")),
+                                },
+                            )
 
                 if progress_id:
                     self.update_refresh_progress(progress_id, token)
@@ -1549,6 +1648,9 @@ class AccountService:
             raise
         else:
             executor.shutdown(wait=True, cancel_futures=True)
+
+        if not defer_invalid_removal:
+            self._cleanup_force_refreshed_accounts(access_tokens)
 
         # 自动重新登录异常账号（仅当配置开启时）
         relogined = 0
