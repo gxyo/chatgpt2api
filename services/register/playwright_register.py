@@ -153,11 +153,19 @@ async def _browser_register_flow(
 
     step(index, "输入邮箱")
     email_input = page.locator('input[name="email"], input[type="email"], input[id="email"], input[id="username"]').first
-    try:
-        await email_input.wait_for(state="visible", timeout=30_000)
-    except Exception:
-        body = await _page_debug_info(page)
-        raise RuntimeError(f"未找到邮箱输入框, url={page.url}, body={body}")
+    for attempt in range(3):
+        try:
+            await email_input.wait_for(state="visible", timeout=15_000)
+            break
+        except Exception:
+            if attempt < 2:
+                step(index, f"邮箱输入框未出现，刷新页面重试 ({attempt + 1}/2)")
+                await page.reload(wait_until="domcontentloaded", timeout=REGISTER_TIMEOUT)
+                await page.wait_for_timeout(3000)
+                email_input = page.locator('input[name="email"], input[type="email"], input[id="email"], input[id="username"]').first
+            else:
+                body = await _page_debug_info(page)
+                raise RuntimeError(f"未找到邮箱输入框, url={page.url}, body={body}")
     await email_input.fill(email)
 
     continue_btn = page.locator('button[type="submit"], button:has-text("Continue"), button:has-text("继续")').first
@@ -229,7 +237,7 @@ async def _browser_register_flow(
         session.close()
 
     if not tokens or not tokens.get("access_token"):
-        raise RuntimeError("OAuth token 交换失败")
+        raise RuntimeError("OAuth token 交换返回数据缺少 access_token")
 
     step(index, "注册完成，token 获取成功")
     return {

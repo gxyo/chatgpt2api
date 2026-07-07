@@ -277,7 +277,7 @@ class RegisterService:
             reached = metrics["current_available"] >= target_available
             self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，目标账号={cfg.get('target_available')}，当前剩余额度={metrics['current_quota']}，{'跳过注册' if reached else '继续注册'}", "yellow")
             missing = max(0, target_available - metrics["current_available"])
-            return {"reached": reached, "batch_size": 0 if reached else min(max_batch, missing)}
+            return {"reached": reached, "batch_size": 0 if reached else missing}
         return {"reached": submitted >= int(cfg.get("total") or 1), "batch_size": 0}
 
     def _target_reached(self, cfg: dict, submitted: int) -> bool:

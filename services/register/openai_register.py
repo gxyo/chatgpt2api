@@ -285,7 +285,7 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
 
 
-def request_platform_oauth_token(session: Any, code: str, code_verifier: str) -> dict | None:
+def request_platform_oauth_token(session: Any, code: str, code_verifier: str) -> dict:
     headers = {
         "accept": "*/*",
         "accept-language": "zh-CN,zh;q=0.9",
@@ -318,8 +318,7 @@ def request_platform_oauth_token(session: Any, code: str, code_verifier: str) ->
         timeout=60,
     )
     if resp.status_code != 200:
-        print(resp.text)
-        return None
+        raise RuntimeError(f"OAuth token 交换失败: status={resp.status_code}, body={resp.text[:200]}")
     return _response_json(resp)
 
 
