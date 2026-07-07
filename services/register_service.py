@@ -50,6 +50,7 @@ def _normalize(raw: dict) -> dict:
     cfg["target_available"] = max(1, int(cfg.get("target_available") or 1))
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
     cfg["proxy"] = str(cfg.get("proxy") or "").strip()
+    cfg["engine"] = str(cfg.get("engine") or "playwright").strip() if str(cfg.get("engine") or "playwright").strip() in {"playwright", "http"} else "playwright"
     if isinstance(cfg.get("mail"), dict):
         cfg["mail"].pop("proxy", None)
     cfg["enabled"] = bool(cfg.get("enabled"))
@@ -164,7 +165,7 @@ class RegisterService:
             self._merge_outlook_pools(updates)
             self._config = _normalize({**self._config, **updates})
             self._drop_mail_proxy()
-            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
+            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "engine")})
             self._save()
             return self.get()
 
@@ -179,7 +180,7 @@ class RegisterService:
             self._logs = []
             metrics = self._pool_metrics()
             self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
-            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
+            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "engine")})
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
             self._save()
@@ -210,7 +211,7 @@ class RegisterService:
         if scope == "unused":
             with self._lock:
                 removed = self._prune_unused_outlook_pools()
-                openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
+                openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "engine")})
                 self._save()
                 self._append_log(f"已清空 Outlook 邮箱池未使用邮箱，移除 {removed} 个", "yellow")
             return self.get()
@@ -276,7 +277,7 @@ class RegisterService:
             reached = metrics["current_available"] >= target_available
             self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，目标账号={cfg.get('target_available')}，当前剩余额度={metrics['current_quota']}，{'跳过注册' if reached else '继续注册'}", "yellow")
             missing = max(0, target_available - metrics["current_available"])
-            return {"reached": reached, "batch_size": 0 if reached else missing}
+            return {"reached": reached, "batch_size": 0 if reached else min(max_batch, missing)}
         return {"reached": submitted >= int(cfg.get("total") or 1), "batch_size": 0}
 
     def _target_reached(self, cfg: dict, submitted: int) -> bool:
@@ -329,11 +330,7 @@ class RegisterService:
                 if not futures:
                     time.sleep(max(1, int(cfg.get("check_interval") or 5)))
                     continue
-                if mode == "total":
-                    finished, futures = wait(futures, return_when=FIRST_COMPLETED)
-                else:
-                    finished, _ = wait(futures)
-                    futures = set()
+                finished, futures = wait(futures, return_when=FIRST_COMPLETED)
                 for future in finished:
                     done += 1
                     try:

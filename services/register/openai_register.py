@@ -33,11 +33,12 @@ config = {
     "proxy": "",
     "total": 10,
     "threads": 3,
+    "engine": "playwright",
 }
 register_config_file = base_dir.parents[1] / "data" / "register.json"
 try:
     saved_config = json.loads(register_config_file.read_text(encoding="utf-8"))
-    config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads") if key in saved_config})
+    config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads", "engine") if key in saved_config})
 except Exception:
     pass
 
@@ -475,10 +476,18 @@ class PlatformRegistrar:
 
 def worker(index: int) -> dict:
     start = time.time()
-    registrar = PlatformRegistrar(config["proxy"])
+    engine = str(config.get("engine") or "playwright").strip()
     try:
-        step(index, "任务启动")
-        result = registrar.register(index)
+        step(index, f"任务启动 (引擎: {engine})")
+        if engine == "playwright":
+            from services.register.playwright_register import register as pw_register
+            result = pw_register(index, config["proxy"])
+        else:
+            registrar = PlatformRegistrar(config["proxy"])
+            try:
+                result = registrar.register(index)
+            finally:
+                registrar.close()
         cost = time.time() - start
         access_token = str(result["access_token"])
         account_service.add_account_items([result])
@@ -498,5 +507,3 @@ def worker(index: int) -> dict:
             stats["fail"] += 1
         log(f"任务{index} 注册失败，本次耗时{cost:.1f}s，原因: {e}", "red")
         return {"ok": False, "index": index, "error": str(e)}
-    finally:
-        registrar.close()

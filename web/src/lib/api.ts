@@ -328,6 +328,7 @@ export type OutlookPoolStats = {
 
 export type RegisterConfig = {
   enabled: boolean;
+  engine: "playwright" | "http";
   mail: {
     request_timeout: number;
     wait_timeout: number;
