@@ -10,6 +10,7 @@ from services.openai_backend_api import (
     ACCOUNT_INFO_TIMEOUT_SECS,
     FAST_UPSTREAM_RETRY_ATTEMPTS,
     FAST_UPSTREAM_TIMEOUT_SECS,
+    ImageRequestTimeoutError,
     ImagePollTimeoutError,
     OpenAIBackendAPI,
     config as backend_config,
@@ -44,6 +45,23 @@ class FakeSession:
     def get(self, url: str, **kwargs):
         self.calls.append(("get", url, kwargs))
         return self.responses.pop(0)
+
+
+class FakeUrlopenResponse:
+    status = 200
+    headers = {"content-type": "application/json"}
+
+    def __init__(self, payload: bytes = b'{"type":"response.completed"}'):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return self.payload
 
 
 class FakeAccountService:
@@ -129,6 +147,40 @@ class UpstreamRetryTests(unittest.TestCase):
         self.assertEqual(payload["email"], "alice@example.com")
         self.assertEqual(len(api.session.calls), ACCOUNT_INFO_RETRY_ATTEMPTS)
         self.assertTrue(all(call[2].get("timeout") == ACCOUNT_INFO_TIMEOUT_SECS for call in api.session.calls))
+
+    def test_codex_image_response_timeout_honors_deadline(self):
+        captured: dict[str, float] = {}
+        fake_account_service = SimpleNamespace(
+            get_account=lambda _token: {"source_type": "codex"},
+            _decode_jwt_payload=lambda _token: {},
+        )
+
+        def fake_urlopen(_request, timeout):
+            captured["timeout"] = timeout
+            return FakeUrlopenResponse()
+
+        with mock.patch("services.openai_backend_api.account_service", fake_account_service):
+            api = OpenAIBackendAPI("token-a", deadline=time.monotonic() + 100.0)
+            with mock.patch("services.openai_backend_api.urllib.request.urlopen", fake_urlopen):
+                events = list(api.iter_codex_image_response_events("draw"))
+
+        self.assertEqual(events, [{"type": "response.completed"}])
+        self.assertGreater(captured["timeout"], 90.0)
+        self.assertLessEqual(captured["timeout"], 100.0)
+
+    def test_codex_image_response_does_not_start_after_deadline(self):
+        fake_account_service = SimpleNamespace(
+            get_account=lambda _token: {"source_type": "codex"},
+            _decode_jwt_payload=lambda _token: {},
+        )
+
+        with mock.patch("services.openai_backend_api.account_service", fake_account_service):
+            api = OpenAIBackendAPI("token-a", deadline=time.monotonic() - 1.0)
+            with mock.patch("services.openai_backend_api.urllib.request.urlopen") as urlopen:
+                with self.assertRaises(ImageRequestTimeoutError):
+                    list(api.iter_codex_image_response_events("draw"))
+
+        urlopen.assert_not_called()
 
     def test_image_pool_switches_account_on_transient_503(self):
         fake_accounts = FakeAccountService(["token-a", "token-b"])

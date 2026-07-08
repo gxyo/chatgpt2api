@@ -7,6 +7,23 @@ type RequestConfig = AxiosRequestConfig & {
     redirectOnUnauthorized?: boolean;
 };
 
+export class ApiRequestError extends Error {
+    status?: number;
+    isTimeout: boolean;
+    isNetworkError: boolean;
+
+    constructor(
+        message: string,
+        options: { status?: number; isTimeout?: boolean; isNetworkError?: boolean } = {},
+    ) {
+        super(message);
+        this.name = "ApiRequestError";
+        this.status = options.status;
+        this.isTimeout = Boolean(options.isTimeout);
+        this.isNetworkError = Boolean(options.isNetworkError);
+    }
+}
+
 type ErrorPayload = {
     detail?: string | { error?: string | { message?: string } };
     error?: string | { message?: string };
@@ -49,6 +66,10 @@ request.interceptors.response.use(
     (response) => response,
     async (error: AxiosError<ErrorPayload>) => {
         const status = error.response?.status;
+        const isTimeout =
+            error.code === "ECONNABORTED" ||
+            error.code === "ETIMEDOUT" ||
+            error.message.toLowerCase().includes("timeout");
         const shouldRedirect = (error.config as RequestConfig | undefined)?.redirectOnUnauthorized !== false;
         if (status === 401 && shouldRedirect && typeof window !== "undefined") {
             // Avoid redirect loop — only redirect if not already on /login
@@ -68,7 +89,11 @@ request.interceptors.response.use(
             payload?.message ||
             error.message ||
             `请求失败 (${status || 500})`;
-        return Promise.reject(new Error(message));
+        return Promise.reject(new ApiRequestError(message, {
+            status,
+            isTimeout,
+            isNetworkError: !status && !isTimeout,
+        }));
     },
 );
 
@@ -77,16 +102,18 @@ type RequestOptions = {
     body?: unknown;
     headers?: Record<string, string>;
     redirectOnUnauthorized?: boolean;
+    timeoutMs?: number;
 };
 
 export async function httpRequest<T>(path: string, options: RequestOptions = {}) {
-    const {method = "GET", body, headers, redirectOnUnauthorized = true} = options;
+    const {method = "GET", body, headers, redirectOnUnauthorized = true, timeoutMs} = options;
     const config: RequestConfig = {
         url: path,
         method,
         data: body,
         headers,
         redirectOnUnauthorized,
+        timeout: timeoutMs,
     };
     const response = await request.request<T>(config);
     return response.data;

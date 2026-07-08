@@ -5,11 +5,15 @@ from threading import Event
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 
 from api import accounts, ai, image_tasks, register, system
 from api.errors import install_exception_handlers
-from api.support import resolve_web_asset, start_all_account_watcher, start_limited_account_watcher
+from api.support import (
+    resolve_web_asset,
+    start_all_account_watcher,
+    start_limited_account_watcher,
+    web_asset_response,
+)
 from services.backup_service import backup_service
 from services.config import config
 from services.image_service import start_image_cleanup_scheduler
@@ -54,12 +58,12 @@ def create_app() -> FastAPI:
     async def serve_web(full_path: str):
         asset = resolve_web_asset(full_path)
         if asset is not None:
-            return FileResponse(asset)
+            return web_asset_response(asset, full_path)
         if full_path.strip("/").startswith("_next/"):
             raise HTTPException(status_code=404, detail="Not Found")
         fallback = resolve_web_asset("")
         if fallback is None:
             raise HTTPException(status_code=404, detail="Not Found")
-        return FileResponse(fallback)
+        return web_asset_response(fallback, "")
 
     return app

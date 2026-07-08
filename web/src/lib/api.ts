@@ -374,6 +374,7 @@ export async function login(authKey: string) {
       Authorization: `Bearer ${normalizedAuthKey}`,
     },
     redirectOnUnauthorized: false,
+    timeoutMs: 8000,
   });
 }
 

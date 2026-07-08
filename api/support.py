@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import mimetypes
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
 
 from fastapi import HTTPException, Request
+from fastapi.responses import Response
 
 from services.account_service import account_service
 from services.auth_service import auth_service
@@ -14,6 +17,34 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
 DISABLED_REFRESH_POLL_SECONDS = 60
 AUTO_ACCOUNT_REFRESH_LOCK = Lock()
+IMMUTABLE_WEB_ASSET_PREFIX = "_next/static/"
+
+
+@dataclass(frozen=True)
+class CachedWebAsset:
+    mtime_ns: int
+    size: int
+    content: bytes
+    media_type: str
+
+
+_WEB_ASSET_CACHE: dict[Path, CachedWebAsset] = {}
+
+
+WEB_MEDIA_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".ico": "image/x-icon",
+    ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".txt": "text/plain; charset=utf-8",
+    ".webp": "image/webp",
+    ".woff2": "font/woff2",
+}
 
 
 def extract_bearer_token(authorization: str | None) -> str:
@@ -169,3 +200,48 @@ def resolve_web_asset(requested_path: str) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _web_asset_media_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in WEB_MEDIA_TYPES:
+        return WEB_MEDIA_TYPES[suffix]
+    guessed, _ = mimetypes.guess_type(path.name)
+    return guessed or "application/octet-stream"
+
+
+def _cached_web_asset(path: Path) -> CachedWebAsset:
+    stat = path.stat()
+    cached = _WEB_ASSET_CACHE.get(path)
+    if cached and cached.mtime_ns == stat.st_mtime_ns and cached.size == stat.st_size:
+        return cached
+
+    asset = CachedWebAsset(
+        mtime_ns=stat.st_mtime_ns,
+        size=stat.st_size,
+        content=path.read_bytes(),
+        media_type=_web_asset_media_type(path),
+    )
+    _WEB_ASSET_CACHE[path] = asset
+    return asset
+
+
+def web_asset_response(path: Path, requested_path: str) -> Response:
+    asset = _cached_web_asset(path)
+    clean_path = requested_path.strip("/")
+    is_html = path.suffix.lower() == ".html"
+    cache_control = (
+        "public, max-age=31536000, immutable"
+        if clean_path.startswith(IMMUTABLE_WEB_ASSET_PREFIX)
+        else "no-store, max-age=0"
+        if is_html
+        else "public, max-age=3600"
+    )
+    return Response(
+        content=asset.content,
+        media_type=asset.media_type,
+        headers={
+            "Cache-Control": cache_control,
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
