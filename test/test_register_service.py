@@ -1,7 +1,10 @@
 import json
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 
 class FakeAccountService:
@@ -22,6 +25,40 @@ class FakeAccountService:
 
 
 class RegisterServiceTests(unittest.TestCase):
+    def test_running_counts_only_workers_actively_executing(self) -> None:
+        from services import register_service as register_module
+
+        workers_started = threading.Event()
+        release_workers = threading.Event()
+        worker_lock = threading.Lock()
+        started_count = 0
+
+        def blocked_worker(task_number: int) -> dict:
+            nonlocal started_count
+            with worker_lock:
+                started_count += 1
+                should_block = started_count <= 2
+                if started_count == 2:
+                    workers_started.set()
+            if should_block:
+                release_workers.wait(timeout=5)
+            return {"ok": True, "task_number": task_number}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = register_module.RegisterService(Path(tmp_dir) / "register.json")
+            with patch.object(register_module.openai_register, "worker", side_effect=blocked_worker):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    futures = [executor.submit(service._run_worker, index) for index in range(5)]
+                    self.assertTrue(workers_started.wait(timeout=5))
+
+                    self.assertEqual(service.get()["stats"]["running"], 2)
+
+                    release_workers.set()
+                    results = [future.result(timeout=5) for future in futures]
+
+            self.assertEqual(len(results), 5)
+            self.assertEqual(service.get()["stats"]["running"], 0)
+
     def test_available_mode_refreshes_accounts_before_target_check(self) -> None:
         from services import register_service as register_module
 

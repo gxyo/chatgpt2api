@@ -302,6 +302,19 @@ class RegisterService:
             self._config["stats"]["updated_at"] = _now()
             self._save()
 
+    def _change_running(self, delta: int) -> None:
+        with self._lock:
+            stats = self._config["stats"]
+            stats["running"] = max(0, int(stats.get("running") or 0) + delta)
+            stats["updated_at"] = _now()
+
+    def _run_worker(self, task_number: int) -> dict:
+        self._change_running(1)
+        try:
+            return openai_register.worker(task_number)
+        finally:
+            self._change_running(-1)
+
     def _run(self) -> None:
         threads = int(self.get()["threads"])
         submitted, done, success, fail = 0, 0, 0, 0
@@ -315,7 +328,7 @@ class RegisterService:
                         total = int(cfg.get("total") or 1)
                         while self.get()["enabled"] and submitted < total and len(futures) < threads:
                             submitted += 1
-                            futures.add(executor.submit(openai_register.worker, submitted))
+                            futures.add(executor.submit(self._run_worker, submitted))
                     elif not futures:
                         plan = self._target_plan(cfg, submitted, max_batch=threads)
                         batch_size = max(0, int(plan.get("batch_size") or 0))
@@ -323,8 +336,8 @@ class RegisterService:
                             self._append_log(f"本轮计划补号 {batch_size} 个，补完后再重新检查号池", "yellow")
                         while self.get()["enabled"] and len(futures) < batch_size:
                             submitted += 1
-                            futures.add(executor.submit(openai_register.worker, submitted))
-                self._bump(running=len(futures), done=done, success=success, fail=fail)
+                            futures.add(executor.submit(self._run_worker, submitted))
+                self._bump(done=done, success=success, fail=fail)
                 if not futures and (not self.get()["enabled"] or mode == "total"):
                     break
                 if not futures:
