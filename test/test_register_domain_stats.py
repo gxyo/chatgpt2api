@@ -84,6 +84,61 @@ class RegisterDomainStatsTests(unittest.TestCase):
         finally:
             mail_provider.mailbox_result_sink = original_result_sink
 
+    def test_saving_domains_removes_deleted_domain_stats_from_storage(self) -> None:
+        original_result_sink = mail_provider.mailbox_result_sink
+        original_log_sink = register_module.openai_register.register_log_sink
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                store_file = Path(tmp_dir) / "register.json"
+                service = register_module.RegisterService(store_file)
+                mail_config = {
+                    "request_timeout": 30,
+                    "wait_timeout": 30,
+                    "wait_interval": 2,
+                    "providers": [{
+                        "enable": True,
+                        "type": "cloudflare_temp_email",
+                        "api_base": "https://mail.example.test",
+                        "admin_password": "test-only",
+                        "domain": ["deleted.example", "kept.example"],
+                    }],
+                }
+                service.update({"mail": mail_config})
+                mail_provider.mark_mailbox_result(
+                    {"provider": "cloudflare_temp_email", "address": "person@deleted.example"},
+                    success=False,
+                )
+                mail_provider.mark_mailbox_result(
+                    {"provider": "cloudflare_temp_email", "address": "person@kept.example"},
+                    success=True,
+                )
+
+                mail_config["providers"][0]["domain"] = ["kept.example", "new.example"]
+                snapshot = service.update({"mail": mail_config})
+                stats = {item["domain"]: item for item in snapshot["cloudflare_domain_stats"]}
+                saved = json.loads(store_file.read_text(encoding="utf-8"))
+
+                self.assertEqual(set(stats), {"kept.example", "new.example"})
+                self.assertEqual(stats["kept.example"]["success"], 1)
+                self.assertEqual(stats["new.example"]["total"], 0)
+                self.assertEqual(
+                    {item["domain"] for item in saved["cloudflare_domain_stats"]},
+                    {"kept.example"},
+                )
+
+                mail_provider.mark_mailbox_result(
+                    {"provider": "cloudflare_temp_email", "address": "person@deleted.example"},
+                    success=True,
+                )
+                saved_after_stale_result = json.loads(store_file.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    {item["domain"] for item in saved_after_stale_result["cloudflare_domain_stats"]},
+                    {"kept.example"},
+                )
+        finally:
+            mail_provider.mailbox_result_sink = original_result_sink
+            register_module.openai_register.register_log_sink = original_log_sink
+
 
 if __name__ == "__main__":
     unittest.main()

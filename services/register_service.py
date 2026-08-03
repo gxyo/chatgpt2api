@@ -143,7 +143,6 @@ class RegisterService:
         stored = _normalize_cloudflare_domain_stats(self._config.get("cloudflare_domain_stats"))
         by_domain = {item["domain"]: item for item in stored}
         ordered_domains = self._configured_cloudflare_domains()
-        ordered_domains.extend(item["domain"] for item in stored if item["domain"] not in ordered_domains)
         result = []
         for domain in ordered_domains:
             item = by_domain.get(domain, {"domain": domain, "success": 0, "fail": 0, "updated_at": ""})
@@ -157,6 +156,14 @@ class RegisterService:
             })
         return result
 
+    def _prune_unconfigured_cloudflare_domain_stats(self) -> None:
+        configured_domains = set(self._configured_cloudflare_domains())
+        self._config["cloudflare_domain_stats"] = [
+            item
+            for item in _normalize_cloudflare_domain_stats(self._config.get("cloudflare_domain_stats"))
+            if item["domain"] in configured_domains
+        ]
+
     def _record_mailbox_result(self, mailbox: dict, *, success: bool, error: Exception | str | None = None) -> None:
         if str(mailbox.get("provider") or "") != "cloudflare_temp_email":
             return
@@ -164,6 +171,8 @@ class RegisterService:
         if not domain:
             return
         with self._lock:
+            if domain not in self._configured_cloudflare_domains():
+                return
             rows = _normalize_cloudflare_domain_stats(self._config.get("cloudflare_domain_stats"))
             row = next((item for item in rows if item["domain"] == domain), None)
             if row is None:
@@ -252,6 +261,7 @@ class RegisterService:
         with self._lock:
             self._merge_outlook_pools(updates)
             self._config = _normalize({**self._config, **updates})
+            self._prune_unconfigured_cloudflare_domain_stats()
             self._drop_mail_proxy()
             openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "engine")})
             self._save()
