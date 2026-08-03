@@ -326,6 +326,15 @@ export type OutlookPoolStats = {
   failed: number;
 };
 
+export type CloudflareDomainStat = {
+  domain: string;
+  success: number;
+  fail: number;
+  total: number;
+  success_rate: number;
+  updated_at?: string;
+};
+
 export type RegisterConfig = {
   enabled: boolean;
   engine: "playwright" | "http";
@@ -342,6 +351,7 @@ export type RegisterConfig = {
   target_quota: number;
   target_available: number;
   check_interval: number;
+  cloudflare_domain_stats?: CloudflareDomainStat[];
   stats: {
     job_id?: string;
     success: number;

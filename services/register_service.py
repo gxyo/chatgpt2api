@@ -36,8 +36,37 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_cloudflare_domain_stats(value: object) -> list[dict]:
+    rows = value if isinstance(value, list) else []
+    normalized: list[dict] = []
+    by_domain: dict[str, dict] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or "").strip().lower().rstrip(".")
+        if not domain:
+            continue
+        success = max(0, int(item.get("success") or 0))
+        fail = max(0, int(item.get("fail") or 0))
+        existing = by_domain.get(domain)
+        if existing:
+            existing["success"] += success
+            existing["fail"] += fail
+            existing["updated_at"] = str(item.get("updated_at") or existing.get("updated_at") or "")
+            continue
+        row = {
+            "domain": domain,
+            "success": success,
+            "fail": fail,
+            "updated_at": str(item.get("updated_at") or ""),
+        }
+        by_domain[domain] = row
+        normalized.append(row)
+    return normalized
+
+
 def _default_config() -> dict:
-    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "check_interval": 5, "enabled": False, "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
+    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "check_interval": 5, "enabled": False, "cloudflare_domain_stats": [], "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
 
 
 def _normalize(raw: dict) -> dict:
@@ -54,6 +83,7 @@ def _normalize(raw: dict) -> dict:
     if isinstance(cfg.get("mail"), dict):
         cfg["mail"].pop("proxy", None)
     cfg["enabled"] = bool(cfg.get("enabled"))
+    cfg["cloudflare_domain_stats"] = _normalize_cloudflare_domain_stats(cfg.get("cloudflare_domain_stats"))
     stats = {**_default_config()["stats"], **(raw.get("stats") if isinstance(raw.get("stats"), dict) else {}),
              "threads": cfg["threads"]}
     cfg["stats"] = stats
@@ -67,6 +97,7 @@ class RegisterService:
         self._runner: threading.Thread | None = None
         self._logs: list[dict] = []
         openai_register.register_log_sink = self._append_log
+        mail_provider.mailbox_result_sink = self._record_mailbox_result
         self._config = self._load()
         if self._config["enabled"]:
             self.start()
@@ -84,8 +115,65 @@ class RegisterService:
     def get(self) -> dict:
         with self._lock:
             snapshot = json.loads(json.dumps({**self._config, "logs": self._logs[-300:]}, ensure_ascii=False))
+            snapshot["cloudflare_domain_stats"] = self._cloudflare_domain_stats_snapshot()
         self._redact_outlook_pools(snapshot)
         return snapshot
+
+    @staticmethod
+    def _mailbox_domain(mailbox: dict) -> str:
+        address = str(mailbox.get("address") or "").strip()
+        _, separator, domain = address.rpartition("@")
+        return domain.strip().lower().rstrip(".") if separator else ""
+
+    def _configured_cloudflare_domains(self) -> list[str]:
+        mail = self._config.get("mail") if isinstance(self._config.get("mail"), dict) else {}
+        providers = mail.get("providers") if isinstance(mail.get("providers"), list) else []
+        domains: list[str] = []
+        for provider in providers:
+            if not isinstance(provider, dict) or provider.get("type") != "cloudflare_temp_email":
+                continue
+            raw_domains = provider.get("domain") if isinstance(provider.get("domain"), list) else []
+            for value in raw_domains:
+                domain = str(value or "").strip().lower().rstrip(".")
+                if domain and domain not in domains:
+                    domains.append(domain)
+        return domains
+
+    def _cloudflare_domain_stats_snapshot(self) -> list[dict]:
+        stored = _normalize_cloudflare_domain_stats(self._config.get("cloudflare_domain_stats"))
+        by_domain = {item["domain"]: item for item in stored}
+        ordered_domains = self._configured_cloudflare_domains()
+        ordered_domains.extend(item["domain"] for item in stored if item["domain"] not in ordered_domains)
+        result = []
+        for domain in ordered_domains:
+            item = by_domain.get(domain, {"domain": domain, "success": 0, "fail": 0, "updated_at": ""})
+            success = int(item.get("success") or 0)
+            fail = int(item.get("fail") or 0)
+            total = success + fail
+            result.append({
+                **item,
+                "total": total,
+                "success_rate": round(success * 100 / total, 1) if total else 0,
+            })
+        return result
+
+    def _record_mailbox_result(self, mailbox: dict, *, success: bool, error: Exception | str | None = None) -> None:
+        if str(mailbox.get("provider") or "") != "cloudflare_temp_email":
+            return
+        domain = self._mailbox_domain(mailbox)
+        if not domain:
+            return
+        with self._lock:
+            rows = _normalize_cloudflare_domain_stats(self._config.get("cloudflare_domain_stats"))
+            row = next((item for item in rows if item["domain"] == domain), None)
+            if row is None:
+                row = {"domain": domain, "success": 0, "fail": 0, "updated_at": ""}
+                rows.append(row)
+            key = "success" if success else "fail"
+            row[key] = int(row.get(key) or 0) + 1
+            row["updated_at"] = _now()
+            self._config["cloudflare_domain_stats"] = rows
+            self._save()
 
     @staticmethod
     def _mask_email(email: str) -> str:

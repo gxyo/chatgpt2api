@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, LoaderCircle, Plus, Play, RotateCcw, Save, Square, Trash2, UserPlus } from "lucide-react";
+import { AlertTriangle, Globe2, LoaderCircle, Plus, Play, RotateCcw, Save, Square, Trash2, UserPlus } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -45,6 +45,18 @@ export function RegisterCard() {
   const stats = config.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
   const providers = config.mail.providers || [];
   const logs = config.logs || [];
+  const hasCloudflareTempEmail = providers.some((provider) => provider.type === "cloudflare_temp_email");
+  const cloudflareDomainStats = [...(config.cloudflare_domain_stats || [])].sort((left, right) => {
+    const rateDifference = right.success_rate - left.success_rate;
+    if (rateDifference !== 0) return rateDifference;
+    const totalDifference = right.total - left.total;
+    if (totalDifference !== 0) return totalDifference;
+    return left.domain.localeCompare(right.domain);
+  });
+  const cloudflareTotals = cloudflareDomainStats.reduce(
+    (totals, item) => ({ success: totals.success + item.success, fail: totals.fail + item.fail }),
+    { success: 0, fail: 0 },
+  );
   const updateProviderType = (index: number, type: string) => {
     updateProvider(index, {
       type,
@@ -362,12 +374,12 @@ export function RegisterCard() {
 
       </section>
 
-      <section className="flex min-h-0 flex-col p-4">
-        <div className="space-y-3">
+      <section className="flex min-h-0 flex-col px-4 py-3">
+        <div className="space-y-2">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold tracking-tight">运行结果</h2>
-                <p className="mt-1 text-sm text-stone-500">SSE 实时推送当前状态。</p>
+                <p className="mt-0.5 text-xs text-stone-500">SSE 实时推送当前状态。</p>
               </div>
               <Badge variant={config.enabled ? "success" : "secondary"} className="rounded-md">
                 {config.enabled ? "运行中" : "已停止"}
@@ -384,33 +396,76 @@ export function RegisterCard() {
                 ["当前额度", stats.current_quota || 0],
                 ["正常账号", stats.current_available || 0],
               ].map(([label, value]) => (
-                <div key={label} className="border border-stone-200 bg-white/70 px-3 py-2">
+                <div key={label} className="border border-stone-200 bg-white/70 px-3 py-1.5">
                   <div className="text-xs text-stone-400">{label}</div>
-                  <div className="mt-1 text-base font-semibold text-stone-800">{value}</div>
+                  <div className="mt-0.5 text-sm font-semibold text-stone-800">{value}</div>
                 </div>
               ))}
             </div>
+            {hasCloudflareTempEmail ? (
+              <div className="overflow-hidden rounded-xl border border-stone-200 bg-stone-50/80">
+                <div className="flex items-center justify-between gap-3 border-b border-stone-200 px-3 py-2.5">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-stone-200 bg-white shadow-sm">
+                      <Globe2 className="size-4 text-stone-600" />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="truncate text-sm font-semibold text-stone-900">域名注册表现</h3>
+                      <p className="text-[11px] text-stone-500">Cloudflare 临时邮箱 · 历史累计</p>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5 font-mono text-[11px] tabular-nums">
+                    <span className="rounded-md bg-emerald-100 px-2 py-1 text-emerald-700">成功 {cloudflareTotals.success}</span>
+                    <span className="rounded-md bg-rose-100 px-2 py-1 text-rose-700">失败 {cloudflareTotals.fail}</span>
+                  </div>
+                </div>
+                <div className="max-h-36 overflow-y-auto">
+                  {cloudflareDomainStats.length === 0 ? (
+                    <div className="px-3 py-5 text-center text-xs text-stone-500">配置域名后，注册结果会在这里按域名累计。</div>
+                  ) : (
+                    cloudflareDomainStats.map((item) => (
+                      <div key={item.domain} className="grid h-12 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-stone-200/80 px-3 last:border-b-0">
+                        <div className="min-w-0">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="truncate font-mono text-xs font-medium text-stone-700" title={item.domain}>{item.domain}</span>
+                            <span className="shrink-0 font-mono text-[11px] text-stone-500 tabular-nums">{item.total ? `${item.success_rate}%` : "暂无结果"}</span>
+                          </div>
+                          <div className={`mt-1.5 h-1 overflow-hidden rounded-full ${item.total ? "bg-rose-200/70" : "bg-stone-200"}`}>
+                            <div className="h-full rounded-full bg-emerald-500 transition-[width] duration-500" style={{ width: `${item.total ? item.success_rate : 0}%` }} />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1 font-mono text-[11px] tabular-nums">
+                          <span className="rounded-md bg-white px-2 py-1 text-center text-stone-500 shadow-sm">总 {item.total}</span>
+                          <span className="rounded-md bg-emerald-50 px-2 py-1 text-center text-emerald-700">成 {item.success}</span>
+                          <span className="rounded-md bg-rose-50 px-2 py-1 text-center text-rose-700">败 {item.fail}</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            ) : null}
             <div className="grid grid-cols-3 gap-2">
-              <Button className="h-10 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800" onClick={() => void toggle()} disabled={isSaving}>
+              <Button className="h-9 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800" onClick={() => void toggle()} disabled={isSaving}>
                 {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : config.enabled ? <Square className="size-4" /> : <Play className="size-4" />}
                 {config.enabled ? "停止" : "启动"}
               </Button>
-              <Button variant="outline" className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => void reset()} disabled={isSaving || config.enabled}>
+              <Button variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => void reset()} disabled={isSaving || config.enabled}>
                 <RotateCcw className="size-4" />
                 重置
               </Button>
-              <Button variant="outline" className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => void save()} disabled={isSaving || config.enabled}>
+              <Button variant="outline" className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700" onClick={() => void save()} disabled={isSaving || config.enabled}>
                 <Save className="size-4" />
                 保存
               </Button>
             </div>
-            <div className="flex items-center gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <div className="flex items-center gap-2 border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800">
               <AlertTriangle className="size-4 shrink-0" />
               启动之前注意先保存配置。
             </div>
         </div>
 
-        <div className="mt-4 flex min-h-0 flex-1 flex-col space-y-3 overflow-hidden border-t border-stone-200 pt-4">
+        <div className="mt-3 flex min-h-0 flex-1 flex-col space-y-2 overflow-hidden border-t border-stone-200 pt-3">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-semibold text-stone-900">实时日志</h3>

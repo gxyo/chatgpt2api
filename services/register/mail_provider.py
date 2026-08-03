@@ -28,6 +28,7 @@ _outlook_token_state_lock = Lock()
 OUTLOOK_IN_USE_STALE_SECONDS = 3600
 OUTLOOK_RECORDED_STATES = {"used", "in_use", "token_invalid", "failed"}
 OUTLOOK_UNAVAILABLE_STATES = {"used", "token_invalid", "failed"}
+mailbox_result_sink: Callable[..., None] | None = None
 
 
 def _load_ddg_aliases() -> set[str]:
@@ -1459,6 +1460,12 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
     仅对 outlook_token 邮箱生效：成功标记 used；失败时若是 token 失效标记 token_invalid，
     其余失败标记 failed（保留邮箱占用以便排查，可通过重置释放）。
     """
+    if mailbox_result_sink:
+        try:
+            mailbox_result_sink(mailbox, success=success, error=error)
+        except Exception:
+            # 统计写入不能覆盖原始注册结果，尤其不能把已成功注册的账号改判为失败。
+            pass
     if str(mailbox.get("provider") or "") != OutlookTokenProvider.name:
         return
     address = str(mailbox.get("address") or "").strip()
