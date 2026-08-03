@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 import random
 import secrets
 import string
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 
 from services.register import mail_provider
 from services.register.openai_register import (
@@ -22,6 +24,133 @@ from utils.pkce import generate_pkce as _generate_pkce
 platform_base = "https://platform.openai.com"
 auth_base = "https://auth.openai.com"
 REGISTER_TIMEOUT = 120_000
+OAUTH_AUTHORIZE_PATTERNS = (
+    "**/oauth/authorize*",
+    "**/api/oauth/oauth2/auth*",
+    "**/api/accounts/authorize*",
+)
+OAUTH_CALLBACK_PATTERN = "**/auth/callback*"
+
+
+def _secret_fingerprint(value: str) -> str:
+    """Return a stable diagnostic fingerprint without logging OAuth secrets."""
+    if not value:
+        return "-"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _trace_enabled() -> bool:
+    return str(os.getenv("CHATGPT2API_REGISTER_TRACE") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _replace_pkce_params(url: str, code_challenge: str) -> str:
+    """Replace PKCE params while preserving all other OAuth query parameters."""
+    parsed = urlparse(url)
+    query: list[tuple[str, str]] = []
+    challenge_replaced = False
+    method_replaced = False
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key == "code_challenge":
+            value = code_challenge
+            challenge_replaced = True
+        elif key == "code_challenge_method":
+            value = "S256"
+            method_replaced = True
+        query.append((key, value))
+    if not challenge_replaced:
+        query.append(("code_challenge", code_challenge))
+    if not method_replaced:
+        query.append(("code_challenge_method", "S256"))
+    return parsed._replace(query=urlencode(query)).geturl()
+
+
+async def _install_oauth_routes(page, index: int, code_challenge: str, captured_codes: list[str]) -> None:
+    async def _intercept_authorize(route):
+        """Replace PKCE on both the current and legacy authorize endpoints."""
+        url = route.request.url
+        original_challenge = str((parse_qs(urlparse(url).query).get("code_challenge") or [""])[0])
+        if _trace_enabled():
+            step(
+                index,
+                "OAuth trace: authorize PKCE "
+                f"original_fp={_secret_fingerprint(original_challenge)}, "
+                f"replacement_fp={_secret_fingerprint(code_challenge)}",
+            )
+        await route.continue_(url=_replace_pkce_params(url, code_challenge))
+
+    async def _intercept_callback(route):
+        """Capture the one-time code and prevent the callback page from consuming it."""
+        parsed = urlparse(route.request.url)
+        params = parse_qs(parsed.query)
+        code = str((params.get("code") or [""])[0]).strip()
+        if parsed.netloc != "platform.openai.com" or not code:
+            await route.continue_()
+            return
+        if code not in captured_codes:
+            captured_codes.append(code)
+            step(index, "已拦截到 OAuth code")
+            if _trace_enabled():
+                step(index, f"OAuth trace: callback code_fp={_secret_fingerprint(code)}")
+        await route.fulfill(
+            status=200,
+            content_type="text/html; charset=utf-8",
+            body="<!doctype html><title>OAuth complete</title>",
+        )
+
+    for pattern in OAUTH_AUTHORIZE_PATTERNS:
+        await page.route(pattern, _intercept_authorize)
+    await page.route(OAUTH_CALLBACK_PATTERN, _intercept_callback)
+
+
+def _install_oauth_trace(page, index: int) -> None:
+    """Log auth API request ordering when explicitly enabled for diagnostics."""
+    if not _trace_enabled():
+        return
+
+    def _request(request) -> None:
+        parsed = urlparse(request.url)
+        if parsed.netloc not in {"auth.openai.com", "platform.openai.com"}:
+            return
+        if not (
+            parsed.path.startswith("/api/accounts/")
+            or parsed.path == "/oauth/authorize"
+            or parsed.path == "/api/oauth/oauth2/auth"
+            or parsed.path == "/auth/callback"
+        ):
+            return
+        detail = ""
+        if parsed.path == "/api/oauth/oauth2/auth":
+            params = parse_qs(parsed.query)
+            detail = (
+                f", query_keys={','.join(sorted(params)) or '-'}"
+                f", challenge_fp={_secret_fingerprint(str((params.get('code_challenge') or [''])[0]))}"
+            )
+        elif parsed.path == "/api/accounts/oauth/token":
+            try:
+                payload = json.loads(request.post_data or "{}")
+            except Exception:
+                payload = {}
+            detail = (
+                f", code_fp={_secret_fingerprint(str(payload.get('code') or ''))}"
+                f", verifier_fp={_secret_fingerprint(str(payload.get('code_verifier') or ''))}"
+            )
+        step(index, f"OAuth trace -> {request.method} {parsed.netloc}{parsed.path}{detail}")
+
+    def _response(response) -> None:
+        parsed = urlparse(response.url)
+        if parsed.netloc not in {"auth.openai.com", "platform.openai.com"}:
+            return
+        if not (
+            parsed.path.startswith("/api/accounts/")
+            or parsed.path == "/oauth/authorize"
+            or parsed.path == "/api/oauth/oauth2/auth"
+            or parsed.path == "/auth/callback"
+        ):
+            return
+        step(index, f"OAuth trace <- {response.status} {parsed.netloc}{parsed.path}")
+
+    page.on("request", _request)
+    page.on("response", _response)
 
 
 def _random_password(length: int = 16) -> str:
@@ -82,6 +211,7 @@ async def _async_register(index: int, proxy: str) -> dict:
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             """)
             page = await context.new_page()
+            _install_oauth_trace(page, index)
 
             step(index, "创建邮箱")
             mailbox = mail_provider.create_mailbox(config["mail"])
@@ -117,32 +247,7 @@ async def _browser_register_flow(
 ) -> dict:
     code_verifier, code_challenge = _generate_pkce()
     captured_code: list[str] = []
-
-    async def _intercept_authorize(route):
-        """拦截初始 authorize 请求，替换 code_challenge 为我们自己的。"""
-        request = route.request
-        url = request.url
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query, keep_blank_values=True)
-        params["code_challenge"] = [code_challenge]
-        params["code_challenge_method"] = ["S256"]
-        new_query = urlencode({k: v[0] for k, v in params.items()})
-        new_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{new_query}"
-        await route.continue_(url=new_url)
-
-    async def _intercept_callback(route):
-        """拦截 callback 请求，提取 OAuth code。"""
-        url = route.request.url
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query)
-        code = (params.get("code") or [""])[0]
-        if code:
-            captured_code.append(code)
-            step(index, f"已拦截到 OAuth code")
-        await route.continue_()
-
-    await page.route("**/api/accounts/authorize?*", _intercept_authorize)
-    await page.route("**/auth/callback?*", _intercept_callback)
+    await _install_oauth_routes(page, index, code_challenge, captured_code)
 
     signup_url = f"{platform_base}/signup"
     step(index, "导航到注册页面")
@@ -230,6 +335,13 @@ async def _browser_register_flow(
         raise RuntimeError(f"未能获取到 OAuth code, 最终页面: {page.url}")
 
     step(index, "用 OAuth code 换取 token")
+    if _trace_enabled():
+        step(
+            index,
+            "OAuth trace: external token exchange "
+            f"code_fp={_secret_fingerprint(captured_code[0])}, "
+            f"verifier_fp={_secret_fingerprint(code_verifier)}",
+        )
     session = create_session(proxy)
     try:
         tokens = request_platform_oauth_token(session, captured_code[0], code_verifier)
@@ -261,7 +373,7 @@ async def _page_debug_info(page) -> str:
 
 async def _wait_for_otp_page(page) -> None:
     try:
-        await page.locator('input[name="code"], input[id="code"], text="verification", text="verify"').first.wait_for(
+        await page.locator('input[name="code"], input[id="code"]').first.wait_for(
             state="visible", timeout=30_000
         )
     except Exception:
