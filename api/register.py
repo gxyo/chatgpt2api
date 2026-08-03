@@ -19,6 +19,7 @@ class RegisterConfigRequest(BaseModel):
     mode: str | None = None
     target_quota: int | None = None
     target_available: int | None = None
+    refresh_batch_size: int | None = None
     check_interval: int | None = None
 
 

@@ -349,6 +349,7 @@ type SettingsStore = {
   setRegisterMode: (value: "total" | "quota" | "available") => void;
   setRegisterTargetQuota: (value: string) => void;
   setRegisterTargetAvailable: (value: string) => void;
+  setRegisterRefreshBatchSize: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
   addRegisterProvider: () => void;
@@ -954,6 +955,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, target_available: Number(value) || 0 } } : {});
   },
 
+  setRegisterRefreshBatchSize: (value) => {
+    set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, refresh_batch_size: Number(value) || 0 } } : {});
+  },
+
   setRegisterCheckInterval: (value) => {
     set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, check_interval: Number(value) || 0 } } : {});
   },
@@ -1017,6 +1022,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         mode: registerConfig.mode,
         target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
         target_available: Math.max(1, Number(registerConfig.target_available) || 1),
+        refresh_batch_size: Math.max(1, Number(registerConfig.refresh_batch_size) || 5),
         check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
       });
       set({ registerConfig: data.register });
@@ -1043,6 +1049,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           mode: registerConfig.mode,
           target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
           target_available: Math.max(1, Number(registerConfig.target_available) || 1),
+          refresh_batch_size: Math.max(1, Number(registerConfig.refresh_batch_size) || 5),
           check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
         });
       }

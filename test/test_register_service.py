@@ -85,7 +85,7 @@ class RegisterServiceTests(unittest.TestCase):
         finally:
             register_module.account_service = original_account_service
 
-    def test_available_mode_plans_missing_accounts_as_one_batch(self) -> None:
+    def test_available_mode_limits_each_batch_before_refreshing_again(self) -> None:
         from services import register_service as register_module
 
         fake_account_service = FakeAccountService()
@@ -110,14 +110,77 @@ class RegisterServiceTests(unittest.TestCase):
                 service = register_module.RegisterService(Path(tmp_dir) / "register.json")
 
                 plan = service._target_plan(
-                    {"mode": "available", "target_available": 40, "target_quota": 1, "threads": 2},
+                    {"mode": "available", "target_available": 40, "target_quota": 1, "refresh_batch_size": 3},
                     submitted=0,
-                    max_batch=2,
                 )
 
             self.assertFalse(plan["reached"])
-            self.assertEqual(plan["batch_size"], 6)
+            self.assertEqual(plan["batch_size"], 3)
             self.assertEqual(len(fake_account_service.refresh_calls), 1)
+        finally:
+            register_module.account_service = original_account_service
+
+    def test_available_mode_refreshes_after_each_configured_registration_batch(self) -> None:
+        from services import register_service as register_module
+
+        class GrowingAccountService:
+            def __init__(self) -> None:
+                self.items = [{"access_token": "token-0", "status": "正常", "quota": 5}]
+                self.refresh_calls: list[list[str]] = []
+                self.lock = threading.Lock()
+                self.stop_callback = lambda: None
+
+            def list_tokens(self) -> list[str]:
+                with self.lock:
+                    return [str(item["access_token"]) for item in self.items]
+
+            def refresh_accounts(self, tokens: list[str], defer_invalid_removal: bool = True) -> dict:
+                self.refresh_calls.append(list(tokens))
+                if len(tokens) >= 5:
+                    self.stop_callback()
+                return {"refreshed": len(tokens), "errors": [], "items": self.items}
+
+            def list_accounts(self) -> list[dict]:
+                with self.lock:
+                    return [dict(item) for item in self.items]
+
+            def add_account(self, task_number: int) -> None:
+                with self.lock:
+                    self.items.append({"access_token": f"token-{task_number}", "status": "正常", "quota": 5})
+
+        fake_account_service = GrowingAccountService()
+        original_account_service = register_module.account_service
+        try:
+            register_module.account_service = fake_account_service
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                service = register_module.RegisterService(Path(tmp_dir) / "register.json")
+                service.update({
+                    "mode": "available",
+                    "target_available": 5,
+                    "refresh_batch_size": 2,
+                    "check_interval": 1,
+                    "threads": 1,
+                })
+                fake_account_service.stop_callback = service.stop
+
+                def worker_result(task_number: int) -> dict:
+                    succeeded = task_number != 1
+                    if succeeded:
+                        fake_account_service.add_account(task_number)
+                    return {"ok": succeeded}
+
+                with patch.object(register_module.openai_register, "worker", side_effect=worker_result):
+                    service.start()
+                    self.assertIsNotNone(service._runner)
+                    service._runner.join(timeout=5)
+
+                self.assertFalse(service._runner.is_alive())
+                self.assertEqual(len(fake_account_service.items), 5)
+                self.assertEqual([len(tokens) for tokens in fake_account_service.refresh_calls], [1, 2, 4, 5])
+                self.assertEqual(service.get()["stats"]["done"], 5)
+                self.assertIn("本轮计划补号 2 个，完成后刷新号池并重新计算缺口", [
+                    item["text"] for item in service.get()["logs"]
+                ])
         finally:
             register_module.account_service = original_account_service
 

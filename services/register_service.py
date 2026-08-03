@@ -66,7 +66,7 @@ def _normalize_cloudflare_domain_stats(value: object) -> list[dict]:
 
 
 def _default_config() -> dict:
-    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "check_interval": 5, "enabled": False, "cloudflare_domain_stats": [], "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
+    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "refresh_batch_size": 5, "check_interval": 5, "enabled": False, "cloudflare_domain_stats": [], "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
 
 
 def _normalize(raw: dict) -> dict:
@@ -77,6 +77,7 @@ def _normalize(raw: dict) -> dict:
     cfg["mode"] = str(cfg.get("mode") or "total").strip() if str(cfg.get("mode") or "total").strip() in {"total", "quota", "available"} else "total"
     cfg["target_quota"] = max(1, int(cfg.get("target_quota") or 1))
     cfg["target_available"] = max(1, int(cfg.get("target_available") or 1))
+    cfg["refresh_batch_size"] = max(1, int(cfg.get("refresh_batch_size") or 5))
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
     cfg["proxy"] = str(cfg.get("proxy") or "").strip()
     cfg["engine"] = str(cfg.get("engine") or "playwright").strip() if str(cfg.get("engine") or "playwright").strip() in {"playwright", "http"} else "playwright"
@@ -356,7 +357,7 @@ class RegisterService:
             self._append_log(f"检查前刷新账号信息和额度完成：成功 {refreshed} 个", "green")
         return True
 
-    def _target_plan(self, cfg: dict, submitted: int, max_batch: int) -> dict:
+    def _target_plan(self, cfg: dict, submitted: int) -> dict:
         mode = str(cfg.get("mode") or "total")
         if mode in {"quota", "available"} and not self._refresh_pool_before_check():
             self._bump(**self._pool_metrics())
@@ -364,22 +365,23 @@ class RegisterService:
 
         metrics = self._pool_metrics()
         self._bump(**metrics)
+        refresh_batch_size = max(1, int(cfg.get("refresh_batch_size") or 5))
         if mode == "quota":
             target_quota = int(cfg.get("target_quota") or 1)
             reached = metrics["current_quota"] >= target_quota
             self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，当前剩余额度={metrics['current_quota']}，目标额度={cfg.get('target_quota')}，{'跳过注册' if reached else '继续注册'}", "yellow")
             quota_gap = max(0, target_quota - metrics["current_quota"])
-            return {"reached": reached, "batch_size": 0 if reached else min(max_batch, max(1, quota_gap))}
+            return {"reached": reached, "batch_size": 0 if reached else min(refresh_batch_size, max(1, quota_gap))}
         if mode == "available":
             target_available = int(cfg.get("target_available") or 1)
             reached = metrics["current_available"] >= target_available
             self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，目标账号={cfg.get('target_available')}，当前剩余额度={metrics['current_quota']}，{'跳过注册' if reached else '继续注册'}", "yellow")
             missing = max(0, target_available - metrics["current_available"])
-            return {"reached": reached, "batch_size": 0 if reached else missing}
+            return {"reached": reached, "batch_size": 0 if reached else min(refresh_batch_size, missing)}
         return {"reached": submitted >= int(cfg.get("total") or 1), "batch_size": 0}
 
     def _target_reached(self, cfg: dict, submitted: int) -> bool:
-        return bool(self._target_plan(cfg, submitted, max_batch=max(1, int(cfg.get("threads") or 1))).get("reached"))
+        return bool(self._target_plan(cfg, submitted).get("reached"))
 
     def _bump(self, **updates) -> None:
         with self._lock:
@@ -428,10 +430,10 @@ class RegisterService:
                             submitted += 1
                             futures.add(executor.submit(self._run_worker, submitted))
                     elif not futures:
-                        plan = self._target_plan(cfg, submitted, max_batch=threads)
+                        plan = self._target_plan(cfg, submitted)
                         batch_size = max(0, int(plan.get("batch_size") or 0))
                         if batch_size > 0:
-                            self._append_log(f"本轮计划补号 {batch_size} 个，补完后再重新检查号池", "yellow")
+                            self._append_log(f"本轮计划补号 {batch_size} 个，完成后刷新号池并重新计算缺口", "yellow")
                         while self.get()["enabled"] and len(futures) < batch_size:
                             submitted += 1
                             futures.add(executor.submit(self._run_worker, submitted))

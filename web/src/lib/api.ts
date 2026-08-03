@@ -350,6 +350,7 @@ export type RegisterConfig = {
   mode: "total" | "quota" | "available";
   target_quota: number;
   target_available: number;
+  refresh_batch_size: number;
   check_interval: number;
   cloudflare_domain_stats?: CloudflareDomainStat[];
   stats: {

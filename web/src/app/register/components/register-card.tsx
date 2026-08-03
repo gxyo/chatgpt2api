@@ -22,6 +22,7 @@ export function RegisterCard() {
   const setMode = useSettingsStore((state) => state.setRegisterMode);
   const setTargetQuota = useSettingsStore((state) => state.setRegisterTargetQuota);
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
+  const setRefreshBatchSize = useSettingsStore((state) => state.setRegisterRefreshBatchSize);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
   const addProvider = useSettingsStore((state) => state.addRegisterProvider);
@@ -142,6 +143,10 @@ export function RegisterCard() {
             <div className="space-y-2">
               <label className="text-sm text-stone-700">目标可用账号</label>
               <Input value={String(config.target_available || "")} onChange={(event) => setTargetAvailable(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || config.mode !== "available"} />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">每注册几个后刷新</label>
+              <Input type="number" min={1} step={1} value={String(config.refresh_batch_size || "")} onChange={(event) => setRefreshBatchSize(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white tabular-nums" disabled={config.enabled || config.mode === "total"} title="每完成指定数量的注册后刷新号池，并按最新缺口继续补号" />
             </div>
             <div className="space-y-2">
               <label className="text-sm text-stone-700">检查间隔（秒）</label>
