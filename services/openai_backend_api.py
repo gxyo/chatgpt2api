@@ -45,6 +45,33 @@ class ImageContentPolicyError(RuntimeError):
     pass
 
 
+class ImageMainlineStateError(RuntimeError):
+    """Raised when the upstream image mainline handshake did not produce state."""
+    pass
+
+
+def is_skipped_mainline_error(exc: BaseException) -> bool:
+    """Return whether ChatGPT rejected a stale/consumed image mainline state.
+
+    ``/backend-api/f/conversation`` reports this as HTTP 400 with a compact
+    ``{"skipped_mainline": true}`` body.  The response is safe to recover from
+    by creating a fresh requirements/conduit handshake, but it must not be
+    retried with the same request body or one-time conduit token.
+    """
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        return body.get("skipped_mainline") is True
+    try:
+        parsed = json.loads(str(body or ""))
+    except (TypeError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed.get("skipped_mainline") is True
+    return bool(re.search(r'"skipped_mainline"\s*:\s*true', str(exc), re.IGNORECASE))
+
+
 @dataclass
 class ChatRequirements:
     """保存一次对话请求所需的 sentinel token。"""
@@ -987,11 +1014,20 @@ class OpenAIBackendAPI:
             "post",
             path,
             path,
+            # This endpoint returns a one-time conduit token.  Retrying the
+            # same POST can consume the token while the first request is still
+            # being processed and makes the following mainline request fail
+            # with ``skipped_mainline``.
+            attempts=1,
             timeout=8.0,
             headers=self._image_headers(path, requirements),
             json=payload,
         )
-        return response.json().get("conduit_token", "")
+        payload = response.json()
+        conduit_token = str(payload.get("conduit_token") or "").strip() if isinstance(payload, dict) else ""
+        if not conduit_token:
+            raise ImageMainlineStateError("image prepare returned no conduit token")
+        return conduit_token
 
     def _decode_image_base64(self, image: str) -> bytes:
         """把 base64 图片字符串或本地路径解码成二进制。"""
@@ -1139,6 +1175,11 @@ class OpenAIBackendAPI:
             "post",
             path,
             path,
+            # Image generation is a side-effecting POST and carries a
+            # one-time X-Conduit-Token.  A transport retry reuses the same
+            # message/conduit state and is the direct cause of the upstream
+            # ``400 {\"skipped_mainline\":true}`` response.
+            attempts=1,
             timeout=CONVERSATION_CONNECT_TIMEOUT_SECS,
             headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
             json=payload,
@@ -2736,12 +2777,34 @@ class OpenAIBackendAPI:
         references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
         self._report_progress("bootstrapping")
         self._bootstrap()
-        self._report_progress("getting_token")
-        requirements = self._get_chat_requirements()
-        self._report_progress("preparing_conversation")
-        conduit_token = self._prepare_image_conversation(prompt, requirements, model)
-        self._report_progress("starting_generation")
-        response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+        response = None
+        max_mainline_retries = 2
+        for attempt in range(1, max_mainline_retries + 1):
+            self._remaining_deadline_secs()
+            try:
+                self._report_progress("getting_token")
+                requirements = self._get_chat_requirements()
+                self._report_progress("preparing_conversation")
+                conduit_token = self._prepare_image_conversation(prompt, requirements, model)
+                self._report_progress("starting_generation")
+                response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+            except (ImageMainlineStateError, UpstreamHTTPError) as exc:
+                recoverable = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
+                if not recoverable or attempt >= max_mainline_retries:
+                    raise
+                logger.warning({
+                    "event": "image_mainline_state_retry",
+                    "attempt": attempt,
+                    "max_attempts": max_mainline_retries,
+                    "error": str(exc)[:300],
+                })
+                # The requirements and conduit token are one-shot state.  The
+                # next iteration creates both again with fresh request IDs.
+                self._sleep_with_deadline(0.2)
+                continue
+            break
+        if response is None:
+            raise ImageMainlineStateError("image generation did not start")
         self._report_progress("generating")
         try:
             yield from iter_sse_payloads(response)

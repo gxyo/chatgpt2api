@@ -8,12 +8,15 @@ from unittest import mock
 from services.openai_backend_api import (
     ACCOUNT_INFO_RETRY_ATTEMPTS,
     ACCOUNT_INFO_TIMEOUT_SECS,
+    ChatRequirements,
     FAST_UPSTREAM_RETRY_ATTEMPTS,
     FAST_UPSTREAM_TIMEOUT_SECS,
+    ImageMainlineStateError,
     ImageRequestTimeoutError,
     ImagePollTimeoutError,
     OpenAIBackendAPI,
     config as backend_config,
+    is_skipped_mainline_error,
 )
 from services.protocol import conversation
 from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput
@@ -64,6 +67,21 @@ class FakeUrlopenResponse:
         return self.payload
 
 
+class FakeStreamResponse:
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+
+    def __init__(self, lines: list[bytes]):
+        self.lines = lines
+        self.closed = False
+
+    def iter_lines(self):
+        return iter(self.lines)
+
+    def close(self):
+        self.closed = True
+
+
 class FakeAccountService:
     def __init__(self, tokens: list[str]):
         self.tokens = tokens
@@ -106,6 +124,78 @@ class FakeAccountService:
 
 
 class UpstreamRetryTests(unittest.TestCase):
+    def test_skipped_mainline_error_requires_structured_400(self):
+        self.assertTrue(is_skipped_mainline_error(
+            UpstreamHTTPError("/backend-api/f/conversation", 400, {"skipped_mainline": True})
+        ))
+        self.assertFalse(is_skipped_mainline_error(
+            UpstreamHTTPError("/backend-api/f/conversation", 400, {"skipped_mainline": False})
+        ))
+        self.assertFalse(is_skipped_mainline_error(
+            UpstreamHTTPError("/backend-api/f/conversation", 503, {"skipped_mainline": True})
+        ))
+
+    def test_image_mainline_post_is_not_retried_with_consumed_conduit_state(self):
+        api = OpenAIBackendAPI()
+        api.session = FakeSession([
+            FakeResponse(503, text="temporary gateway failure"),
+            FakeResponse(200),
+        ])
+
+        with self.assertRaises(UpstreamHTTPError):
+            api._start_image_generation(
+                "draw a cat",
+                ChatRequirements(token="requirements-token"),
+                "conduit-token",
+                "gpt-image-2",
+            )
+
+        self.assertEqual(len(api.session.calls), 1)
+        self.assertEqual(api.session.calls[0][0], "post")
+        self.assertEqual(api.session.calls[0][2]["headers"]["X-Conduit-Token"], "conduit-token")
+
+    def test_image_prepare_rejects_missing_conduit_token(self):
+        api = OpenAIBackendAPI()
+        api.session = FakeSession([FakeResponse(200, {})])
+
+        with self.assertRaises(ImageMainlineStateError):
+            api._prepare_image_conversation(
+                "draw a cat",
+                ChatRequirements(token="requirements-token"),
+                "gpt-image-2",
+            )
+
+        self.assertEqual(len(api.session.calls), 1)
+
+    def test_picture_stream_rebuilds_handshake_after_skipped_mainline(self):
+        api = OpenAIBackendAPI("token-a")
+        first_requirements = ChatRequirements(token="requirements-one")
+        second_requirements = ChatRequirements(token="requirements-two")
+        skipped = UpstreamHTTPError(
+            "/backend-api/f/conversation",
+            400,
+            {"skipped_mainline": True},
+        )
+        response = FakeStreamResponse([
+            b'data: {"conversation_id":"conv-ok"}',
+            b'data: [DONE]',
+        ])
+
+        with mock.patch.object(api, "_bootstrap"), \
+             mock.patch.object(api, "_get_chat_requirements", side_effect=[first_requirements, second_requirements]) as requirements, \
+             mock.patch.object(api, "_prepare_image_conversation", side_effect=["conduit-one", "conduit-two"]) as prepare, \
+             mock.patch.object(api, "_start_image_generation", side_effect=[skipped, response]) as start, \
+             mock.patch.object(api, "_sleep_with_deadline"):
+            payloads = list(api._stream_picture_conversation("draw a cat", "gpt-image-2", []))
+
+        self.assertEqual(payloads, ['{"conversation_id":"conv-ok"}', "[DONE]"])
+        self.assertEqual(requirements.call_count, 2)
+        self.assertEqual(prepare.call_args_list[0].args[1], first_requirements)
+        self.assertEqual(prepare.call_args_list[1].args[1], second_requirements)
+        self.assertEqual(start.call_args_list[0].args[2], "conduit-one")
+        self.assertEqual(start.call_args_list[1].args[2], "conduit-two")
+        self.assertTrue(response.closed)
+
     def test_chat_requirements_retries_503(self):
         api = OpenAIBackendAPI()
         api.session = FakeSession([
