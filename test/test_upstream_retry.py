@@ -167,6 +167,59 @@ class UpstreamRetryTests(unittest.TestCase):
 
         self.assertEqual(len(api.session.calls), 1)
 
+    def test_image_handshake_uses_current_model_in_both_stages(self):
+        api = OpenAIBackendAPI()
+        api.session = FakeSession([
+            FakeResponse(200, {"conduit_token": "conduit-token"}),
+            FakeResponse(200),
+        ])
+
+        with mock.patch.dict(backend_config.data, {}, clear=True):
+            requirements = ChatRequirements(token="requirements-token")
+            conduit_token = api._prepare_image_conversation("draw a cat", requirements, "gpt-image-2")
+            api._start_image_generation("draw a cat", requirements, conduit_token, "gpt-image-2")
+
+        prepare_payload = api.session.calls[0][2]["json"]
+        mainline_payload = api.session.calls[1][2]["json"]
+        self.assertEqual(prepare_payload["model"], "gpt-5-5")
+        self.assertEqual(mainline_payload["model"], "gpt-5-5")
+        self.assertNotIn("thinking_effort", prepare_payload)
+        self.assertNotIn("thinking_effort", mainline_payload)
+        self.assertNotEqual(prepare_payload["model"], "gpt-5-5-thinking")
+        self.assertNotEqual(mainline_payload["model"], "gpt-5-5-thinking")
+
+    def test_image_handshake_splits_thinking_suffix_in_both_stages(self):
+        api = OpenAIBackendAPI()
+        api.session = FakeSession([
+            FakeResponse(200, {"conduit_token": "conduit-token"}),
+            FakeResponse(200),
+        ])
+        configured = {
+            "default_upstream_model_name": "gpt-5-5-extended",
+            "default_thinking_effort": "auto",
+        }
+
+        with mock.patch.dict(backend_config.data, configured, clear=True):
+            requirements = ChatRequirements(token="requirements-token")
+            conduit_token = api._prepare_image_conversation("draw a cat", requirements, "gpt-image-2")
+            api._start_image_generation("draw a cat", requirements, conduit_token, "gpt-image-2")
+
+        prepare_payload = api.session.calls[0][2]["json"]
+        mainline_payload = api.session.calls[1][2]["json"]
+        for payload in (prepare_payload, mainline_payload):
+            self.assertEqual(payload["model"], "gpt-5-5")
+            self.assertEqual(payload["thinking_effort"], "extended")
+
+    def test_legacy_thinking_model_slug_is_never_sent_upstream(self):
+        api = OpenAIBackendAPI()
+        configured = {
+            "default_upstream_model_name": "gpt-5-5-thinking",
+            "default_thinking_effort": "auto",
+        }
+
+        with mock.patch.dict(backend_config.data, configured, clear=True):
+            self.assertEqual(api._image_model_settings("gpt-image-2"), ("gpt-5-5", ""))
+
     def test_picture_stream_rebuilds_handshake_after_skipped_mainline(self):
         api = OpenAIBackendAPI("token-a")
         first_requirements = ChatRequirements(token="requirements-one")

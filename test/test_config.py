@@ -114,6 +114,31 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config["refresh_account_interval_minute"], 60)
             self.assertEqual(config["refresh_all_accounts_interval_minute"], 2)
 
+    def test_upstream_model_settings_have_current_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            public_config = store.get()
+
+            self.assertEqual(store.default_upstream_model_name, "gpt-5-5")
+            self.assertEqual(store.default_thinking_effort, "auto")
+            self.assertEqual(public_config["default_upstream_model_name"], "gpt-5-5")
+            self.assertEqual(public_config["default_thinking_effort"], "auto")
+
+    def test_invalid_default_thinking_effort_falls_back_to_auto(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({
+                "auth-key": "test-auth",
+                "default_thinking_effort": "unsupported",
+            }), encoding="utf-8")
+
+            store = self.config_module.ConfigStore(config_file)
+
+            self.assertEqual(store.default_thinking_effort, "auto")
+
 
 if __name__ == "__main__":
     unittest.main()

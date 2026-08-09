@@ -692,16 +692,35 @@ class OpenAIBackendAPI:
             },
         }
 
-    def _image_model_slug(self, model: str) -> str:
-        """把标准图片模型名映射到底层 model slug。"""
+    @staticmethod
+    def _normalize_thinking_effort(value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"", "none", "auto"}:
+            return ""
+        if normalized in {"low", "medium", "high", "standard", "max"}:
+            return normalized
+        if normalized in {"xhigh", "extended"}:
+            return "extended"
+        return ""
+
+    def _image_model_settings(self, model: str) -> tuple[str, str]:
+        """把标准图片模型名映射为上游模型及思考强度。"""
         _, base_model = split_image_model(model)
         if not base_model:
-            return "auto"
+            return "auto", ""
         if base_model == "gpt-image-2":
-            return "gpt-5-5-thinking"
-        if base_model == CODEX_IMAGE_MODEL:
-            return base_model
-        return "auto"
+            upstream_model = config.default_upstream_model_name
+        elif base_model == CODEX_IMAGE_MODEL:
+            upstream_model = base_model
+        else:
+            return "auto", ""
+        model_name, separator, suffix = upstream_model.rpartition("-")
+        normalized_suffix = suffix.lower()
+        if separator and normalized_suffix in {"standard", "extended", "max"}:
+            return model_name, normalized_suffix
+        if separator and normalized_suffix == "thinking":
+            upstream_model = model_name
+        return upstream_model, self._normalize_thinking_effort(config.default_thinking_effort)
 
     def _image_headers(self, path: str, requirements: ChatRequirements, conduit_token: str = "", accept: str = "*/*") -> \
             Dict[str, str]:
@@ -991,11 +1010,12 @@ class OpenAIBackendAPI:
     def _prepare_image_conversation(self, prompt: str, requirements: ChatRequirements, model: str) -> str:
         """为图片生成准备 conduit token。"""
         path = "/backend-api/f/conversation/prepare"
+        upstream_model, thinking_effort = self._image_model_settings(model)
         payload = {
             "action": "next",
             "fork_from_shared_post": False,
             "parent_message_id": new_uuid(),
-            "model": self._image_model_slug(model),
+            "model": upstream_model,
             "client_prepare_state": "success",
             "timezone_offset_min": -480,
             "timezone": "Asia/Shanghai",
@@ -1010,6 +1030,8 @@ class OpenAIBackendAPI:
             "supported_encodings": ["v1"],
             "client_contextual_info": {"app_name": "chatgpt.com"},
         }
+        if thinking_effort:
+            payload["thinking_effort"] = thinking_effort
         response = self._fast_request(
             "post",
             path,
@@ -1111,6 +1133,7 @@ class OpenAIBackendAPI:
     def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
                                 references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:
         """启动图片生成或编辑的 SSE 请求。"""
+        upstream_model, thinking_effort = self._image_model_settings(model)
         references = references or []
         parts = [{
             "content_type": "image_asset_pointer",
@@ -1148,7 +1171,7 @@ class OpenAIBackendAPI:
                 "metadata": metadata,
             }],
             "parent_message_id": new_uuid(),
-            "model": self._image_model_slug(model),
+            "model": upstream_model,
             "client_prepare_state": "sent",
             "timezone_offset_min": -480,
             "timezone": "Asia/Shanghai",
@@ -1170,6 +1193,8 @@ class OpenAIBackendAPI:
             "paragen_cot_summary_display_override": "allow",
             "force_parallel_switch": "auto",
         }
+        if thinking_effort:
+            payload["thinking_effort"] = thinking_effort
         path = "/backend-api/f/conversation"
         response = self._fast_request(
             "post",
@@ -2792,10 +2817,13 @@ class OpenAIBackendAPI:
                 recoverable = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
                 if not recoverable or attempt >= max_mainline_retries:
                     raise
+                upstream_model, thinking_effort = self._image_model_settings(model)
                 logger.warning({
                     "event": "image_mainline_state_retry",
                     "attempt": attempt,
                     "max_attempts": max_mainline_retries,
+                    "upstream_model": upstream_model,
+                    "thinking_effort": thinking_effort or "auto",
                     "error": str(exc)[:300],
                 })
                 # The requirements and conduit token are one-shot state.  The
