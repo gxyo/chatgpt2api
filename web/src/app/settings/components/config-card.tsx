@@ -81,7 +81,7 @@ export function ConfigCard() {
 
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-      <CardContent className="space-y-4 p-6">
+      <CardContent className="space-y-4 p-6 pb-24 md:pr-28 md:pb-6">
         <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm leading-6 text-stone-600">
           管理员登录密钥继续从部署配置读取，不再在此页面展示；如需分发给其他人，请在下方创建普通用户密钥。
         </div>
@@ -434,17 +434,19 @@ export function ConfigCard() {
           </div>
         </div>
 
-        <div className="flex justify-end">
-          <Button
-            className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
-            onClick={() => void saveConfig()}
-            disabled={isSavingConfig}
-          >
-            {isSavingConfig ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
-            保存
-          </Button>
-        </div>
       </CardContent>
+      <div className="fixed right-4 bottom-4 z-40 md:top-1/2 md:bottom-auto md:-translate-y-1/2">
+        <Button
+          className="h-12 rounded-2xl bg-stone-950 px-4 text-white shadow-xl shadow-stone-950/20 hover:bg-stone-800 focus-visible:ring-2 focus-visible:ring-stone-900/30 sm:px-5 dark:bg-stone-100 dark:text-stone-900 dark:shadow-black/30 dark:hover:bg-white"
+          onClick={() => void saveConfig()}
+          disabled={isSavingConfig}
+          aria-label="保存基础配置"
+          title="保存基础配置"
+        >
+          {isSavingConfig ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
+          保存
+        </Button>
+      </div>
     </Card>
   );
 }
