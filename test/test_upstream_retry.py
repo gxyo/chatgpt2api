@@ -210,6 +210,39 @@ class UpstreamRetryTests(unittest.TestCase):
             self.assertEqual(payload["model"], "gpt-5-5")
             self.assertEqual(payload["thinking_effort"], "extended")
 
+    def test_image_handshake_reuses_prepare_message_state_in_mainline(self):
+        api = OpenAIBackendAPI()
+        api.session = FakeSession([
+            FakeResponse(200, {"conduit_token": "conduit-token"}),
+            FakeResponse(200),
+        ])
+
+        with mock.patch.dict(backend_config.data, {}, clear=True):
+            requirements = ChatRequirements(token="requirements-token")
+            conduit_token = api._prepare_image_conversation(
+                "draw a cat",
+                requirements,
+                "gpt-image-2",
+                parent_message_id="parent-id",
+                message_id="message-id",
+            )
+            api._start_image_generation(
+                "draw a cat",
+                requirements,
+                conduit_token,
+                "gpt-image-2",
+                parent_message_id="parent-id",
+                message_id="message-id",
+            )
+
+        prepare_payload = api.session.calls[0][2]["json"]
+        mainline_payload = api.session.calls[1][2]["json"]
+        self.assertEqual(api.session.calls[0][2]["headers"]["X-Conduit-Token"], "no-token")
+        self.assertEqual(prepare_payload["parent_message_id"], "parent-id")
+        self.assertEqual(mainline_payload["parent_message_id"], "parent-id")
+        self.assertEqual(prepare_payload["partial_query"]["id"], "message-id")
+        self.assertEqual(mainline_payload["messages"][0]["id"], "message-id")
+
     def test_legacy_thinking_model_slug_is_never_sent_upstream(self):
         api = OpenAIBackendAPI()
         configured = {
@@ -247,6 +280,23 @@ class UpstreamRetryTests(unittest.TestCase):
         self.assertEqual(prepare.call_args_list[1].args[1], second_requirements)
         self.assertEqual(start.call_args_list[0].args[2], "conduit-one")
         self.assertEqual(start.call_args_list[1].args[2], "conduit-two")
+        for prepare_call, start_call in zip(prepare.call_args_list, start.call_args_list):
+            self.assertEqual(
+                prepare_call.kwargs["parent_message_id"],
+                start_call.kwargs["parent_message_id"],
+            )
+            self.assertEqual(
+                prepare_call.kwargs["message_id"],
+                start_call.kwargs["message_id"],
+            )
+        self.assertNotEqual(
+            prepare.call_args_list[0].kwargs["parent_message_id"],
+            prepare.call_args_list[1].kwargs["parent_message_id"],
+        )
+        self.assertNotEqual(
+            prepare.call_args_list[0].kwargs["message_id"],
+            prepare.call_args_list[1].kwargs["message_id"],
+        )
         self.assertTrue(response.closed)
 
     def test_chat_requirements_retries_503(self):

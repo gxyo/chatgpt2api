@@ -1007,14 +1007,23 @@ class OpenAIBackendAPI:
             retry_after = int(retry_after_header) if str(retry_after_header or "").isdigit() else None
             raise UpstreamHTTPError(path, error.code, body, retry_after=retry_after) from error
 
-    def _prepare_image_conversation(self, prompt: str, requirements: ChatRequirements, model: str) -> str:
+    def _prepare_image_conversation(
+            self,
+            prompt: str,
+            requirements: ChatRequirements,
+            model: str,
+            parent_message_id: str | None = None,
+            message_id: str | None = None,
+    ) -> str:
         """为图片生成准备 conduit token。"""
         path = "/backend-api/f/conversation/prepare"
         upstream_model, thinking_effort = self._image_model_settings(model)
+        parent_message_id = str(parent_message_id or new_uuid())
+        message_id = str(message_id or new_uuid())
         payload = {
             "action": "next",
             "fork_from_shared_post": False,
-            "parent_message_id": new_uuid(),
+            "parent_message_id": parent_message_id,
             "model": upstream_model,
             "client_prepare_state": "success",
             "timezone_offset_min": -480,
@@ -1022,7 +1031,7 @@ class OpenAIBackendAPI:
             "conversation_mode": {"kind": "primary_assistant"},
             "system_hints": ["picture_v2"],
             "partial_query": {
-                "id": new_uuid(),
+                "id": message_id,
                 "author": {"role": "user"},
                 "content": {"content_type": "text", "parts": [prompt]},
             },
@@ -1042,7 +1051,7 @@ class OpenAIBackendAPI:
             # with ``skipped_mainline``.
             attempts=1,
             timeout=8.0,
-            headers=self._image_headers(path, requirements),
+            headers=self._image_headers(path, requirements, "no-token"),
             json=payload,
         )
         payload = response.json()
@@ -1130,10 +1139,20 @@ class OpenAIBackendAPI:
             "height": height,
         }
 
-    def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
-                                references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:
+    def _start_image_generation(
+            self,
+            prompt: str,
+            requirements: ChatRequirements,
+            conduit_token: str,
+            model: str,
+            references: Optional[list[Dict[str, Any]]] = None,
+            parent_message_id: str | None = None,
+            message_id: str | None = None,
+    ) -> requests.Response:
         """启动图片生成或编辑的 SSE 请求。"""
         upstream_model, thinking_effort = self._image_model_settings(model)
+        parent_message_id = str(parent_message_id or new_uuid())
+        message_id = str(message_id or new_uuid())
         references = references or []
         parts = [{
             "content_type": "image_asset_pointer",
@@ -1164,13 +1183,13 @@ class OpenAIBackendAPI:
         payload = {
             "action": "next",
             "messages": [{
-                "id": new_uuid(),
+                "id": message_id,
                 "author": {"role": "user"},
                 "create_time": time.time(),
                 "content": content,
                 "metadata": metadata,
             }],
-            "parent_message_id": new_uuid(),
+            "parent_message_id": parent_message_id,
             "model": upstream_model,
             "client_prepare_state": "sent",
             "timezone_offset_min": -480,
@@ -2806,13 +2825,32 @@ class OpenAIBackendAPI:
         max_mainline_retries = 2
         for attempt in range(1, max_mainline_retries + 1):
             self._remaining_deadline_secs()
+            # The prepare response contains one-shot state for exactly one
+            # mainline message. Keep both identifiers stable across the two
+            # requests, while generating a completely new pair on retry.
+            parent_message_id = new_uuid()
+            message_id = new_uuid()
             try:
                 self._report_progress("getting_token")
                 requirements = self._get_chat_requirements()
                 self._report_progress("preparing_conversation")
-                conduit_token = self._prepare_image_conversation(prompt, requirements, model)
+                conduit_token = self._prepare_image_conversation(
+                    prompt,
+                    requirements,
+                    model,
+                    parent_message_id=parent_message_id,
+                    message_id=message_id,
+                )
                 self._report_progress("starting_generation")
-                response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+                response = self._start_image_generation(
+                    prompt,
+                    requirements,
+                    conduit_token,
+                    model,
+                    references,
+                    parent_message_id=parent_message_id,
+                    message_id=message_id,
+                )
             except (ImageMainlineStateError, UpstreamHTTPError) as exc:
                 recoverable = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
                 if not recoverable or attempt >= max_mainline_retries:
