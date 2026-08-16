@@ -14,7 +14,7 @@ import { RegisterCard } from "./components/register-card";
 function RegisterDataController() {
   const didLoadRef = useRef(false);
   const loadRegister = useSettingsStore((state) => state.loadRegister);
-  const setRegisterConfig = useSettingsStore((state) => state.setRegisterConfig);
+  const updateRegisterRuntime = useSettingsStore((state) => state.updateRegisterRuntime);
 
   useEffect(() => {
     if (didLoadRef.current) return;
@@ -30,14 +30,14 @@ function RegisterDataController() {
       const baseUrl = webConfig.apiUrl.replace(/\/$/, "");
       source = new EventSource(`${baseUrl}/api/register/events?token=${encodeURIComponent(token)}`);
       source.onmessage = (event) => {
-        setRegisterConfig(JSON.parse(event.data) as RegisterConfig);
+        updateRegisterRuntime(JSON.parse(event.data) as RegisterConfig);
       };
     });
     return () => {
       closed = true;
       source?.close();
     };
-  }, [setRegisterConfig]);
+  }, [updateRegisterRuntime]);
 
   return null;
 }

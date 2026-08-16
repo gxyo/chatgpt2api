@@ -318,7 +318,7 @@ type SettingsStore = {
   setBackupInclude: (key: keyof BackupSettings["include"], value: boolean) => void;
 
   loadRegister: (silent?: boolean) => Promise<void>;
-  setRegisterConfig: (config: RegisterConfig) => void;
+  updateRegisterRuntime: (config: RegisterConfig) => void;
   setRegisterProxy: (value: string) => void;
   setRegisterEngine: (value: "playwright" | "http") => void;
   setRegisterTotal: (value: string) => void;
@@ -872,8 +872,19 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
-  setRegisterConfig: (config) => {
-    set({ registerConfig: config, isLoadingRegister: false });
+  updateRegisterRuntime: (config) => {
+    set((state) => ({
+      registerConfig: state.registerConfig
+        ? {
+            ...state.registerConfig,
+            enabled: config.enabled,
+            stats: config.stats,
+            logs: config.logs,
+            cloudflare_domain_stats: config.cloudflare_domain_stats,
+          }
+        : config,
+      isLoadingRegister: false,
+    }));
   },
 
   setRegisterProxy: (value) => {
