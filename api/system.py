@@ -281,12 +281,15 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.post("/api/images/storage/cleanup-to-target")
     async def cleanup_to_target(
-        target_free_mb: int = 500,
+        target_image_mb: int | None = Query(default=None, ge=0),
+        # Keep accepting the old query name so older clients continue to work.
+        target_free_mb: int | None = Query(default=None, ge=0),
         dry_run: bool = False,
         authorization: str | None = Header(default=None),
     ):
         require_admin(authorization)
-        return await run_in_threadpool(delete_to_target, target_free_mb, dry_run)
+        target_mb = target_image_mb if target_image_mb is not None else (target_free_mb if target_free_mb is not None else 500)
+        return await run_in_threadpool(delete_to_target, target_mb, dry_run)
 
     @router.get("/health", response_model=None)
     async def health_dashboard(format: str = Query(default="html")):
