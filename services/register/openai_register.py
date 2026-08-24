@@ -126,6 +126,29 @@ def step(index: int, text: str, color: str = "") -> None:
     log(f"[任务{index}] {text}", color)
 
 
+def _classify_worker_error(error: Exception) -> tuple[str, bool]:
+    """Turn unrecoverable browser launch failures into a concise fatal result."""
+    detail = str(error)
+    lowered = detail.lower()
+    browser_launch_failed = any(
+        marker in lowered
+        for marker in ("browsertype.launch", "chrome_crashpad_handler", "chromium")
+    )
+    process_limit_reached = (
+        "resource temporarily unavailable" in lowered
+        or "cannot fork" in lowered
+        or "can't fork" in lowered
+        or "pthread_create" in lowered
+        or ("posix_spawn" in lowered and ("(11)" in lowered or "errno 11" in lowered))
+    )
+    if browser_launch_failed and process_limit_reached:
+        return (
+            "浏览器启动失败：系统无法创建 Chromium 子进程，PID/线程或内存资源已耗尽",
+            True,
+        )
+    return detail, False
+
+
 def _make_trace_headers() -> dict[str, str]:
     trace_id = str(random.getrandbits(64))
     parent_id = str(random.getrandbits(64))
@@ -504,5 +527,6 @@ def worker(index: int) -> dict:
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1
-        log(f"任务{index} 注册失败，本次耗时{cost:.1f}s，原因: {e}", "red")
-        return {"ok": False, "index": index, "error": str(e)}
+        message, fatal = _classify_worker_error(e)
+        log(f"任务{index} 注册失败，本次耗时{cost:.1f}s，原因: {message}", "red")
+        return {"ok": False, "index": index, "error": message, "fatal": fatal}

@@ -418,6 +418,7 @@ class RegisterService:
     def _run(self) -> None:
         threads = int(self.get()["threads"])
         submitted, done, success, fail = 0, 0, 0, 0
+        fatal_error = ""
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures = set()
             while True:
@@ -450,6 +451,16 @@ class RegisterService:
                         result = future.result()
                         success += 1 if result.get("ok") else 0
                         fail += 0 if result.get("ok") else 1
+                        if result.get("fatal") and not fatal_error:
+                            fatal_error = str(result.get("error") or "注册运行环境发生不可恢复错误")
+                            with self._lock:
+                                self._config["enabled"] = False
+                                self._save()
+                            self._append_log(
+                                f"检测到不可恢复的系统资源错误，已自动停止注册任务，避免持续重试：{fatal_error}。"
+                                "请检查主机/容器的 PID、僵尸进程和内存，处理后再重新启动任务",
+                                "red",
+                            )
                     except Exception:
                         fail += 1
         self._bump(running=0, done=done, success=success, fail=fail, finished_at=_now())

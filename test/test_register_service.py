@@ -25,6 +25,54 @@ class FakeAccountService:
 
 
 class RegisterServiceTests(unittest.TestCase):
+    def test_browser_resource_exhaustion_error_is_fatal_and_concise(self) -> None:
+        from services.register import openai_register
+
+        message, fatal = openai_register._classify_worker_error(
+            RuntimeError(
+                "BrowserType.launch: Target page, context or browser has been closed "
+                "chrome_crashpad_handler: Resource temporarily unavailable (11)"
+            )
+        )
+
+        self.assertTrue(fatal)
+        self.assertEqual(
+            message,
+            "浏览器启动失败：系统无法创建 Chromium 子进程，PID/线程或内存资源已耗尽",
+        )
+
+    def test_fatal_worker_error_stops_registration_instead_of_retrying(self) -> None:
+        from services import register_service as register_module
+
+        calls = []
+
+        def fatal_worker(task_number: int) -> dict:
+            calls.append(task_number)
+            return {
+                "ok": False,
+                "index": task_number,
+                "error": "浏览器进程资源已耗尽",
+                "fatal": True,
+            }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = register_module.RegisterService(Path(tmp_dir) / "register.json")
+            service.update({"mode": "total", "total": 100, "threads": 1})
+            with patch.object(register_module.openai_register, "worker", side_effect=fatal_worker):
+                service.start()
+                self.assertIsNotNone(service._runner)
+                service._runner.join(timeout=5)
+
+            snapshot = service.get()
+
+        self.assertFalse(service._runner.is_alive())
+        self.assertFalse(snapshot["enabled"])
+        self.assertEqual(calls, [1])
+        self.assertEqual(snapshot["stats"]["done"], 1)
+        self.assertTrue(
+            any("已自动停止注册任务" in item["text"] for item in snapshot["logs"])
+        )
+
     def test_running_counts_only_workers_actively_executing(self) -> None:
         from services import register_service as register_module
 
