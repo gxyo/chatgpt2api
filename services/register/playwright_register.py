@@ -16,6 +16,9 @@ from services.register.openai_register import (
     config,
     create_session,
     log,
+    platform_auth0_client,
+    platform_oauth_client_id,
+    platform_oauth_redirect_uri,
     request_platform_oauth_token,
     step,
 )
@@ -42,6 +45,13 @@ SUBMIT_BUTTON_SELECTOR = (
     'button[type="submit"], button:has-text("Continue"), button:has-text("Verify"), '
     'button:has-text("继续"), button:has-text("验证")'
 )
+BIRTHDATE_INPUT_SELECTOR = (
+    'input[name="birthdate"]:not([type="hidden"]), input[name="birthday"]:not([type="hidden"]), '
+    'input[type="date"], input[placeholder*="YYYY"], input[placeholder*="MM/DD"], '
+    'input[placeholder*="birth" i]'
+)
+BIRTHDATE_SEGMENT_SELECTOR = '[role="spinbutton"]'
+OAUTH_TOKEN_EXCHANGE_ATTEMPTS = 2
 OAUTH_AUTHORIZE_PATTERNS = (
     "**/oauth/authorize*",
     "**/api/oauth/oauth2/auth*",
@@ -295,6 +305,67 @@ async def _submit_otp(page, index: int, mailbox: dict) -> None:
         await page.wait_for_timeout(1000)
 
 
+async def _exchange_oauth_token_in_browser(
+    page, context, index: int, code: str, code_verifier: str, proxy: str
+) -> dict:
+    payload = {
+        "client_id": platform_oauth_client_id,
+        "code_verifier": code_verifier,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": platform_oauth_redirect_uri,
+    }
+    browser_headers = {
+        "accept": "*/*",
+        "auth0-client": platform_auth0_client,
+        "content-type": "application/json",
+        "origin": platform_base,
+        "referer": f"{platform_base}/",
+    }
+
+    for attempt in range(OAUTH_TOKEN_EXCHANGE_ATTEMPTS):
+        try:
+            response = await context.request.post(
+                f"{auth_base}/api/accounts/oauth/token",
+                headers=browser_headers,
+                data=payload,
+                fail_on_status_code=False,
+                timeout=60_000,
+            )
+        except Exception as error:
+            step(index, f"Playwright OAuth token 交换不可用，回退 HTTP 会话: {error}", "yellow")
+            break
+
+        status = int(response.status)
+        body = await response.text()
+        response_headers = response.headers
+        request_id = str(response_headers.get("x-request-id") or "")
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            data = {}
+        if status == 200 and isinstance(data, dict) and data.get("access_token"):
+            return data
+
+        error_data = data.get("error") if isinstance(data, dict) else None
+        error_code = str(error_data.get("code") or "") if isinstance(error_data, dict) else ""
+        if error_code == "token_exchange_user_error" and attempt + 1 < OAUTH_TOKEN_EXCHANGE_ATTEMPTS:
+            step(index, "OAuth token 交换被临时拒绝，1 秒后重试", "yellow")
+            await page.wait_for_timeout(1000)
+            continue
+
+        request_detail = f", request_id={request_id}" if request_id else ""
+        raise RuntimeError(
+            f"OAuth token 交换失败: status={status}{request_detail}, body={body[:300]}"
+        )
+
+    session = create_session(proxy)
+    try:
+        return request_platform_oauth_token(session, code, code_verifier)
+    finally:
+        session.close()
+
+
 async def _run_signup_state_machine(
     page, index: int, password: str, name: str, age: str, mailbox: dict, captured_code: list[str]
 ) -> bool:
@@ -465,11 +536,9 @@ async def _browser_register_flow(
             f"code_fp={_secret_fingerprint(captured_code[0])}, "
             f"verifier_fp={_secret_fingerprint(code_verifier)}",
         )
-    session = create_session(proxy)
-    try:
-        tokens = request_platform_oauth_token(session, captured_code[0], code_verifier)
-    finally:
-        session.close()
+    tokens = await _exchange_oauth_token_in_browser(
+        page, context, index, captured_code[0], code_verifier, proxy
+    )
 
     if not tokens or not tokens.get("access_token"):
         raise RuntimeError("OAuth token 交换返回数据缺少 access_token")
@@ -494,6 +563,66 @@ async def _page_debug_info(page) -> str:
         return "(unable to read page)"
 
 
+def _birthdate_segment_name(label: str) -> str:
+    normalized = str(label or "").strip().lower()
+    if "year" in normalized or "年份" in normalized or normalized.startswith("年"):
+        return "year"
+    if "month" in normalized or "月份" in normalized or normalized.startswith("月"):
+        return "month"
+    if "day" in normalized or "日期" in normalized or normalized.startswith("日"):
+        return "day"
+    return ""
+
+
+async def _fill_birthdate(page, birthdate: str) -> bool:
+    year, month, day = birthdate.split("-", 2)
+    date_input = page.locator(BIRTHDATE_INPUT_SELECTOR).first
+    try:
+        date_input_visible = await date_input.is_visible()
+    except Exception:
+        date_input_visible = False
+    if date_input_visible:
+        input_type = str(await date_input.get_attribute("type") or "").lower()
+        placeholder = str(await date_input.get_attribute("placeholder") or "").lower()
+        value = birthdate
+        if input_type != "date" and "/" in placeholder:
+            positions = {part: placeholder.find(part) for part in ("yyyy", "mm", "dd")}
+            if positions["yyyy"] >= 0 and positions["yyyy"] < positions["mm"]:
+                value = f"{year}/{month}/{day}"
+            elif positions["dd"] >= 0 and positions["dd"] < positions["mm"]:
+                value = f"{day}/{month}/{year}"
+            else:
+                value = f"{month}/{day}/{year}"
+        await date_input.fill(value)
+        return True
+
+    segments = page.locator(BIRTHDATE_SEGMENT_SELECTOR)
+    visible_segments = []
+    for position in range(await segments.count()):
+        segment = segments.nth(position)
+        if await segment.is_visible():
+            visible_segments.append(segment)
+    if len(visible_segments) < 3:
+        return False
+
+    values = {"year": year, "month": month, "day": day}
+    segment_names = [
+        _birthdate_segment_name(str(await segment.get_attribute("aria-label") or ""))
+        for segment in visible_segments
+    ]
+    if not {"year", "month", "day"}.issubset(set(segment_names)):
+        # The browser context uses en-US, whose unlabeled date segment order is month/day/year.
+        segment_names = ["month", "day", "year", *segment_names[3:]]
+
+    filled: set[str] = set()
+    for segment, segment_name in zip(visible_segments, segment_names):
+        if segment_name not in values or segment_name in filled:
+            continue
+        await segment.fill(values[segment_name])
+        filled.add(segment_name)
+    return filled == {"year", "month", "day"}
+
+
 async def _fill_profile(page, name: str, age: str, index: int) -> None:
     await page.wait_for_timeout(2000)
     step(index, f"填写资料页面: {page.url}")
@@ -511,7 +640,7 @@ async def _fill_profile(page, name: str, age: str, index: int) -> None:
 
     age_filled = False
     age_input = page.locator('input[name="age"], input[id="age"], input[placeholder*="age" i], input[type="number"]').first
-    if await age_input.count() > 0:
+    if await age_input.is_visible():
         try:
             await age_input.fill(age)
             step(index, f"已填写年龄: {age}")
@@ -520,22 +649,17 @@ async def _fill_profile(page, name: str, age: str, index: int) -> None:
             pass
 
     if not age_filled:
-        date_input = page.locator('input[name="birthdate"], input[name="birthday"], input[type="date"], input[placeholder*="YYYY"], input[placeholder*="MM/DD"], input[placeholder*="birth" i]').first
-        if await date_input.count() > 0:
-            birthdate = _random_birthdate()
-            try:
-                await date_input.fill(birthdate)
-                step(index, f"已填写生日: {birthdate}")
-                age_filled = True
-            except Exception:
-                pass
+        birthdate = _random_birthdate()
+        try:
+            age_filled = await _fill_birthdate(page, birthdate)
+        except Exception:
+            age_filled = False
+        if age_filled:
+            step(index, f"已填写生日: {birthdate}")
 
     if not age_filled:
-        all_inputs = page.locator("input")
-        count = await all_inputs.count()
-        if count >= 2:
-            await all_inputs.nth(1).fill(age)
-            step(index, f"通过第二个 input 填写年龄: {age}")
+        body = await _page_debug_info(page)
+        raise RuntimeError(f"未找到可填写的年龄或生日控件, url={page.url}, body={body}")
 
     await page.wait_for_timeout(500)
 

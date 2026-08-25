@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -7,6 +8,8 @@ from services.register.playwright_register import (
     OAUTH_AUTHORIZE_PATTERNS,
     OAUTH_CALLBACK_PATTERN,
     _install_oauth_routes,
+    _exchange_oauth_token_in_browser,
+    _fill_birthdate,
     _replace_pkce_params,
     _run_signup_state_machine,
     _switch_to_password_if_offered,
@@ -187,6 +190,68 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(state, "profile")
         page.locator.assert_not_called()
+
+    async def test_segmented_birthdate_fills_visible_month_day_year_controls(self) -> None:
+        native_input = MagicMock()
+        native_input.first = native_input
+        native_input.is_visible = AsyncMock(return_value=False)
+        segments = MagicMock()
+        segments.count = AsyncMock(return_value=3)
+        controls = []
+        for label in ("month, Date of birth", "day, Date of birth", "year, Date of birth"):
+            control = MagicMock()
+            control.is_visible = AsyncMock(return_value=True)
+            control.get_attribute = AsyncMock(return_value=label)
+            control.fill = AsyncMock()
+            controls.append(control)
+        segments.nth.side_effect = controls
+        page = MagicMock()
+        page.locator.side_effect = [native_input, segments]
+
+        filled = await _fill_birthdate(page, "2000-01-02")
+
+        self.assertTrue(filled)
+        controls[0].fill.assert_awaited_once_with("01")
+        controls[1].fill.assert_awaited_once_with("02")
+        controls[2].fill.assert_awaited_once_with("2000")
+
+    async def test_visible_birthdate_input_uses_placeholder_order(self) -> None:
+        date_input = MagicMock()
+        date_input.first = date_input
+        date_input.is_visible = AsyncMock(return_value=True)
+        date_input.get_attribute = AsyncMock(side_effect=["text", "YYYY/MM/DD"])
+        date_input.fill = AsyncMock()
+        page = MagicMock()
+        page.locator.return_value = date_input
+
+        filled = await _fill_birthdate(page, "2000-01-02")
+
+        self.assertTrue(filled)
+        date_input.fill.assert_awaited_once_with("2000/01/02")
+
+    async def test_token_exchange_user_error_retries_in_browser_context(self) -> None:
+        first_response = SimpleNamespace(
+            status=400,
+            text=AsyncMock(return_value=json.dumps({"error": {"code": "token_exchange_user_error"}})),
+            headers={"x-request-id": "req-first"},
+        )
+        second_response = SimpleNamespace(
+            status=200,
+            text=AsyncMock(return_value=json.dumps({"access_token": "access", "refresh_token": "refresh"})),
+            headers={"x-request-id": "req-second"},
+        )
+        page = MagicMock()
+        page.wait_for_timeout = AsyncMock()
+        context = MagicMock()
+        context.request.post = AsyncMock(side_effect=[first_response, second_response])
+
+        tokens = await _exchange_oauth_token_in_browser(
+            page, context, 5, "one-time-code", "code-verifier", "http://proxy.example:8080"
+        )
+
+        self.assertEqual(tokens["access_token"], "access")
+        self.assertEqual(context.request.post.await_count, 2)
+        page.wait_for_timeout.assert_awaited_once_with(1000)
 
 
 if __name__ == "__main__":
