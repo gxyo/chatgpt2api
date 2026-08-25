@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 
+from curl_cffi import requests as curl_requests
+
 from services.register import mail_provider
 from services.register.openai_register import (
     config,
-    create_session,
     log,
     platform_auth0_client,
     platform_oauth_client_id,
@@ -51,7 +52,6 @@ BIRTHDATE_INPUT_SELECTOR = (
     'input[placeholder*="birth" i]'
 )
 BIRTHDATE_SEGMENT_SELECTOR = '[role="spinbutton"]'
-OAUTH_TOKEN_EXCHANGE_ATTEMPTS = 2
 OAUTH_AUTHORIZE_PATTERNS = (
     "**/oauth/authorize*",
     "**/api/oauth/oauth2/auth*",
@@ -323,47 +323,53 @@ async def _exchange_oauth_token_in_browser(
         "referer": f"{platform_base}/",
     }
 
-    for attempt in range(OAUTH_TOKEN_EXCHANGE_ATTEMPTS):
-        try:
-            response = await context.request.post(
-                f"{auth_base}/api/accounts/oauth/token",
-                headers=browser_headers,
-                data=payload,
-                fail_on_status_code=False,
-                timeout=60_000,
-            )
-        except Exception as error:
-            step(index, f"Playwright OAuth token 交换不可用，回退 HTTP 会话: {error}", "yellow")
-            break
-
-        status = int(response.status)
-        body = await response.text()
-        response_headers = response.headers
-        request_id = str(response_headers.get("x-request-id") or "")
-        try:
-            data = json.loads(body) if body else {}
-        except Exception:
-            data = {}
-        if status == 200 and isinstance(data, dict) and data.get("access_token"):
-            return data
-
-        error_data = data.get("error") if isinstance(data, dict) else None
-        error_code = str(error_data.get("code") or "") if isinstance(error_data, dict) else ""
-        if error_code == "token_exchange_user_error" and attempt + 1 < OAUTH_TOKEN_EXCHANGE_ATTEMPTS:
-            step(index, "OAuth token 交换被临时拒绝，1 秒后重试", "yellow")
-            await page.wait_for_timeout(1000)
-            continue
-
-        request_detail = f", request_id={request_id}" if request_id else ""
-        raise RuntimeError(
-            f"OAuth token 交换失败: status={status}{request_detail}, body={body[:300]}"
-        )
-
-    session = create_session(proxy)
+    session_options: dict[str, Any] = {"impersonate": "chrome", "verify": False}
+    if proxy:
+        session_options["proxy"] = proxy
+    session = curl_requests.Session(**session_options)
     try:
-        return request_platform_oauth_token(session, code, code_verifier)
+        for cookie in await context.cookies():
+            name = str(cookie.get("name") or "")
+            if not name:
+                continue
+            domain = str(cookie.get("domain") or "")
+            if name.startswith("__Host-"):
+                domain = ""
+            session.cookies.set(
+                name,
+                str(cookie.get("value") or ""),
+                domain=domain,
+                path=str(cookie.get("path") or "/"),
+                secure=bool(cookie.get("secure")),
+            )
+        try:
+            return request_platform_oauth_token(session, code, code_verifier)
+        except Exception as error:
+            step(index, f"Chrome OAuth token 交换失败，尝试 Playwright 会话: {error}", "yellow")
     finally:
         session.close()
+
+    response = await context.request.post(
+        f"{auth_base}/api/accounts/oauth/token",
+        headers=browser_headers,
+        data=payload,
+        fail_on_status_code=False,
+        timeout=60_000,
+    )
+    status = int(response.status)
+    body = await response.text()
+    request_id = str(response.headers.get("x-request-id") or "")
+    try:
+        data = json.loads(body) if body else {}
+    except Exception:
+        data = {}
+    if status == 200 and isinstance(data, dict) and data.get("access_token"):
+        return data
+
+    request_detail = f", request_id={request_id}" if request_id else ""
+    raise RuntimeError(
+        f"OAuth token 交换失败: status={status}{request_detail}, body={body[:300]}"
+    )
 
 
 async def _run_signup_state_machine(

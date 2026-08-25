@@ -229,29 +229,65 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(filled)
         date_input.fill.assert_awaited_once_with("2000/01/02")
 
-    async def test_token_exchange_user_error_retries_in_browser_context(self) -> None:
-        first_response = SimpleNamespace(
-            status=400,
-            text=AsyncMock(return_value=json.dumps({"error": {"code": "token_exchange_user_error"}})),
-            headers={"x-request-id": "req-first"},
-        )
-        second_response = SimpleNamespace(
-            status=200,
-            text=AsyncMock(return_value=json.dumps({"access_token": "access", "refresh_token": "refresh"})),
-            headers={"x-request-id": "req-second"},
-        )
-        page = MagicMock()
-        page.wait_for_timeout = AsyncMock()
+    async def test_token_exchange_uses_chrome_session_with_browser_cookies(self) -> None:
+        session = MagicMock()
+        session.cookies.set = MagicMock()
         context = MagicMock()
-        context.request.post = AsyncMock(side_effect=[first_response, second_response])
+        context.cookies = AsyncMock(return_value=[{
+            "name": "session-cookie",
+            "value": "cookie-value",
+            "domain": ".openai.com",
+            "path": "/",
+            "secure": True,
+        }])
+        page = MagicMock()
 
-        tokens = await _exchange_oauth_token_in_browser(
-            page, context, 5, "one-time-code", "code-verifier", "http://proxy.example:8080"
-        )
+        with patch(
+            "services.register.playwright_register.curl_requests.Session", return_value=session
+        ) as create_chrome_session, patch(
+            "services.register.playwright_register.request_platform_oauth_token",
+            return_value={"access_token": "access", "refresh_token": "refresh"},
+        ) as exchange_token:
+            tokens = await _exchange_oauth_token_in_browser(
+                page, context, 5, "one-time-code", "code-verifier", "http://proxy.example:8080"
+            )
 
         self.assertEqual(tokens["access_token"], "access")
-        self.assertEqual(context.request.post.await_count, 2)
-        page.wait_for_timeout.assert_awaited_once_with(1000)
+        create_chrome_session.assert_called_once_with(
+            impersonate="chrome", verify=False, proxy="http://proxy.example:8080"
+        )
+        session.cookies.set.assert_called_once_with(
+            "session-cookie", "cookie-value", domain=".openai.com", path="/", secure=True
+        )
+        exchange_token.assert_called_once_with(session, "one-time-code", "code-verifier")
+        context.request.post.assert_not_called()
+        session.close.assert_called_once()
+
+    async def test_token_exchange_falls_back_to_playwright_context(self) -> None:
+        response = SimpleNamespace(
+            status=200,
+            text=AsyncMock(return_value=json.dumps({"access_token": "access", "refresh_token": "refresh"})),
+            headers={"x-request-id": "req-fallback"},
+        )
+        session = MagicMock()
+        page = MagicMock()
+        context = MagicMock()
+        context.cookies = AsyncMock(return_value=[])
+        context.request.post = AsyncMock(return_value=response)
+
+        with patch(
+            "services.register.playwright_register.curl_requests.Session", return_value=session
+        ), patch(
+            "services.register.playwright_register.request_platform_oauth_token",
+            side_effect=RuntimeError("primary rejected"),
+        ):
+            tokens = await _exchange_oauth_token_in_browser(
+                page, context, 5, "one-time-code", "code-verifier", ""
+            )
+
+        self.assertEqual(tokens["access_token"], "access")
+        context.request.post.assert_awaited_once()
+        session.close.assert_called_once()
 
 
 if __name__ == "__main__":
