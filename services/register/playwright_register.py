@@ -42,6 +42,12 @@ PASSWORD_OPTION_SELECTOR = (
     'button:has-text("Continue with password"), a:has-text("Continue with password"), '
     'button:has-text("使用密码继续"), a:has-text("使用密码继续")'
 )
+OTP_SIGNUP_OPTION_SELECTOR = (
+    'button:has-text("Sign up with a one-time code"), '
+    'a:has-text("Sign up with a one-time code"), '
+    'button:has-text("使用一次性验证码注册"), a:has-text("使用一次性验证码注册")'
+)
+PASSWORD_REJECTION_SELECTOR = 'text="Failed to create account. Please try again."'
 SUBMIT_BUTTON_SELECTOR = (
     'button[type="submit"], button:has-text("Continue"), button:has-text("Verify"), '
     'button:has-text("继续"), button:has-text("验证")'
@@ -227,7 +233,7 @@ async def _wait_for_signup_step(page, captured_code: list[str], timeout_ms: int 
             return "complete"
         if "/about-you" in parsed.path:
             return "profile"
-        if "/create-account/password" in parsed.path:
+        if "/create-account/password" in parsed.path and await _locator_is_visible(page, PASSWORD_INPUT_SELECTOR):
             return "password"
 
         for state, selector in (
@@ -260,7 +266,27 @@ async def _switch_to_password_if_offered(page, index: int) -> bool:
         return False
 
 
-async def _submit_password(page, index: int, password: str) -> None:
+async def _return_to_otp_signup(page, index: int) -> None:
+    option = page.locator(OTP_SIGNUP_OPTION_SELECTOR).first
+    if await option.is_visible():
+        await option.click()
+    else:
+        try:
+            await page.go_back(wait_until="domcontentloaded", timeout=REGISTER_TIMEOUT)
+        except Exception:
+            pass
+
+    try:
+        await page.locator(OTP_INPUT_SELECTOR).first.wait_for(state="visible", timeout=15_000)
+    except Exception:
+        body = await _page_debug_info(page)
+        raise RuntimeError(
+            f"密码注册被 OpenAI 拒绝，且无法切回一次性验证码注册, url={page.url}, body={body}"
+        )
+    step(index, "密码注册被 OpenAI 拒绝，改用一次性验证码注册", "yellow")
+
+
+async def _submit_password(page, index: int, password: str) -> bool:
     step(index, "输入密码")
     password_input = page.locator(PASSWORD_INPUT_SELECTOR).first
     try:
@@ -270,10 +296,18 @@ async def _submit_password(page, index: int, password: str) -> None:
         raise RuntimeError(f"未找到密码输入框, url={page.url}, body={body}")
     await password_input.fill(password)
     await page.locator(SUBMIT_BUTTON_SELECTOR).first.click()
-    try:
-        await password_input.wait_for(state="hidden", timeout=15_000)
-    except Exception:
-        await page.wait_for_timeout(1000)
+
+    deadline = asyncio.get_running_loop().time() + 15
+    while True:
+        if not await password_input.is_visible():
+            return True
+        if await _locator_is_visible(page, PASSWORD_REJECTION_SELECTOR):
+            await _return_to_otp_signup(page, index)
+            return False
+        if asyncio.get_running_loop().time() >= deadline:
+            body = await _page_debug_info(page)
+            raise RuntimeError(f"提交密码后页面未继续, url={page.url}, body={body}")
+        await page.wait_for_timeout(250)
 
 
 async def _submit_otp(page, index: int, mailbox: dict) -> None:
@@ -376,6 +410,7 @@ async def _run_signup_state_machine(
     page, index: int, password: str, name: str, age: str, mailbox: dict, captured_code: list[str]
 ) -> bool:
     password_set = False
+    password_attempted = False
     otp_submitted = False
     profile_submitted = False
 
@@ -384,14 +419,14 @@ async def _run_signup_state_machine(
         if state == "complete":
             return password_set
         if state == "password":
-            if password_set:
+            if password_attempted:
                 body = await _page_debug_info(page)
                 raise RuntimeError(f"提交密码后页面未继续, url={page.url}, body={body}")
-            await _submit_password(page, index, password)
-            password_set = True
+            password_attempted = True
+            password_set = await _submit_password(page, index, password)
             continue
         if state == "otp":
-            if not password_set and not otp_submitted and await _switch_to_password_if_offered(page, index):
+            if not password_attempted and not otp_submitted and await _switch_to_password_if_offered(page, index):
                 continue
             if otp_submitted:
                 body = await _page_debug_info(page)
