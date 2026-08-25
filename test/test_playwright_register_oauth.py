@@ -1,12 +1,16 @@
 import unittest
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.register.playwright_register import (
     OAUTH_AUTHORIZE_PATTERNS,
     OAUTH_CALLBACK_PATTERN,
     _install_oauth_routes,
     _replace_pkce_params,
+    _run_signup_state_machine,
+    _switch_to_password_if_offered,
+    _wait_for_signup_step,
 )
 
 
@@ -87,6 +91,102 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured_codes, [])
         self.assertEqual(route.continued_url, route.request.url)
         self.assertIsNone(route.fulfilled)
+
+    async def test_legacy_password_then_otp_flow(self) -> None:
+        page = SimpleNamespace()
+        with patch(
+            "services.register.playwright_register._wait_for_signup_step",
+            AsyncMock(side_effect=["password", "otp", "profile", "complete"]),
+        ), patch(
+            "services.register.playwright_register._submit_password", AsyncMock()
+        ) as submit_password, patch(
+            "services.register.playwright_register._submit_otp", AsyncMock()
+        ) as submit_otp, patch(
+            "services.register.playwright_register._fill_profile", AsyncMock()
+        ) as fill_profile, patch(
+            "services.register.playwright_register._switch_to_password_if_offered", AsyncMock()
+        ) as switch_to_password:
+            password_set = await _run_signup_state_machine(
+                page, 1, "Secret123!", "Test User", "25", {"address": "test@example.com"}, []
+            )
+
+        self.assertTrue(password_set)
+        submit_password.assert_awaited_once()
+        submit_otp.assert_awaited_once()
+        fill_profile.assert_awaited_once()
+        switch_to_password.assert_not_awaited()
+
+    async def test_new_otp_page_switches_to_password_flow(self) -> None:
+        page = SimpleNamespace()
+        with patch(
+            "services.register.playwright_register._wait_for_signup_step",
+            AsyncMock(side_effect=["otp", "password", "otp", "profile", "complete"]),
+        ), patch(
+            "services.register.playwright_register._switch_to_password_if_offered",
+            AsyncMock(return_value=True),
+        ) as switch_to_password, patch(
+            "services.register.playwright_register._submit_password", AsyncMock()
+        ) as submit_password, patch(
+            "services.register.playwright_register._submit_otp", AsyncMock()
+        ) as submit_otp, patch(
+            "services.register.playwright_register._fill_profile", AsyncMock()
+        ) as fill_profile:
+            password_set = await _run_signup_state_machine(
+                page, 2, "Secret123!", "Test User", "25", {"address": "test@example.com"}, []
+            )
+
+        self.assertTrue(password_set)
+        switch_to_password.assert_awaited_once()
+        submit_password.assert_awaited_once()
+        submit_otp.assert_awaited_once()
+        fill_profile.assert_awaited_once()
+
+    async def test_passwordless_otp_flow_does_not_save_generated_password(self) -> None:
+        page = SimpleNamespace()
+        with patch(
+            "services.register.playwright_register._wait_for_signup_step",
+            AsyncMock(side_effect=["otp", "profile", "complete"]),
+        ), patch(
+            "services.register.playwright_register._switch_to_password_if_offered",
+            AsyncMock(return_value=False),
+        ), patch(
+            "services.register.playwright_register._submit_otp", AsyncMock()
+        ) as submit_otp, patch(
+            "services.register.playwright_register._fill_profile", AsyncMock()
+        ) as fill_profile:
+            password_set = await _run_signup_state_machine(
+                page, 3, "Secret123!", "Test User", "25", {"address": "test@example.com"}, []
+            )
+
+        self.assertFalse(password_set)
+        submit_otp.assert_awaited_once()
+        fill_profile.assert_awaited_once()
+
+    async def test_continue_with_password_control_is_clicked(self) -> None:
+        option = MagicMock()
+        option.first = option
+        option.is_visible = AsyncMock(return_value=True)
+        option.click = AsyncMock()
+        password_input = MagicMock()
+        password_input.first = password_input
+        password_input.wait_for = AsyncMock()
+        page = MagicMock()
+        page.locator.side_effect = [option, password_input]
+
+        switched = await _switch_to_password_if_offered(page, 4)
+
+        self.assertTrue(switched)
+        option.click.assert_awaited_once()
+        password_input.wait_for.assert_awaited_once_with(state="visible", timeout=15_000)
+
+    async def test_about_you_age_input_is_not_misclassified_as_otp(self) -> None:
+        page = MagicMock()
+        page.url = "https://auth.openai.com/about-you"
+
+        state = await _wait_for_signup_step(page, [])
+
+        self.assertEqual(state, "profile")
+        page.locator.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -24,6 +24,24 @@ from utils.pkce import generate_pkce as _generate_pkce
 platform_base = "https://platform.openai.com"
 auth_base = "https://auth.openai.com"
 REGISTER_TIMEOUT = 120_000
+SIGNUP_STEP_TIMEOUT = 30_000
+PASSWORD_INPUT_SELECTOR = 'input[name="password"], input[type="password"], input[id="password"]'
+OTP_INPUT_SELECTOR = (
+    'input[name="code"], input[id="code"], input[autocomplete="one-time-code"], '
+    'input[inputmode="numeric"]'
+)
+PROFILE_INPUT_SELECTOR = (
+    'input[name="name"], input[id="name"], input[name="fullName"], input[name="age"], '
+    'input[id="age"], input[name="birthdate"], input[name="birthday"], input[type="date"]'
+)
+PASSWORD_OPTION_SELECTOR = (
+    'button:has-text("Continue with password"), a:has-text("Continue with password"), '
+    'button:has-text("使用密码继续"), a:has-text("使用密码继续")'
+)
+SUBMIT_BUTTON_SELECTOR = (
+    'button[type="submit"], button:has-text("Continue"), button:has-text("Verify"), '
+    'button:has-text("继续"), button:has-text("验证")'
+)
 OAUTH_AUTHORIZE_PATTERNS = (
     "**/oauth/authorize*",
     "**/api/oauth/oauth2/auth*",
@@ -179,6 +197,143 @@ def _random_age() -> str:
 def _random_birthdate() -> str:
     return f"{random.randint(1996, 2004):04d}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
 
+
+async def _locator_is_visible(page, selector: str) -> bool:
+    try:
+        return await page.locator(selector).first.is_visible()
+    except Exception:
+        return False
+
+
+async def _wait_for_signup_step(page, captured_code: list[str], timeout_ms: int = SIGNUP_STEP_TIMEOUT) -> str:
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while True:
+        if captured_code:
+            return "complete"
+
+        parsed = urlparse(page.url)
+        callback_code = str((parse_qs(parsed.query).get("code") or [""])[0]).strip()
+        if "/auth/callback" in parsed.path or callback_code:
+            return "complete"
+        if "/about-you" in parsed.path:
+            return "profile"
+        if "/create-account/password" in parsed.path:
+            return "password"
+
+        for state, selector in (
+            ("password", PASSWORD_INPUT_SELECTOR),
+            ("profile", PROFILE_INPUT_SELECTOR),
+            ("otp", OTP_INPUT_SELECTOR),
+        ):
+            if await _locator_is_visible(page, selector):
+                return state
+
+        if "/email-verification" in parsed.path:
+            return "otp"
+
+        if asyncio.get_running_loop().time() >= deadline:
+            body = await _page_debug_info(page)
+            raise RuntimeError(f"无法识别注册流程页面, url={page.url}, body={body}")
+        await page.wait_for_timeout(250)
+
+
+async def _switch_to_password_if_offered(page, index: int) -> bool:
+    option = page.locator(PASSWORD_OPTION_SELECTOR).first
+    try:
+        if not await option.is_visible():
+            return False
+        step(index, "检测到新注册流程，切换到密码注册")
+        await option.click()
+        await page.locator(PASSWORD_INPUT_SELECTOR).first.wait_for(state="visible", timeout=15_000)
+        return True
+    except Exception:
+        return False
+
+
+async def _submit_password(page, index: int, password: str) -> None:
+    step(index, "输入密码")
+    password_input = page.locator(PASSWORD_INPUT_SELECTOR).first
+    try:
+        await password_input.wait_for(state="visible", timeout=15_000)
+    except Exception:
+        body = await _page_debug_info(page)
+        raise RuntimeError(f"未找到密码输入框, url={page.url}, body={body}")
+    await password_input.fill(password)
+    await page.locator(SUBMIT_BUTTON_SELECTOR).first.click()
+    try:
+        await password_input.wait_for(state="hidden", timeout=15_000)
+    except Exception:
+        await page.wait_for_timeout(1000)
+
+
+async def _submit_otp(page, index: int, mailbox: dict) -> None:
+    step(index, "等待收取验证码")
+    code = mail_provider.wait_for_code(config["mail"], mailbox)
+    if not code:
+        raise RuntimeError("等待注册验证码超时")
+    step(index, f"收到注册验证码: {code}")
+
+    step(index, "输入验证码")
+    code_inputs = page.locator(OTP_INPUT_SELECTOR)
+    try:
+        await code_inputs.first.wait_for(state="visible", timeout=15_000)
+    except Exception:
+        body = await _page_debug_info(page)
+        raise RuntimeError(f"未找到验证码输入框, url={page.url}, body={body}")
+
+    input_count = await code_inputs.count()
+    if input_count == len(code) and input_count > 1:
+        for position, digit in enumerate(code):
+            await code_inputs.nth(position).fill(digit)
+    else:
+        await code_inputs.first.fill(code)
+
+    await page.locator(SUBMIT_BUTTON_SELECTOR).first.click()
+    try:
+        await code_inputs.first.wait_for(state="hidden", timeout=15_000)
+    except Exception:
+        await page.wait_for_timeout(1000)
+
+
+async def _run_signup_state_machine(
+    page, index: int, password: str, name: str, age: str, mailbox: dict, captured_code: list[str]
+) -> bool:
+    password_set = False
+    otp_submitted = False
+    profile_submitted = False
+
+    for _ in range(8):
+        state = await _wait_for_signup_step(page, captured_code)
+        if state == "complete":
+            return password_set
+        if state == "password":
+            if password_set:
+                body = await _page_debug_info(page)
+                raise RuntimeError(f"提交密码后页面未继续, url={page.url}, body={body}")
+            await _submit_password(page, index, password)
+            password_set = True
+            continue
+        if state == "otp":
+            if not password_set and not otp_submitted and await _switch_to_password_if_offered(page, index):
+                continue
+            if otp_submitted:
+                body = await _page_debug_info(page)
+                raise RuntimeError(f"提交验证码后页面未继续, url={page.url}, body={body}")
+            await _submit_otp(page, index, mailbox)
+            otp_submitted = True
+            continue
+        if state == "profile":
+            if profile_submitted:
+                body = await _page_debug_info(page)
+                raise RuntimeError(f"提交账号资料后页面未继续, url={page.url}, body={body}")
+            step(index, "填写账号信息")
+            await _fill_profile(page, name, age, index)
+            profile_submitted = True
+
+    body = await _page_debug_info(page)
+    raise RuntimeError(f"注册流程步骤过多, url={page.url}, body={body}")
+
+
 async def _async_register(index: int, proxy: str) -> dict:
     from playwright.async_api import async_playwright
 
@@ -279,43 +434,11 @@ async def _browser_register_flow(
 
     step(index, f"点击继续后页面: {page.url}")
 
-    step(index, "输入密码")
-    password_input = page.locator('input[name="password"], input[type="password"], input[id="password"]').first
-    try:
-        await password_input.wait_for(state="visible", timeout=30_000)
-    except Exception:
-        body = await _page_debug_info(page)
-        raise RuntimeError(f"未找到密码输入框, url={page.url}, body={body}")
-    await password_input.fill(password)
-
-    submit_btn = page.locator('button[type="submit"], button:has-text("Continue"), button:has-text("继续")').first
-    await submit_btn.click()
-    await page.wait_for_timeout(5000)
-
-    step(index, "等待验证码发送")
-    await _wait_for_otp_page(page)
-
-    step(index, "等待收取验证码")
-    code = mail_provider.wait_for_code(config["mail"], mailbox)
-    if not code:
-        raise RuntimeError("等待注册验证码超时")
-    step(index, f"收到注册验证码: {code}")
-
-    step(index, "输入验证码")
-    code_input = page.locator('input[name="code"], input[id="code"], input[type="text"]').first
-    try:
-        await code_input.wait_for(state="visible", timeout=15_000)
-    except Exception:
-        body = await _page_debug_info(page)
-        raise RuntimeError(f"未找到验证码输入框, url={page.url}, body={body}")
-    await code_input.fill(code)
-
-    verify_btn = page.locator('button[type="submit"], button:has-text("Continue"), button:has-text("Verify")').first
-    await verify_btn.click()
-    await page.wait_for_timeout(5000)
-
-    step(index, "填写账号信息")
-    await _fill_profile(page, name, age, index)
+    password_set = await _run_signup_state_machine(
+        page, index, password, name, age, mailbox, captured_code
+    )
+    if not password_set:
+        step(index, "当前流程未提供密码设置入口，账号将按无密码方式保存", "yellow")
 
     step(index, "等待获取 OAuth code")
     for _ in range(15):
@@ -354,7 +477,7 @@ async def _browser_register_flow(
     step(index, "注册完成，token 获取成功")
     return {
         "email": email,
-        "password": password,
+        "password": password if password_set else "",
         "access_token": str(tokens.get("access_token") or "").strip(),
         "refresh_token": str(tokens.get("refresh_token") or "").strip(),
         "id_token": str(tokens.get("id_token") or "").strip(),
@@ -369,19 +492,6 @@ async def _page_debug_info(page) -> str:
         return text[:500].replace("\n", " ")
     except Exception:
         return "(unable to read page)"
-
-
-async def _wait_for_otp_page(page) -> None:
-    try:
-        await page.locator('input[name="code"], input[id="code"]').first.wait_for(
-            state="visible", timeout=30_000
-        )
-    except Exception:
-        current_url = page.url
-        body_text = await page.inner_text("body")
-        if "verify" in body_text.lower() or "code" in body_text.lower():
-            return
-        raise RuntimeError(f"未进入验证码页面, url={current_url}, body={body_text[:300]}")
 
 
 async def _fill_profile(page, name: str, age: str, index: int) -> None:
