@@ -38,6 +38,9 @@ DEFAULT_IMAGE_STORAGE = {
     "public_base_url": "",
 }
 DEFAULT_IMAGE_POLL_TIMEOUT_SECS = 75
+DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS = 1
+DEFAULT_IMAGE_CLEANUP_TIME = "03:00"
+IMAGE_CLEANUP_INTERVAL_CHOICES = {1, 3, 5, 7}
 
 DEFAULT_CHAT_COMPLETION_CACHE = {
     "enabled": True,
@@ -115,6 +118,27 @@ def _normalize_optional_interval(value: object, default: int | None = None, mini
     if normalized <= 0:
         return None
     return max(minimum, normalized)
+
+
+def _normalize_image_cleanup_interval_days(value: object) -> int:
+    try:
+        normalized = int(value)
+    except (OverflowError, TypeError, ValueError):
+        return DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS
+    return normalized if normalized in IMAGE_CLEANUP_INTERVAL_CHOICES else DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS
+
+
+def _normalize_image_cleanup_time(value: object) -> str:
+    parts = str(value or "").strip().split(":")
+    if len(parts) != 2:
+        return DEFAULT_IMAGE_CLEANUP_TIME
+    try:
+        hour, minute = (int(part) for part in parts)
+    except ValueError:
+        return DEFAULT_IMAGE_CLEANUP_TIME
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return DEFAULT_IMAGE_CLEANUP_TIME
+    return f"{hour:02d}:{minute:02d}"
 
 
 def _normalize_backup_include(value: object) -> dict[str, bool]:
@@ -395,6 +419,18 @@ class ConfigStore:
             return 30
 
     @property
+    def image_cleanup_interval_days(self) -> int:
+        return _normalize_image_cleanup_interval_days(self.data.get("image_cleanup_interval_days"))
+
+    @property
+    def image_cleanup_time(self) -> str:
+        return _normalize_image_cleanup_time(self.data.get("image_cleanup_time"))
+
+    @property
+    def image_cleanup_schedule_configured(self) -> bool:
+        return "image_cleanup_interval_days" in self.data and "image_cleanup_time" in self.data
+
+    @property
     def image_poll_timeout_secs(self) -> int:
         try:
             return max(1, int(self.data.get("image_poll_timeout_secs", DEFAULT_IMAGE_POLL_TIMEOUT_SECS)))
@@ -555,6 +591,8 @@ class ConfigStore:
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["refresh_all_accounts_interval_minute"] = self.refresh_all_accounts_interval_minute
         data["image_retention_days"] = self.image_retention_days
+        data["image_cleanup_interval_days"] = self.image_cleanup_interval_days
+        data["image_cleanup_time"] = self.image_cleanup_time
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
@@ -605,6 +643,12 @@ class ConfigStore:
             next_data["refresh_all_accounts_interval_minute"] = _normalize_optional_interval(
                 next_data.get("refresh_all_accounts_interval_minute")
             )
+        if "image_cleanup_interval_days" in next_data:
+            next_data["image_cleanup_interval_days"] = _normalize_image_cleanup_interval_days(
+                next_data.get("image_cleanup_interval_days")
+            )
+        if "image_cleanup_time" in next_data:
+            next_data["image_cleanup_time"] = _normalize_image_cleanup_time(next_data.get("image_cleanup_time"))
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:

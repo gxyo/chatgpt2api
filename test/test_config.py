@@ -114,6 +114,39 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config["refresh_account_interval_minute"], 60)
             self.assertEqual(config["refresh_all_accounts_interval_minute"], 2)
 
+    def test_image_cleanup_schedule_is_normalized_when_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            self.assertFalse(store.image_cleanup_schedule_configured)
+            self.assertEqual(store.get()["image_cleanup_interval_days"], 1)
+            self.assertEqual(store.get()["image_cleanup_time"], "03:00")
+
+            config = store.update({
+                "image_cleanup_interval_days": "5",
+                "image_cleanup_time": "7:05",
+            })
+
+            self.assertTrue(store.image_cleanup_schedule_configured)
+            self.assertEqual(config["image_cleanup_interval_days"], 5)
+            self.assertEqual(config["image_cleanup_time"], "07:05")
+
+    def test_invalid_image_cleanup_schedule_uses_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            config = store.update({
+                "image_cleanup_interval_days": 2,
+                "image_cleanup_time": "25:99",
+            })
+
+            self.assertEqual(config["image_cleanup_interval_days"], 1)
+            self.assertEqual(config["image_cleanup_time"], "03:00")
+
     def test_upstream_model_settings_have_current_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "config.json"

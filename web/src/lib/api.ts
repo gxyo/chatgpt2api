@@ -160,6 +160,8 @@ export type SettingsConfig = {
   refresh_account_interval_minute?: number | string | null;
   refresh_all_accounts_interval_minute?: number | string | null;
   image_retention_days?: number | string;
+  image_cleanup_interval_days?: number | string;
+  image_cleanup_time?: string;
   image_poll_timeout_secs?: number | string;
   image_account_concurrency?: number | string;
   image_parallel_generation?: boolean;

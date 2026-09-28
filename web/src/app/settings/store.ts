@@ -169,6 +169,12 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     refresh_account_interval_minute: normalizeOptionalInterval(config.refresh_account_interval_minute, 5),
     refresh_all_accounts_interval_minute: normalizeOptionalInterval(config.refresh_all_accounts_interval_minute),
     image_retention_days: Number(config.image_retention_days || 30),
+    image_cleanup_interval_days: [1, 3, 5, 7].includes(Number(config.image_cleanup_interval_days))
+      ? Number(config.image_cleanup_interval_days)
+      : 1,
+    image_cleanup_time: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(config.image_cleanup_time || ""))
+      ? String(config.image_cleanup_time)
+      : "03:00",
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 75),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     image_settle_enabled: Boolean(config.image_settle_enabled !== false),
@@ -293,6 +299,8 @@ type SettingsStore = {
   setRefreshAccountIntervalMinute: (value: string) => void;
   setRefreshAllAccountsIntervalMinute: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
+  setImageCleanupIntervalDays: (value: string) => void;
+  setImageCleanupTime: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
   setImageSettleEnabled: (value: boolean) => void;
@@ -441,6 +449,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         refresh_account_interval_minute: normalizeOptionalInterval(config.refresh_account_interval_minute, null),
         refresh_all_accounts_interval_minute: normalizeOptionalInterval(config.refresh_all_accounts_interval_minute, null),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
+        image_cleanup_interval_days: [1, 3, 5, 7].includes(Number(config.image_cleanup_interval_days))
+          ? Number(config.image_cleanup_interval_days)
+          : 1,
+        image_cleanup_time: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(config.image_cleanup_time || ""))
+          ? String(config.image_cleanup_time)
+          : "03:00",
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 75),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         image_settle_enabled: Boolean(config.image_settle_enabled !== false),
@@ -545,6 +559,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageRetentionDays: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_retention_days: value } } : {});
+  },
+
+  setImageCleanupIntervalDays: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_cleanup_interval_days: Number(value) } } : {});
+  },
+
+  setImageCleanupTime: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_cleanup_time: value } } : {});
   },
 
   setImagePollTimeoutSecs: (value) => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { Cloud, LoaderCircle, PlugZap, RefreshCw, Save } from "lucide-react";
+import { CalendarClock, Cloud, LoaderCircle, PlugZap, RefreshCw, Save } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -25,6 +25,8 @@ export function ConfigCard() {
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setRefreshAllAccountsIntervalMinute = useSettingsStore((state) => state.setRefreshAllAccountsIntervalMinute);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
+  const setImageCleanupIntervalDays = useSettingsStore((state) => state.setImageCleanupIntervalDays);
+  const setImageCleanupTime = useSettingsStore((state) => state.setImageCleanupTime);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
   const setImageSettleEnabled = useSettingsStore((state) => state.setImageSettleEnabled);
@@ -165,6 +167,38 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">自动删除多少天前的本地图片。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm text-stone-700">
+              <CalendarClock className="size-4 text-stone-500" />
+              定时清理周期
+            </label>
+            <Select
+              value={String(config?.image_cleanup_interval_days || 1)}
+              onValueChange={setImageCleanupIntervalDays}
+            >
+              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white">
+                <SelectValue placeholder="选择清理周期" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="1">每天</SelectItem>
+                <SelectItem value="3">每三天</SelectItem>
+                <SelectItem value="5">每五天</SelectItem>
+                <SelectItem value="7">每七天</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs leading-5 text-stone-500">按所选周期执行一次全部图片清理。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">定时清理时间</label>
+            <Input
+              type="time"
+              step={60}
+              value={String(config?.image_cleanup_time || "03:00")}
+              onChange={(event) => setImageCleanupTime(event.target.value)}
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs leading-5 text-stone-500">按服务器本地时间执行，删除执行日期及之前的全部图片。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">图片轮询超时</label>

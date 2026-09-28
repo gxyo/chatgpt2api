@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import io
+import json
 import shutil
 import threading
 import time
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -19,6 +20,9 @@ from utils.log import logger
 
 THUMBNAIL_SIZE = (320, 320)
 MEGABYTE = 1024 * 1024
+IMAGE_CLEANUP_CHECK_SECONDS = 30
+STORAGE_CLEANUP_CHECK_SECONDS = 1800
+_image_cleanup_state_lock = threading.Lock()
 
 
 def _cleanup_empty_dirs(root: Path) -> None:
@@ -247,6 +251,83 @@ def delete_images(paths: list[str] | None = None, start_date: str = "", end_date
     return {"removed": removed}
 
 
+def _image_cleanup_state_path() -> Path:
+    return config.images_dir.parent / "image_cleanup_state.json"
+
+
+def _next_image_cleanup_at(now: datetime, interval_days: int, scheduled_time: str) -> datetime:
+    hour, minute = (int(part) for part in scheduled_time.split(":"))
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=interval_days)
+    return candidate
+
+
+def _load_image_cleanup_state(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _save_image_cleanup_state(path: Path, state: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temp_path.replace(path)
+
+
+def run_scheduled_image_cleanup_if_due(now: datetime | None = None) -> dict[str, int] | None:
+    """Delete all images present at a due scheduled time using the date-delete path."""
+    if not config.image_cleanup_schedule_configured:
+        return None
+
+    current = now or datetime.now()
+    interval_days = config.image_cleanup_interval_days
+    scheduled_time = config.image_cleanup_time
+    schedule_key = f"{interval_days}:{scheduled_time}"
+    state_path = _image_cleanup_state_path()
+
+    with _image_cleanup_state_lock:
+        state = _load_image_cleanup_state(state_path)
+        if state.get("schedule") != schedule_key:
+            next_run_at = _next_image_cleanup_at(current, interval_days, scheduled_time)
+            _save_image_cleanup_state(state_path, {
+                "schedule": schedule_key,
+                "next_run_at": next_run_at.isoformat(timespec="seconds"),
+            })
+            return None
+
+        try:
+            next_run_at = datetime.fromisoformat(str(state.get("next_run_at") or ""))
+        except ValueError:
+            next_run_at = _next_image_cleanup_at(current, interval_days, scheduled_time)
+            _save_image_cleanup_state(state_path, {
+                "schedule": schedule_key,
+                "next_run_at": next_run_at.isoformat(timespec="seconds"),
+            })
+            return None
+
+        if current < next_run_at:
+            return None
+
+        result = delete_images(end_date=current.date().isoformat(), all_matching=True)
+        while next_run_at <= current:
+            next_run_at += timedelta(days=interval_days)
+        _save_image_cleanup_state(state_path, {
+            "schedule": schedule_key,
+            "last_run_at": current.isoformat(timespec="seconds"),
+            "next_run_at": next_run_at.isoformat(timespec="seconds"),
+        })
+        logger.info({
+            "event": "scheduled_image_cleanup_done",
+            "removed": result["removed"],
+            "next_run_at": next_run_at.isoformat(timespec="seconds"),
+        })
+        return result
+
+
 def download_images_zip(paths: list[str]) -> io.BytesIO:
     root = config.images_dir.resolve()
     buf = io.BytesIO()
@@ -457,23 +538,30 @@ def download_images_zip(paths: list[str]) -> io.BytesIO:
 
 
 def _auto_cleanup_worker(stop_event: threading.Event) -> None:
-    """后台线程：每30分钟检查存储，空间低于阈值自动清理最旧图片"""
-    min_free_mb = getattr(config, "image_min_free_mb", None)
-    if min_free_mb is None:
-        min_free_mb = 500
-
-    while not stop_event.wait(1800):  # 每30分钟
+    """Run scheduled full cleanup and retain the low-disk safety cleanup."""
+    next_storage_check = time.monotonic() + STORAGE_CLEANUP_CHECK_SECONDS
+    while not stop_event.is_set():
         try:
-            config.cleanup_old_images()
-            cleanup_image_thumbnails()
-            usage = shutil.disk_usage(config.images_dir)
-            free_mb = usage.free // (1024 * 1024)
-            if free_mb < min_free_mb:
-                logger.info({"event": "image_auto_cleanup", "free_mb": free_mb, "min_free_mb": min_free_mb})
-                result = delete_to_free_space_target(min_free_mb)
-                logger.info({"event": "image_auto_cleanup_done", **result})
-        except Exception:
-            pass
+            run_scheduled_image_cleanup_if_due()
+        except Exception as exc:
+            logger.error({"event": "scheduled_image_cleanup_failed", "error": str(exc)})
+
+        if time.monotonic() >= next_storage_check:
+            next_storage_check = time.monotonic() + STORAGE_CLEANUP_CHECK_SECONDS
+            try:
+                config.cleanup_old_images()
+                cleanup_image_thumbnails()
+                min_free_mb = getattr(config, "image_min_free_mb", 500) or 500
+                usage = shutil.disk_usage(config.images_dir)
+                free_mb = usage.free // MEGABYTE
+                if free_mb < min_free_mb:
+                    logger.info({"event": "image_auto_cleanup", "free_mb": free_mb, "min_free_mb": min_free_mb})
+                    result = delete_to_free_space_target(min_free_mb)
+                    logger.info({"event": "image_auto_cleanup_done", **result})
+            except Exception as exc:
+                logger.error({"event": "image_storage_cleanup_failed", "error": str(exc)})
+
+        stop_event.wait(IMAGE_CLEANUP_CHECK_SECONDS)
 
 
 def start_image_cleanup_scheduler(stop_event: threading.Event) -> threading.Thread:
