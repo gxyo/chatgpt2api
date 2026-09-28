@@ -13,7 +13,13 @@ import tiktoken
 from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
-from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
+from services.openai_backend_api import (
+    ImageContentPolicyError,
+    ImageMainlineStateError,
+    ImagePollTimeoutError,
+    OpenAIBackendAPI,
+    is_skipped_mainline_error,
+)
 from utils.helper import (
     CHANNEL_BUSY_MESSAGE,
     IMAGE_MODELS,
@@ -1569,8 +1575,12 @@ def _generate_single_image(
             raise
         except Exception as exc:
             account_service.mark_image_result(token, False)
-            transient = is_retriable_upstream_error(exc)
-            last_error = public_error_message(exc) if transient else str(exc)
+            # Local handshake recovery can still exhaust its attempts. Use
+            # the bounded account rescue flow with a fresh backend session;
+            # never mark this 400 retryable in the generic same-POST loop.
+            mainline_rejected = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
+            transient = mainline_rejected or is_retriable_upstream_error(exc)
+            last_error = CHANNEL_BUSY_MESSAGE if transient else str(exc)
             last_transient_error = last_transient_error or transient
             if transient:
                 transient_attempts += 1
@@ -1581,6 +1591,7 @@ def _generate_single_image(
                 "error": str(exc),
                 "index": index,
                 "transient": transient,
+                "mainline_rejected": mainline_rejected,
                 "transient_attempts": transient_attempts,
                 "rescue": in_rescue,
             })

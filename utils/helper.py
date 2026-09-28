@@ -183,11 +183,35 @@ class UpstreamHTTPError(RuntimeError):
 def ensure_ok(response: requests.Response, context: str) -> None:
     if 200 <= response.status_code < 300:
         return
-    body: Any = response.text
-    try:
-        body = response.json()
-    except Exception:
-        pass
+    body: Any
+    if getattr(response, "queue", None) is not None:
+        # curl_cffi keeps streaming bytes in a queue, not response.content.
+        # Reading .text/.json() here otherwise loses the error body, including
+        # skipped_mainline, before the caller can decide how to recover.
+        chunks: list[bytes] = []
+        try:
+            for chunk in response.iter_content():
+                chunks.append(chunk)
+        except Exception:
+            # Preserve the HTTP status and any body already received even if
+            # the error response itself is interrupted.
+            pass
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+        body = b"".join(chunks).decode("utf-8", errors="replace")
+        try:
+            body = json.loads(body)
+        except (TypeError, ValueError):
+            pass
+    else:
+        body = response.text
+        try:
+            body = response.json()
+        except Exception:
+            pass
     retry_after_header = response.headers.get("Retry-After") if hasattr(response, "headers") else None
     retry_after: int | None = None
     if retry_after_header is not None:

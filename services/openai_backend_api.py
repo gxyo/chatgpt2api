@@ -58,18 +58,35 @@ def is_skipped_mainline_error(exc: BaseException) -> bool:
     by creating a fresh requirements/conduit handshake, but it must not be
     retried with the same request body or one-time conduit token.
     """
-    if getattr(exc, "status_code", None) != 400:
+    response = getattr(exc, "response", None)
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    if status_code is None:
+        # Some transports only expose "status_code=400, {...}" as text.
+        match = re.search(
+            r"\b(?:status_code|status|http(?: error)?|response status code)\s*[=:]?\s*(\d{3})\b",
+            str(exc),
+            re.IGNORECASE,
+        )
+        status_code = match.group(1) if match else None
+    if str(status_code) != "400":
         return False
     body = getattr(exc, "body", None)
+    if body is None and response is not None:
+        try:
+            body = response.json()
+        except Exception:
+            body = getattr(response, "text", "")
     if isinstance(body, dict):
         return body.get("skipped_mainline") is True
     try:
-        parsed = json.loads(str(body or ""))
+        parsed = json.loads(body) if body else None
     except (TypeError, ValueError):
         parsed = None
     if isinstance(parsed, dict):
         return parsed.get("skipped_mainline") is True
-    return bool(re.search(r'"skipped_mainline"\s*:\s*true', str(exc), re.IGNORECASE))
+    return bool(re.search(r'"skipped_mainline"\s*:\s*true\s*[,}]', str(exc), re.IGNORECASE))
 
 
 @dataclass
@@ -2851,7 +2868,7 @@ class OpenAIBackendAPI:
                     parent_message_id=parent_message_id,
                     message_id=message_id,
                 )
-            except (ImageMainlineStateError, UpstreamHTTPError) as exc:
+            except Exception as exc:
                 recoverable = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
                 if not recoverable or attempt >= max_mainline_retries:
                     raise
