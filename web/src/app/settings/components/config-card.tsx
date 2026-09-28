@@ -24,7 +24,6 @@ export function ConfigCard() {
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setRefreshAllAccountsIntervalMinute = useSettingsStore((state) => state.setRefreshAllAccountsIntervalMinute);
-  const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImageCleanupIntervalDays = useSettingsStore((state) => state.setImageCleanupIntervalDays);
   const setImageCleanupTime = useSettingsStore((state) => state.setImageCleanupTime);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
@@ -157,16 +156,6 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">用于生成图片结果的访问前缀地址。</p>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">图片自动清理</label>
-            <Input
-              value={String(config?.image_retention_days || "")}
-              onChange={(event) => setImageRetentionDays(event.target.value)}
-              placeholder="30"
-              className="h-10 rounded-xl border-stone-200 bg-white"
-            />
-            <p className="text-xs text-stone-500">自动删除多少天前的本地图片。</p>
           </div>
           <div className="space-y-2">
             <label className="flex items-center gap-2 text-sm text-stone-700">

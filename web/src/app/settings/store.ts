@@ -298,7 +298,6 @@ type SettingsStore = {
   testBackup: () => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
   setRefreshAllAccountsIntervalMinute: (value: string) => void;
-  setImageRetentionDays: (value: string) => void;
   setImageCleanupIntervalDays: (value: string) => void;
   setImageCleanupTime: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
@@ -555,10 +554,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         },
       };
     });
-  },
-
-  setImageRetentionDays: (value) => {
-    set((state) => state.config ? { config: { ...state.config, image_retention_days: value } } : {});
   },
 
   setImageCleanupIntervalDays: (value) => {
