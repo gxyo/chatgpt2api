@@ -111,17 +111,15 @@ class MultiImageResultTests(unittest.TestCase):
         self.assertEqual(file_ids, ["file-first", "file-second", "file-third"])
         self.assertEqual(sediment_ids, ["sed-first"])
 
-    def test_poll_waits_for_generated_asset_ids_to_settle(self) -> None:
+    def test_poll_returns_on_first_hit(self) -> None:
         backend = FakeBackend([
-            _conversation(["file-one"]),
+            _conversation([]),
             _conversation(["file-one", "file-two"], ["sed-one"]),
-            _conversation(["file-one", "file-two"], ["sed-one"]),
+            _conversation(["file-one", "file-two", "file-three"], ["sed-one"]),
         ])
 
         with (
             mock.patch.dict(config.data, {
-                "image_check_before_hit_enabled": True,
-                "image_settle_enabled": True,
                 "image_poll_initial_wait_secs": 0,
                 "image_poll_interval_secs": 0.5,
             }),
@@ -131,7 +129,7 @@ class MultiImageResultTests(unittest.TestCase):
 
         self.assertEqual(file_ids, ["file-one", "file-two"])
         self.assertEqual(sediment_ids, ["sed-one"])
-        self.assertEqual(backend.calls, 3)
+        self.assertEqual(backend.calls, 2)
 
     def test_resolver_uses_file_and_sediment_urls(self) -> None:
         backend = FakeBackend()

@@ -1713,33 +1713,10 @@ class AccountService:
         if not defer_invalid_removal:
             self._cleanup_force_refreshed_accounts(access_tokens)
 
-        # 自动重新登录异常账号（仅当配置开启时）
-        relogined = 0
-        if config.auto_relogin_after_refresh:
-            for token in access_tokens:
-                account = self.get_account(token)
-                if not account:
-                    continue
-                status = str(account.get("status") or "").strip()
-                if status != "异常":
-                    continue
-                email = str(account.get("email") or "").strip()
-                password = str(account.get("password") or "").strip()
-                if not email or not password:
-                    continue
-                t = Thread(
-                    target=self._password_re_login_thread,
-                    args=(token, email, password, "auto_relogin_after_refresh"),
-                    daemon=True,
-                )
-                t.start()
-                relogined += 1
-
         result = {
             "refreshed": refreshed,
             "errors": errors,
             "items": self.list_accounts(),
-            "relogined": relogined,
         }
 
         if progress_id:

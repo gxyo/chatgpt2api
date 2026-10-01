@@ -22,15 +22,13 @@ git --version
 
 | 路径 | 作用 |
 | --- | --- |
-| `config.json` | 主配置、后台密钥、代理、图片、备份等配置 |
+| `config.json` | 主配置、后台密钥、代理、图片等配置 |
 | `.env` | Docker compose 环境变量 |
 | `data/` | 账号、注册配置、日志、图片、任务记录等运行数据 |
 
 升级和迁移时重点保留以上内容。
 
-## 方式一：普通 Docker 部署
-
-适合不需要 WARP / FlareSolverr 清障的场景。
+## 方式一：Docker 部署
 
 ```bash
 git clone git@github.com:basketikun/chatgpt2api.git
@@ -74,66 +72,7 @@ docker logs -f chatgpt2api
 docker compose down
 ```
 
-## 方式二：WARP / FlareSolverr 部署
-
-适合注册流程经常遇到 Cloudflare 拦截的场景。该方式会启动：
-
-- `warp-proxy`
-- `privoxy`
-- `flaresolverr`
-- `init-config`
-- `app`
-
-复制环境变量模板：
-
-```bash
-cp .env.example .env
-```
-
-至少修改 `.env` 中的：
-
-```text
-CHATGPT2API_AUTH_KEY=your_secret_key_here
-```
-
-启动：
-
-```bash
-docker compose -f docker-compose.warp.yml up -d --build
-```
-
-访问：
-
-```text
-http://localhost:3000
-```
-
-FlareSolverr 相关配置可以在后台设置页的 `FlareSolverr` tab 中查看和测试。更详细的 Cloudflare 清障说明见：
-
-```text
-docs/flaresolverr-cloudflare.md
-```
-
-查看容器状态：
-
-```bash
-docker compose -f docker-compose.warp.yml ps
-```
-
-查看日志：
-
-```bash
-docker logs -f chatgpt2api-warp
-docker logs -f chatgpt2api-flaresolverr
-```
-
-停止：
-
-```bash
-docker compose -f docker-compose.warp.yml down
-```
-
-## 方式三：源码运行
+## 方式二：源码运行
 
 适合本地开发或临时调试。
 
@@ -204,9 +143,7 @@ tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.json .env data
 tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.json data
 ```
 
-也可以在后台设置页配置 Cloudflare R2 备份，用于定时备份关键数据。
-
-## 升级：普通 Docker 部署
+## 升级：Docker 部署
 
 进入项目目录：
 
@@ -234,35 +171,6 @@ docker compose up -d
 ```bash
 docker compose ps
 docker logs -f chatgpt2api
-```
-
-## 升级：WARP / FlareSolverr 部署
-
-进入项目目录：
-
-```bash
-cd chatgpt2api
-```
-
-备份：
-
-```bash
-mkdir -p backups
-tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.json .env data
-```
-
-拉取最新代码并重新构建：
-
-```bash
-git pull
-docker compose -f docker-compose.warp.yml up -d --build
-```
-
-查看状态：
-
-```bash
-docker compose -f docker-compose.warp.yml ps
-docker logs -f chatgpt2api-warp
 ```
 
 ## 升级：源码运行
@@ -298,12 +206,6 @@ git checkout <旧版本commit>
 docker compose up -d
 ```
 
-WARP / FlareSolverr 部署：
-
-```bash
-docker compose -f docker-compose.warp.yml up -d --build
-```
-
 如果需要恢复数据：
 
 ```bash
@@ -314,12 +216,6 @@ tar -xzf backups/你的备份文件.tgz
 
 ```bash
 docker compose down
-```
-
-或：
-
-```bash
-docker compose -f docker-compose.warp.yml down
 ```
 
 ## 常用维护命令
@@ -336,22 +232,10 @@ docker compose ps
 docker logs -f chatgpt2api
 ```
 
-查看 WARP 部署主服务日志：
-
-```bash
-docker logs -f chatgpt2api-warp
-```
-
-重启普通部署：
+重启部署：
 
 ```bash
 docker compose restart
-```
-
-重启 WARP 部署：
-
-```bash
-docker compose -f docker-compose.warp.yml restart
 ```
 
 清理未使用镜像：

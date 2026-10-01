@@ -19,10 +19,6 @@ class ImageGenerationTaskRequest(BaseModel):
     quality: str = "auto"
 
 
-class ResumePollRequest(BaseModel):
-    extra_timeout_secs: float = Field(default=30.0, ge=5.0, le=120.0)
-
-
 def _parse_task_ids(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -95,24 +91,6 @@ def create_router() -> APIRouter:
                 base_url=resolve_image_base_url(request),
                 images=images,
                 masks=masks,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.post("/api/image-tasks/{task_id}/resume-poll")
-    async def resume_image_poll(
-        task_id: str,
-        body: ResumePollRequest,
-        request: Request,
-        authorization: str | None = Header(default=None),
-    ):
-        identity = require_identity(authorization)
-        try:
-            return await run_in_threadpool(
-                image_task_service.resume_poll,
-                identity,
-                task_id,
-                body.extra_timeout_secs,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc

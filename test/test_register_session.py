@@ -39,8 +39,8 @@ class FakeSession:
         self.closed = True
 
 
-class RegisterProxyRuntimeTests(unittest.TestCase):
-    def test_create_session_uses_direct_http_proxy_without_proxy_runtime(self):
+class RegisterSessionTests(unittest.TestCase):
+    def test_create_session_uses_direct_http_proxy(self):
         created = []
 
         def fake_session_factory():

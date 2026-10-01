@@ -464,49 +464,14 @@ function AccountsPageContent() {
       setAccounts(data.items);
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
 
-      const relogined = data.relogined ?? 0;
-
-      // 显示重新登录进度
-      if (relogined > 0) {
-        setProgress({
-          visible: true,
-          current: 0,
-          total: relogined,
-          message: `正在尝试对 ${relogined} 个账号进行移除异常状态`,
-          email: "",
-        });
-        // 模拟重新登录进度
-        let reCount = 0;
-        await new Promise<void>((resolve) => {
-          const timer = setInterval(() => {
-            reCount += 1;
-            if (reCount >= relogined) {
-              clearInterval(timer);
-              setProgress({
-                visible: true,
-                current: relogined,
-                total: relogined,
-                message: "移除异常状态完成",
-                email: "",
-              });
-              setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
-              resolve();
-            } else {
-              setProgress((prev) => ({ ...prev, current: reCount }));
-            }
-          }, 150);
-          setTimeout(resolve, 2000);
-        });
-      } else {
-        setProgress({
-          visible: true,
-          current: total,
-          total,
-          message: "刷新完成",
-          email: "",
-        });
-        setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
-      }
+      setProgress({
+        visible: true,
+        current: total,
+        total,
+        message: "刷新完成",
+        email: "",
+      });
+      setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
 
       if ((data.errors ?? []).length > 0) {
         const firstError = data.errors?.[0]?.error;
@@ -514,7 +479,7 @@ function AccountsPageContent() {
           `刷新成功 ${data.refreshed} 个，失败 ${(data.errors ?? []).length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户${relogined > 0 ? `，已触发 ${relogined} 个账号重新登录` : ""}`);
+        toast.success(`刷新成功 ${data.refreshed} 个账户`);
       }
     } catch (error) {
       setProgress({ visible: false, current: 0, total: 0, message: "", email: "" });

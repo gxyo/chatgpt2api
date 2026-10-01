@@ -2344,10 +2344,6 @@ class OpenAIBackendAPI:
         sediment_ids: list[str] = []
         self._add_unique(file_ids, initial_file_ids or [])
         self._add_unique(sediment_ids, initial_sediment_ids or [])
-        has_initial_ids = bool(file_ids or sediment_ids)
-        last_hit_key: tuple[tuple[str, ...], tuple[str, ...]] | None = (
-            (tuple(file_ids), tuple(sediment_ids)) if has_initial_ids else None
-        )
         consecutive_upstream_status = 0
         last_upstream_status_code: int | None = None
         logger.info({
@@ -2363,11 +2359,7 @@ class OpenAIBackendAPI:
         def _remaining() -> float:
             return timeout_secs - (time.time() - start)
 
-        if has_initial_ids and config.image_settle_enabled:
-            settle_for = min(config.image_settle_secs, max(0.0, _remaining()))
-            if settle_for > 0:
-                time.sleep(settle_for)
-        elif initial_wait > 0:
+        if initial_wait > 0:
             jitter = random.uniform(0, min(2.0, initial_wait * 0.2))
             sleep_for = min(initial_wait + jitter, max(0.0, _remaining()))
             if sleep_for > 0:
@@ -2489,29 +2481,9 @@ class OpenAIBackendAPI:
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
             if file_ids or sediment_ids:
-                if not config.image_check_before_hit_enabled:
-                    # 先check再hit 机制关闭：直接返回首次发现的 file_ids
-                    logger.info({"event": "image_poll_hit_no_settle", "conversation_id": conversation_id,
-                                 "file_ids": file_ids, "sediment_ids": sediment_ids})
-                    return file_ids, sediment_ids
-                hit_key = (tuple(file_ids), tuple(sediment_ids))
-                if last_hit_key == hit_key:
-                    logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids,
-                                 "sediment_ids": sediment_ids})
-                    return file_ids, sediment_ids
-                last_hit_key = hit_key
-                if not config.image_settle_enabled:
-                    # 二次确认机制关闭：直接返回首次发现的 file_ids
-                    logger.info({"event": "image_poll_hit_settle_disabled", "conversation_id": conversation_id,
-                                 "file_ids": file_ids, "sediment_ids": sediment_ids})
-                    return file_ids, sediment_ids
-                logger.info({"event": "image_poll_hit_pending_settle", "conversation_id": conversation_id,
-                             "file_ids": file_ids, "sediment_ids": sediment_ids,
-                             "settle_secs": config.image_settle_secs})
-                wait = min(config.image_settle_secs, max(0.0, _remaining()))
-                if wait > 0:
-                    time.sleep(wait)
-                    continue
+                # 首次发现 file_ids/sediment_ids 即返回，不再二次确认。
+                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids,
+                             "sediment_ids": sediment_ids})
                 return file_ids, sediment_ids
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
                           "elapsed_secs": round(time.time() - start, 1)})
@@ -2721,17 +2693,15 @@ class OpenAIBackendAPI:
         file_ids = [item for item in file_ids if item != "file_upload"]
         sediment_ids = list(sediment_ids)
         timeout = poll_timeout_secs if poll_timeout_secs is not None else config.image_poll_timeout_secs
-        # 当 check-before-hit 和 settle 均已关闭，且 SSE 已给出 file_ids 时，
-        # 跳过轮询直接解析 URL，省去 initial_wait + 轮询耗时。
+        # SSE 已给出 file_ids 时直接解析 URL，省去 initial_wait + 轮询耗时。
         if poll and conversation_id and (file_ids or sediment_ids):
-            if not config.image_check_before_hit_enabled and not config.image_settle_enabled:
-                logger.info({
-                    "event": "image_resolve_skip_poll_direct_resolve",
-                    "conversation_id": conversation_id,
-                    "file_ids": file_ids,
-                    "sediment_ids": sediment_ids,
-                })
-                return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+            logger.info({
+                "event": "image_resolve_skip_poll_direct_resolve",
+                "conversation_id": conversation_id,
+                "file_ids": file_ids,
+                "sediment_ids": sediment_ids,
+            })
+            return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
         if poll and conversation_id:
             logger.info({
                 "event": "image_resolve_poll_needed",

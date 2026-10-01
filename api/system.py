@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from urllib.parse import quote
-
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
-from services.backup_service import BackupError, backup_service
 from services.config import config
 from services.image_service import (
     compress_images,
@@ -21,11 +18,10 @@ from services.image_service import (
     list_images,
     storage_stats,
 )
-from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_cleanup_service import cleanup_logs, log_storage_info
 from services.log_service import log_service
-from services.proxy_service import proxy_settings, test_clearance, test_proxy
+from services.proxy_service import test_proxy
 from services.stats_service import build_image_stats
 
 
@@ -35,10 +31,6 @@ class SettingsUpdateRequest(BaseModel):
 
 class ProxyTestRequest(BaseModel):
     url: str = ""
-
-
-class ClearanceTestRequest(BaseModel):
-    target_url: str = "https://chatgpt.com"
 
 
 class ImageDeleteRequest(BaseModel):
@@ -58,8 +50,6 @@ class LogDeleteRequest(BaseModel):
     ids: list[str] = []
 class LogCleanupRequest(BaseModel):
     days: int | None = None
-class BackupDeleteRequest(BaseModel):
-    key: str = ""
 
 
 def create_router(app_version: str) -> APIRouter:
@@ -172,31 +162,6 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         return {"result": await run_in_threadpool(test_proxy, (body.url or "").strip())}
 
-    @router.get("/api/proxy/runtime")
-    async def get_proxy_runtime_endpoint(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        return {
-            "runtime": config.get_public_proxy_runtime_settings(),
-            "status": proxy_settings.get_runtime_status(),
-        }
-
-    @router.post("/api/proxy/runtime")
-    async def save_proxy_runtime_endpoint(body: SettingsUpdateRequest, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            config.update({"proxy_runtime": body.model_dump(mode="python")})
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-        return {
-            "runtime": config.get_public_proxy_runtime_settings(),
-            "status": proxy_settings.get_runtime_status(),
-        }
-
-    @router.post("/api/proxy/clearance/test")
-    async def test_proxy_clearance_endpoint(body: ClearanceTestRequest, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        return {"result": await run_in_threadpool(test_clearance, body.target_url)}
-
     @router.get("/api/storage/info")
     async def get_storage_info(authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -205,84 +170,6 @@ def create_router(app_version: str) -> APIRouter:
             "backend": storage.get_backend_info(),
             "health": storage.health_check(),
         }
-
-    @router.post("/api/backup/test")
-    async def test_backup_connection(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            return {"result": await run_in_threadpool(backup_service.test_connection)}
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.post("/api/image-storage/test")
-    async def test_image_storage_endpoint(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        return {"result": await run_in_threadpool(image_storage_service.test_webdav)}
-
-    @router.post("/api/image-storage/sync")
-    async def sync_image_storage_endpoint(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            return {"result": await run_in_threadpool(image_storage_service.sync_all)}
-        except ImageStorageError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.get("/api/backups")
-    async def get_backups(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            return {
-                "items": await run_in_threadpool(backup_service.list_backups),
-                "state": backup_service.get_status(),
-                "settings": backup_service.get_settings(),
-            }
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.post("/api/backups/run")
-    async def run_backup_endpoint(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            return {"result": await run_in_threadpool(backup_service.run_backup)}
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.post("/api/backups/delete")
-    async def delete_backup_endpoint(body: BackupDeleteRequest, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            await run_in_threadpool(backup_service.delete_backup, body.key)
-            return {"ok": True}
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.get("/api/backups/detail")
-    async def get_backup_detail(key: str = "", authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            return {"item": await run_in_threadpool(backup_service.get_backup_detail, key)}
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.get("/api/backups/download")
-    async def download_backup_endpoint(key: str = "", authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            item = await run_in_threadpool(backup_service.download_backup, key)
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-        filename = str(item.get("name") or "backup.bin")
-        quoted = quote(filename)
-        headers = {
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}",
-            "Content-Length": str(int(item.get("size") or 0)),
-        }
-        return Response(
-            content=bytes(item.get("payload") or b""),
-            media_type=str(item.get("content_type") or "application/octet-stream"),
-            headers=headers,
-        )
-
 
     @router.get("/api/images/tags")
     async def list_image_tags(authorization: str | None = Header(default=None)):
@@ -339,7 +226,6 @@ def create_router(app_version: str) -> APIRouter:
             "healthy": healthy,
             "version": app_version,
             "storage": {"backend": storage.get_backend_info(), "health": storage_health},
-            "proxy_runtime": proxy_settings.get_runtime_status(),
             "accounts": stats,
         }
         if format == "json":

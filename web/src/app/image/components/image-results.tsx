@@ -23,7 +23,6 @@ type ImageResultsProps = {
   onReuseTurnConfig: (conversationId: string, turnId: string) => void | Promise<void>;
   onRegenerateTurn: (conversationId: string, turnId: string) => void | Promise<void>;
   onRetryImage: (conversationId: string, turnId: string, imageId: string) => void | Promise<void>;
-  onTimeoutRetryContinue: (taskId: string) => void | Promise<void>;
   onDismissErrors: (conversationId: string, turnId: string) => void | Promise<void>;
   formatConversationTime: (value: string) => string;
 };
@@ -93,7 +92,6 @@ export function ImageResults({
   onReuseTurnConfig,
   onRegenerateTurn,
   onRetryImage,
-  onTimeoutRetryContinue,
   onDismissErrors,
   formatConversationTime,
 }: ImageResultsProps) {
@@ -306,7 +304,6 @@ export function ImageResults({
                       }
 
                       if (image.status === "error") {
-                        const isTimeoutError = image.error?.includes("超时") && image.taskId;
                         return (
                           <div key={image.id} className="break-inside-avoid">
                             <div
@@ -324,15 +321,6 @@ export function ImageResults({
                               <p className="font-medium">图片 {index + 1}/{turn.images.length}</p>
                               <span className="line-clamp-2 sm:line-clamp-none">{image.error || "生成失败"}</span>
                               <div className="flex items-center gap-2">
-                                {isTimeoutError && (
-                                  <button
-                                    type="button"
-                                    onClick={() => void onTimeoutRetryContinue(image.taskId!)}
-                                    className="rounded-full bg-emerald-100 px-2 py-1 text-[10px] font-medium text-emerald-600 shadow-sm transition hover:bg-emerald-200 sm:px-3 sm:text-xs"
-                                  >
-                                    继续等待
-                                  </button>
-                                )}
                                 <button
                                   type="button"
                                   onClick={() => void onRetryImage(selectedConversation.id, turn.id, image.id)}

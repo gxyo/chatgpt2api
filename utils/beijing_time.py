@@ -9,9 +9,8 @@
 不应该依赖宿主机时区（本地开发、CI、其他镜像都不保证），因此所有墙钟时间都显式
 走这里的换算。
 
-注意：``utils/pow.py`` 的 GMT-0500、``utils/sentinel.py`` 的 GMT 文本、以及
-``services/backup_service.py`` 的 SigV4 ``amz_date`` 是协议要求的固定时区，
-**不属于**本模块管辖范围，不要改成北京时间。
+注意：``utils/pow.py`` 的 GMT-0500、``utils/sentinel.py`` 的 GMT 文本是协议要求
+的固定时区，**不属于**本模块管辖范围，不要改成北京时间。
 """
 
 from __future__ import annotations
