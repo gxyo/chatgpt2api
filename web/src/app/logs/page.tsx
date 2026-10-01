@@ -316,7 +316,9 @@ function LogsContent() {
               。清理只删日志文件，统计页的数据会保留。
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
+          {/* shrink-0：这一组控件不参与收缩，宽度不够时让左边的说明文字多换一行，
+              而不是把控件折到第二行去。 */}
+          <div className="flex shrink-0 flex-wrap items-center gap-3">
             <label className="flex items-center gap-2 text-sm text-neutral-600">
               保留最近
               <Input
@@ -345,22 +347,26 @@ function LogsContent() {
               />
               <span className={autoCleanup ? "" : "text-neutral-400"}>北京时间</span>
             </label>
-            <Button variant="outline" className="h-10 rounded-xl border-neutral-200 bg-white px-4" onClick={() => void saveRetention()} disabled={isSavingRetention || !retentionValid || !cleanupTimeValid}>
-              {/* 图标常驻再原地换成转圈：只在加载时插入图标会让按钮变宽（图标 + gap-2，
-                  外加基础样式的 has-[>svg]:px-3 收窄内边距），把「立即清理」挤到下一行。
-                  同页的「查询」按钮也是这么换的。 */}
-              {isSavingRetention ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
-              保存设置
-            </Button>
-            <Button
-              variant="outline"
-              className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50"
-              onClick={() => setCleanupOpen(true)}
-              disabled={isCleaning || !retentionValid}
-            >
-              <Trash2 className="size-4" />
-              立即清理
-            </Button>
+            {/* 两个按钮绑成一组：真到了换行的时候也一起走，
+                「立即清理」永远紧跟在「保存设置」后面，不会单独占一行。 */}
+            <div className="flex items-center gap-3">
+              <Button variant="outline" className="h-10 rounded-xl border-neutral-200 bg-white px-4" onClick={() => void saveRetention()} disabled={isSavingRetention || !retentionValid || !cleanupTimeValid}>
+                {/* 图标常驻再原地换成转圈：只在加载时插入图标会让按钮变宽（图标 + gap-2，
+                    外加基础样式的 has-[>svg]:px-3 收窄内边距），把「立即清理」挤到下一行。
+                    同页的「查询」按钮也是这么换的。 */}
+                {isSavingRetention ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
+                保存设置
+              </Button>
+              <Button
+                variant="outline"
+                className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50"
+                onClick={() => setCleanupOpen(true)}
+                disabled={isCleaning || !retentionValid}
+              >
+                <Trash2 className="size-4" />
+                立即清理
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -568,7 +574,8 @@ function LogsContent() {
               取消
             </Button>
             <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmDelete()} disabled={isDeleting || deletingItems.length === 0}>
-              {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {/* 同「保存设置」：图标常驻，点击时只在原地换成转圈，按钮不会因此变宽。 */}
+              {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
               确认删除
             </Button>
           </DialogFooter>
@@ -588,7 +595,7 @@ function LogsContent() {
               取消
             </Button>
             <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmCleanup()} disabled={isCleaning || !retentionValid}>
-              {isCleaning ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {isCleaning ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
               确认清理
             </Button>
           </DialogFooter>

@@ -10,7 +10,6 @@ from services.config import config
 from services.image_service import (
     compress_images,
     delete_images,
-    delete_to_target,
     download_images_zip,
     get_image_download_response,
     get_image_response,
@@ -200,18 +199,6 @@ def create_router(app_version: str) -> APIRouter:
     async def compress_all_images(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return await run_in_threadpool(compress_images)
-
-    @router.post("/api/images/storage/cleanup-to-target")
-    async def cleanup_to_target(
-        target_image_mb: int | None = Query(default=None, ge=0),
-        # Keep accepting the old query name so older clients continue to work.
-        target_free_mb: int | None = Query(default=None, ge=0),
-        dry_run: bool = False,
-        authorization: str | None = Header(default=None),
-    ):
-        require_admin(authorization)
-        target_mb = target_image_mb if target_image_mb is not None else (target_free_mb if target_free_mb is not None else 500)
-        return await run_in_threadpool(delete_to_target, target_mb, dry_run)
 
     @router.get("/health", response_model=None)
     async def health_dashboard(format: str = Query(default="html")):

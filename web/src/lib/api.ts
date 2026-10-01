@@ -513,13 +513,6 @@ export async function compressAllImages() {
   return httpRequest<{ compressed: number; saved_bytes: number; saved_mb: number }>("/api/images/storage/compress", { method: "POST" });
 }
 
-export async function deleteToTarget(targetImageMb: number) {
-  return httpRequest<{ removed: number; freed_mb: number; freed_bytes: number; current_size_mb: number; done: boolean }>(
-    `/api/images/storage/cleanup-to-target?target_image_mb=${encodeURIComponent(targetImageMb)}&dry_run=false`,
-    { method: "POST" },
-  );
-}
-
 export async function fetchSystemLogs(filters: { type?: string; status?: string; start_date?: string; end_date?: string }) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);

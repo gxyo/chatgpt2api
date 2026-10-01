@@ -68,20 +68,6 @@ def _image_item_size(item: dict[str, object]) -> int:
         return 0
 
 
-def _image_item_age(item: dict[str, object], rel: str) -> float:
-    created_at = str(item.get("created_at") or "").strip()
-    if created_at:
-        try:
-            return datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S").timestamp()
-        except (ValueError, OSError, OverflowError):
-            pass
-    try:
-        local_path = config.images_dir.joinpath(*Path(_safe_relative_path(rel)).parts)
-        return local_path.stat().st_mtime
-    except (OSError, ValueError, HTTPException):
-        return 0.0
-
-
 def _remove_image_artifacts(rel: str) -> None:
     for thumbnail in (_thumbnail_path(rel), config.image_thumbnails_dir / _safe_relative_path(rel)):
         try:
@@ -419,53 +405,6 @@ def compress_images(quality: int = 60) -> dict:
         except Exception:
             pass
     return {"compressed": count, "saved_bytes": saved, "saved_mb": saved // (1024 * 1024)}
-
-
-def delete_to_target(target_image_mb: int, dry_run: bool = False) -> dict[str, int | bool]:
-    """Delete the oldest images until managed image usage is at most ``target_image_mb``."""
-    target_image_mb = max(0, int(target_image_mb))
-    target_bytes = target_image_mb * MEGABYTE
-    candidates: list[tuple[float, str, int]] = []
-    for item in _managed_image_items():
-        rel = str(item.get("path") or item.get("rel") or "").strip()
-        if not rel or Path(rel).suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
-        candidates.append((_image_item_age(item, rel), rel, _image_item_size(item)))
-
-    candidates.sort(key=lambda candidate: (candidate[0], candidate[1]))
-    current_bytes = sum(size for _, _, size in candidates)
-    removed = 0
-    freed = 0
-    for _, rel, size in candidates:
-        if current_bytes - freed <= target_bytes:
-            break
-        if not dry_run:
-            try:
-                if not image_storage_service.delete(rel):
-                    continue
-                _remove_image_artifacts(rel)
-            except Exception:
-                # Keep failed items and continue with newer files.
-                continue
-        freed += size
-        removed += 1
-
-    if not dry_run:
-        _cleanup_empty_dirs(config.images_dir)
-        _cleanup_empty_dirs(config.image_thumbnails_dir)
-
-    remaining_bytes = max(0, current_bytes - freed)
-    return {
-        "removed": removed,
-        "freed_bytes": freed,
-        "freed_mb": freed // MEGABYTE,
-        "target_image_mb": target_image_mb,
-        "target_free_mb": target_image_mb,
-        "current_size_bytes": remaining_bytes,
-        "current_size_mb": remaining_bytes // MEGABYTE,
-        "done": remaining_bytes <= target_bytes,
-        "dry_run": dry_run,
-    }
 
 
 def delete_to_free_space_target(target_free_mb: int, dry_run: bool = False) -> dict[str, int | bool]:

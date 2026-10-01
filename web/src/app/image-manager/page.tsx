@@ -14,7 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { compressAllImages, deleteImageTag, deleteManagedImages, deleteToTarget, downloadImages, downloadSingleImage, fetchImageStorage, fetchImageTags, fetchManagedImages, setImageTags, type ImageStorageStats, type ManagedImage } from "@/lib/api";
+import { compressAllImages, deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageStorage, fetchImageTags, fetchManagedImages, setImageTags, type ImageStorageStats, type ManagedImage } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
@@ -73,7 +73,6 @@ function ImageManagerContent() {
   const [storage, setStorage] = useState<ImageStorageStats | null>(null);
   const [storageLoading, setStorageLoading] = useState(false);
   const [compressResult, setCompressResult] = useState<string>("");
-  const [targetImageMb, setTargetImageMb] = useState(500);
 
   const loadStorage = useCallback(async () => {
     try {
@@ -380,25 +379,6 @@ function ImageManagerContent() {
                 onClick={() => setDeleteMode("byDate")}>
                 🗑️ 按日期删除
               </Button>
-              <form onSubmit={async (e) => { e.preventDefault();
-                try {
-                  const r = await deleteToTarget(targetImageMb);
-                  const freedMb = r.freed_bytes > 0 ? (r.freed_bytes / (1024 * 1024)).toFixed(2) : "0";
-                  toast.success(`已删除 ${r.removed} 张图片，释放 ${freedMb}MB`);
-                  void loadStorage();
-                  void loadImages();
-                } catch { toast.error("清理失败"); }
-              }} className="flex items-center gap-1">
-                <Button size="sm" variant="outline" className="h-7 text-xs border-amber-200 text-amber-700" type="submit">
-                  🧹 清理至
-                </Button>
-                <Input className="h-7 w-14 text-xs text-center px-1" type="number" min={50} step={1} value={targetImageMb}
-                  onChange={(e) => {
-                    const value = Number(e.target.value);
-                    setTargetImageMb(Number.isFinite(value) && value >= 0 ? Math.floor(value) : 500);
-                  }} />
-                <span className="text-xs text-neutral-400">MB 图片占用</span>
-              </form>
               {compressResult ? <span className="text-xs text-green-600 ml-1">{compressResult}</span> : null}
             </div>
           </>
