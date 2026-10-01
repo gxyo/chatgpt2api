@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, HardDrive, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -12,9 +12,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { deleteSystemLogs, fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { cleanupSystemLogs, deleteSystemLogs, fetchLogRetention, fetchSystemLogs, saveLogRetention, type LogRetentionInfo, type SystemLog } from "@/lib/api";
+import { formatBeijingClock, getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LogType = {
@@ -26,6 +28,25 @@ const typeLabels: Record<string, string> = {
   [LogType.Call]: "调用日志",
   [LogType.Account]: "账号管理日志",
 };
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
+}
+
+/** 保留最近 days 天时，会被删掉的是这一天之前（不含）的日志。 */
+function cleanupCutoffDay(days: number) {
+  return shiftDate(getBeijingToday(), -(Math.max(1, days) - 1));
+}
 
 function getDetailText(item: SystemLog, key: string) {
   const value = item.detail?.[key];
@@ -63,6 +84,12 @@ function LogsContent() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
+  const [retention, setRetention] = useState<LogRetentionInfo | null>(null);
+  const [retentionDays, setRetentionDays] = useState("30");
+  const [autoCleanup, setAutoCleanup] = useState(false);
+  const [isSavingRetention, setIsSavingRetention] = useState(false);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
@@ -85,6 +112,57 @@ function LogsContent() {
       toast.error(error instanceof Error ? error.message : "加载日志失败");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadRetention = async () => {
+    try {
+      const data = await fetchLogRetention();
+      setRetention(data);
+      setRetentionDays(String(data.days));
+      setAutoCleanup(data.auto_cleanup);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "读取日志清理设置失败");
+    }
+  };
+
+  const parsedRetentionDays = Number.parseInt(retentionDays, 10);
+  const retentionValid = Number.isFinite(parsedRetentionDays) && parsedRetentionDays >= 1;
+
+  const saveRetention = async () => {
+    if (!retentionValid) {
+      toast.error("保留天数至少为 1");
+      return;
+    }
+    setIsSavingRetention(true);
+    try {
+      await saveLogRetention({ log_retention_days: parsedRetentionDays, log_auto_cleanup: autoCleanup });
+      await loadRetention();
+      toast.success("已保存日志清理设置");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存日志清理设置失败");
+    } finally {
+      setIsSavingRetention(false);
+    }
+  };
+
+  const confirmCleanup = async () => {
+    setIsCleaning(true);
+    try {
+      // 用输入框里的天数，而不是已保存的设置：弹窗承诺删到哪一天，就按哪一天执行。
+      const data = await cleanupSystemLogs(parsedRetentionDays);
+      toast.success(
+        data.removed > 0
+          ? `已清理 ${data.removed} 条日志，保留 ${data.kept} 条（统计不受影响）`
+          : "没有需要清理的日志",
+      );
+      setCleanupOpen(false);
+      setSelectedIds([]);
+      await Promise.all([loadLogs(), loadRetention()]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清理日志失败");
+    } finally {
+      setIsCleaning(false);
     }
   };
 
@@ -133,6 +211,10 @@ function LogsContent() {
     void loadLogs();
   }, [type, startDate, endDate]);
 
+  useEffect(() => {
+    void loadRetention();
+  }, []);
+
   return (
     <section className="space-y-5">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -158,6 +240,51 @@ function LogsContent() {
           </Button>
         </div>
       </div>
+
+      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+        <CardContent className="flex flex-col gap-4 p-5 xl:flex-row xl:items-center xl:justify-between">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-sm font-medium text-stone-700">
+              <HardDrive className="size-4 text-stone-400" />
+              日志清理
+            </div>
+            <p className="text-sm text-stone-500">
+              当前占用 {formatBytes(retention?.size_bytes ?? 0)}
+              {retention?.updated_at ? `，最后写入 ${formatBeijingClock(new Date(retention.updated_at * 1000).toISOString())}` : ""}
+              。清理只删日志文件，统计页的数据会保留。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-stone-600">
+              保留最近
+              <Input
+                value={retentionDays}
+                onChange={(event) => setRetentionDays(event.target.value)}
+                inputMode="numeric"
+                className="h-10 w-20 rounded-xl border-stone-200 bg-white text-center"
+              />
+              天
+            </label>
+            <label className="flex items-center gap-2 text-sm text-stone-600">
+              <Checkbox checked={autoCleanup} onCheckedChange={(checked) => setAutoCleanup(Boolean(checked))} />
+              每天自动清理
+            </label>
+            <Button variant="outline" className="h-10 rounded-xl border-stone-200 bg-white px-4" onClick={() => void saveRetention()} disabled={isSavingRetention || !retentionValid}>
+              {isSavingRetention ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              保存设置
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50"
+              onClick={() => setCleanupOpen(true)}
+              disabled={isCleaning || !retentionValid}
+            >
+              <Trash2 className="size-4" />
+              立即清理
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="p-0">
@@ -339,6 +466,26 @@ function LogsContent() {
             <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmDelete()} disabled={isDeleting || deletingItems.length === 0}>
               {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : null}
               确认删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={cleanupOpen} onOpenChange={setCleanupOpen}>
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>清理日志</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              将删除 {retentionValid ? cleanupCutoffDay(parsedRetentionDays) : "—"} 之前的所有日志，保留最近 {retentionValid ? parsedRetentionDays : "—"} 天。
+              统计页的请求数与峰值不受影响，删除后无法恢复。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-xl" onClick={() => setCleanupOpen(false)} disabled={isCleaning}>
+              取消
+            </Button>
+            <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmCleanup()} disabled={isCleaning || !retentionValid}>
+              {isCleaning ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              确认清理
             </Button>
           </DialogFooter>
         </DialogContent>

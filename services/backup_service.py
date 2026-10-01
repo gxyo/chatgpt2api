@@ -630,6 +630,9 @@ class BackupService:
                 self._add_file_to_archive(archive, DATA_DIR / "sub2api_config.json", "data/sub2api_config.json")
             if include.get("logs"):
                 self._add_file_to_archive(archive, DATA_DIR / "logs.jsonl", "data/logs.jsonl")
+                # 统计快照与日志是一对：日志被清理后，更早的统计只存在于快照里。
+                # 只还原日志会让两者对不上，所以一起备份。
+                self._add_file_to_archive(archive, DATA_DIR / "image_stats.json", "data/image_stats.json")
             if include.get("image_tasks"):
                 self._add_file_to_archive(archive, DATA_DIR / "image_tasks.json", "data/image_tasks.json")
                 self._add_file_to_archive(archive, IMAGE_INDEX_FILE, "data/image_index.json")

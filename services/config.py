@@ -41,6 +41,9 @@ DEFAULT_IMAGE_POLL_TIMEOUT_SECS = 75
 DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS = 1
 DEFAULT_IMAGE_CLEANUP_TIME = "03:00"
 IMAGE_CLEANUP_INTERVAL_CHOICES = {1, 3, 5, 7}
+DEFAULT_LOG_RETENTION_DAYS = 30
+# 上限十年：再长的保留期没有意义，也挡住了手滑填进来的天文数字。
+MAX_LOG_RETENTION_DAYS = 3650
 
 DEFAULT_CHAT_COMPLETION_CACHE = {
     "enabled": True,
@@ -126,6 +129,14 @@ def _normalize_image_cleanup_interval_days(value: object) -> int:
     except (OverflowError, TypeError, ValueError):
         return DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS
     return normalized if normalized in IMAGE_CLEANUP_INTERVAL_CHOICES else DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS
+
+
+def _normalize_log_retention_days(value: object) -> int:
+    try:
+        normalized = int(value)
+    except (OverflowError, TypeError, ValueError):
+        return DEFAULT_LOG_RETENTION_DAYS
+    return min(max(normalized, 1), MAX_LOG_RETENTION_DAYS)
 
 
 def _normalize_image_cleanup_time(value: object) -> str:
@@ -419,6 +430,15 @@ class ConfigStore:
             return 30
 
     @property
+    def log_retention_days(self) -> int:
+        return _normalize_log_retention_days(self.data.get("log_retention_days", DEFAULT_LOG_RETENTION_DAYS))
+
+    @property
+    def log_auto_cleanup(self) -> bool:
+        # 默认关闭：自动清理会真的删数据，必须由用户显式打开。
+        return self.data.get("log_auto_cleanup") is True
+
+    @property
     def image_cleanup_interval_days(self) -> int:
         return _normalize_image_cleanup_interval_days(self.data.get("image_cleanup_interval_days"))
 
@@ -591,6 +611,8 @@ class ConfigStore:
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["refresh_all_accounts_interval_minute"] = self.refresh_all_accounts_interval_minute
         data["image_retention_days"] = self.image_retention_days
+        data["log_retention_days"] = self.log_retention_days
+        data["log_auto_cleanup"] = self.log_auto_cleanup
         data["image_cleanup_interval_days"] = self.image_cleanup_interval_days
         data["image_cleanup_time"] = self.image_cleanup_time
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
@@ -649,6 +671,8 @@ class ConfigStore:
             )
         if "image_cleanup_time" in next_data:
             next_data["image_cleanup_time"] = _normalize_image_cleanup_time(next_data.get("image_cleanup_time"))
+        if "log_retention_days" in next_data:
+            next_data["log_retention_days"] = _normalize_log_retention_days(next_data.get("log_retention_days"))
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:

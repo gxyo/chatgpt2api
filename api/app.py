@@ -17,6 +17,7 @@ from api.support import (
 from services.backup_service import backup_service
 from services.config import config
 from services.image_service import start_image_cleanup_scheduler
+from services.log_cleanup_service import start_log_cleanup_scheduler
 
 
 def create_app() -> FastAPI:
@@ -28,6 +29,7 @@ def create_app() -> FastAPI:
         limited_account_thread = start_limited_account_watcher(stop_event)
         all_account_thread = start_all_account_watcher(stop_event)
         cleanup_thread = start_image_cleanup_scheduler(stop_event)
+        log_cleanup_thread = start_log_cleanup_scheduler(stop_event)
         backup_service.start()
         config.cleanup_old_images()
         try:
@@ -37,6 +39,7 @@ def create_app() -> FastAPI:
             limited_account_thread.join(timeout=1)
             all_account_thread.join(timeout=1)
             cleanup_thread.join(timeout=1)
+            log_cleanup_thread.join(timeout=1)
             backup_service.stop()
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)

@@ -87,6 +87,37 @@ class LogService:
                 break
         return items
 
+    @staticmethod
+    def _log_day(item: dict[str, Any]) -> str:
+        day = str(item.get("time") or "")[:10]
+        return day if len(day) == 10 else ""
+
+    def cleanup_before(self, cutoff_day: str) -> dict[str, int]:
+        """删除 cutoff_day 之前（不含当天）的日志。
+
+        保留下来的行按原样写回，不做重新序列化——统计服务靠比对已读过的尾部字节来推进
+        增量游标，字节变了就得重找位置。日志按时间追加，要删的都是最老的一段前缀，
+        因此逐行判断即可，不需要排序。
+        """
+        if not self.path.exists():
+            return {"removed": 0, "kept": 0}
+        kept_lines: list[str] = []
+        removed = 0
+        for line_number, raw_line in enumerate(self.path.read_text(encoding="utf-8").splitlines()):
+            item = self._parse_line(raw_line, line_number)
+            day = self._log_day(item) if item is not None else ""
+            # 解析不出来的行一律留着：宁可少删几条，也不要把读不懂的内容丢掉。
+            if day and day < cutoff_day:
+                removed += 1
+                continue
+            kept_lines.append(raw_line)
+        if removed:
+            content = "\n".join(kept_lines)
+            if content:
+                content += "\n"
+            self.path.write_text(content, encoding="utf-8")
+        return {"removed": removed, "kept": len(kept_lines)}
+
     def delete(self, ids: list[str]) -> dict[str, int]:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
         if not self.path.exists() or not target_ids:

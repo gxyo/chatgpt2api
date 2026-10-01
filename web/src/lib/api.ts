@@ -764,6 +764,44 @@ export async function deleteSystemLogs(ids: string[]) {
   });
 }
 
+export type LogRetentionInfo = {
+  /** 保留最近多少天的日志。 */
+  days: number;
+  /** 是否每天自动清理一次。 */
+  auto_cleanup: boolean;
+  size_bytes: number;
+  /** 日志文件最后写入时间（Unix 秒）。 */
+  updated_at: number;
+};
+
+export type LogCleanupResult = {
+  days: number;
+  /** 该日期（含）之后的日志被保留，之前的被删除。 */
+  cutoff_day: string;
+  removed: number;
+  kept: number;
+  size_bytes: number;
+};
+
+export async function fetchLogRetention() {
+  return httpRequest<LogRetentionInfo>("/api/logs/retention");
+}
+
+/** 只提交这两个键，配置接口按合并处理，不会影响其他设置。 */
+export async function saveLogRetention(settings: { log_retention_days?: number; log_auto_cleanup?: boolean }) {
+  return httpRequest<{ config: SettingsConfig }>("/api/settings", {
+    method: "POST",
+    body: settings,
+  });
+}
+
+export async function cleanupSystemLogs(days?: number) {
+  return httpRequest<LogCleanupResult>("/api/logs/cleanup", {
+    method: "POST",
+    body: days === undefined ? {} : { days },
+  });
+}
+
 export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }

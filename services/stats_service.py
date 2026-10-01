@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,12 @@ GRANULARITY_DAY = "day"
 # 单次查询最多返回的每日数据点，超出时只统计最近的这一段。
 MAX_SERIES_POINTS = 1000
 _STATUS_SUCCESS = "success"
+
+# 聚合快照的落盘格式版本。格式变了就换版本号，旧快照会被忽略并重建。
+SNAPSHOT_VERSION = 1
+# 两次落盘之间的最小间隔：统计每次查询都会刷新，不能每次都写盘。
+# 因为游标和聚合是一起写入的，崩溃时两者一起回退到上一个一致点，重放日志即可，不会重复计数。
+SNAPSHOT_INTERVAL_SECONDS = 30
 
 
 def beijing_today() -> str:
@@ -59,6 +66,28 @@ def _empty_bucket() -> dict[str, Any]:
         "duration_ms": 0,
         "modes": {mode: _empty_mode_bucket() for mode in MODE_LABELS},
     }
+
+
+def _restore_bucket(value: Any) -> dict[str, Any]:
+    """把快照里读回来的桶重新整成内部结构，字段缺失或类型不对的按 0 处理。"""
+    source = value if isinstance(value, dict) else {}
+    bucket = _empty_bucket()
+    for key in ("requests", "success", "failed", "duration_ms"):
+        try:
+            bucket[key] = max(0, int(source.get(key) or 0))
+        except (TypeError, ValueError):
+            bucket[key] = 0
+    modes = source.get("modes")
+    if isinstance(modes, dict):
+        for mode, mode_value in modes.items():
+            target = bucket["modes"].setdefault(str(mode), _empty_mode_bucket())
+            mode_source = mode_value if isinstance(mode_value, dict) else {}
+            for key in ("requests", "success", "failed"):
+                try:
+                    target[key] = max(0, int(mode_source.get(key) or 0))
+                except (TypeError, ValueError):
+                    target[key] = 0
+    return bucket
 
 
 def _accumulate(bucket: dict[str, Any], *, mode: str, status: str, duration_ms: int) -> None:
@@ -192,21 +221,79 @@ class ImageStatsService:
 
     全量重扫的代价随日志体积线性增长（实测：5 千行 45ms、5 万行 465ms、
     20 万行 2.1s、50 万行 8.9s），增量之后单次查询只与两次查询之间新增的日志量有关。
+
+    聚合结果连同游标一起落盘（默认与日志同目录的 `image_stats.json`），因此统计的寿命
+    不取决于日志的寿命：日志按保留期清理掉之后，已计入的统计仍然保留，重启也不会丢。
+
+    对应地，**聚合只增不减**——删日志是存储清理，不代表这些请求没发生过。而且日志被
+    按时间截断后，即便重建也只能看到剩下的那一段，重建等于把更早的历史一并抹掉。
     """
 
-    # 已消费内容的尾部锚点。文件被重写、截断或轮转时这段字节会对不上，据此触发重建。
+    # 已消费内容的尾部锚点。文件被重写、截断或轮转时这段字节会对不上，据此重新对齐游标。
     _ANCHOR_BYTES = 64
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, snapshot_path: Path | None = None):
         self.path = path
+        self.snapshot_path = snapshot_path or path.parent / "image_stats.json"
         self._lock = threading.Lock()
         self._reset()
+        self._load_snapshot()
 
     def _reset(self) -> None:
         self._hours: dict[str, dict[str, Any]] = {}
-        self._totals: dict[str, Any] = _empty_bucket()
         self._offset = 0
         self._anchor = b""
+        self._last_save = 0.0
+
+    def _load_snapshot(self) -> None:
+        """载入上次落盘的聚合与游标。读不到或格式对不上就从零开始重建。"""
+        try:
+            snapshot = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(snapshot, dict) or snapshot.get("version") != SNAPSHOT_VERSION:
+            return
+        hours = snapshot.get("hours")
+        if not isinstance(hours, dict):
+            return
+        restored: dict[str, dict[str, Any]] = {}
+        for key, value in hours.items():
+            if not isinstance(key, str):
+                continue
+            restored[key] = _restore_bucket(value)
+        try:
+            self._offset = max(0, int(snapshot.get("offset") or 0))
+        except (TypeError, ValueError):
+            self._offset = 0
+        try:
+            self._anchor = bytes.fromhex(str(snapshot.get("anchor") or ""))
+        except ValueError:
+            self._anchor = b""
+        # 载入时游标与聚合是对齐的，不必马上回写。
+        self._hours = restored
+        self._last_save = time.monotonic()
+
+    def _save_snapshot(self, *, force: bool = False) -> None:
+        """把聚合和游标一起原子落盘。写失败只影响下次重启，不该让查询出错。"""
+        now = time.monotonic()
+        if not force and now - self._last_save < SNAPSHOT_INTERVAL_SECONDS:
+            return
+        payload = {
+            "version": SNAPSHOT_VERSION,
+            "hours": self._hours,
+            "offset": self._offset,
+            "anchor": self._anchor.hex(),
+        }
+        try:
+            self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = self.snapshot_path.with_suffix(f"{self.snapshot_path.suffix}.tmp")
+            temp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+            )
+            temp_path.replace(self.snapshot_path)
+        except OSError:
+            return
+        self._last_save = now
 
     def _anchor_matches(self) -> bool:
         """确认 [offset-len(anchor), offset) 这段仍是上次读到的内容。"""
@@ -222,30 +309,57 @@ class ImageStatsService:
         except OSError:
             return False
 
+    def _resync(self) -> None:
+        """文件被改写后重新对齐游标，已计入的聚合不回退。
+
+        按时间清理日志只是把最老的一段前缀删掉，保留下来的尾部字节与上次读到的完全一致，
+        所以靠尾部锚点就能算出新的游标位置，既不重复计数也不丢历史。
+        逐条删除（中间挖洞）会让后面的字节整体前移，锚点也随之移动，同样能找回来。
+        锚点确实找不到时（内容被大改）只能退到最后一个完整行：宁可漏掉少数尚未计入的行，
+        也不重复计数。
+        """
+        try:
+            data = self.path.read_bytes()
+        except OSError:
+            return
+        if self._anchor:
+            # 取最靠后的一处：万一这段字节在文件里出现过多次，靠后的那个才不会重复计数。
+            found = data.rfind(self._anchor)
+            if found >= 0:
+                self._offset = found + len(self._anchor)
+                return
+        cut = data.rfind(b"\n")
+        self._offset = cut + 1 if cut >= 0 else 0
+        self._anchor = data[max(0, self._offset - self._ANCHOR_BYTES) : self._offset]
+
     def _refresh(self) -> None:
-        """把新追加的日志并进聚合结果；文件被重写或轮转时从头重建。"""
+        """把新追加的日志并进聚合结果；文件被改写时只重新对齐游标，不重建聚合。"""
         try:
             size = self.path.stat().st_size
         except OSError:
             # 文件暂时读不到（尚未创建等）：保持现状，等下次查询再试。
             return
-        # 变小说明被截断；锚点对不上说明内容被改写（例如删除部分日志）。
-        if size < self._offset or not self._anchor_matches():
-            self._reset()
-        if size <= self._offset:
-            return
-
-        with self.path.open("rb") as handle:
-            handle.seek(self._offset)
-            payload = handle.read()
-        # 只消费到最后一个换行符：日志是边写边追加的，末尾可能留了半行。
-        cut = payload.rfind(b"\n")
-        if cut < 0:
-            return
-        consumed = payload[: cut + 1]
-        self._consume(consumed.decode("utf-8", errors="replace"))
-        self._offset += len(consumed)
-        self._anchor = (self._anchor + consumed)[-self._ANCHOR_BYTES :]
+        # 变小说明被截断（例如按保留期清理）；锚点对不上说明内容被改写（例如逐条删除）。
+        resynced = size < self._offset or not self._anchor_matches()
+        if resynced:
+            self._resync()
+            try:
+                size = self.path.stat().st_size
+            except OSError:
+                return
+        if size > self._offset:
+            with self.path.open("rb") as handle:
+                handle.seek(self._offset)
+                payload = handle.read()
+            # 只消费到最后一个换行符：日志是边写边追加的，末尾可能留了半行。
+            cut = payload.rfind(b"\n")
+            if cut >= 0:
+                consumed = payload[: cut + 1]
+                self._consume(consumed.decode("utf-8", errors="replace"))
+                self._offset += len(consumed)
+                self._anchor = (self._anchor + consumed)[-self._ANCHOR_BYTES :]
+        # 游标动过就必须落盘，否则重启后会退回旧游标，把已经计入的行再数一遍。
+        self._save_snapshot(force=resynced)
 
     def _consume(self, text: str) -> None:
         for raw_line in text.splitlines():
@@ -254,7 +368,6 @@ class ImageStatsService:
                 continue
             hour_key, mode, status, duration_ms = event
             bucket = self._hours.setdefault(hour_key, _empty_bucket())
-            _accumulate(self._totals, mode=mode, status=status, duration_ms=duration_ms)
             _accumulate(bucket, mode=mode, status=status, duration_ms=duration_ms)
 
     def summary(self, start_date: str = "", end_date: str = "") -> dict[str, Any]:

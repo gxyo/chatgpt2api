@@ -23,6 +23,7 @@ from services.image_service import (
 )
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
+from services.log_cleanup_service import cleanup_logs, log_storage_info
 from services.log_service import log_service
 from services.proxy_service import proxy_settings, test_clearance, test_proxy
 from services.stats_service import build_image_stats
@@ -55,6 +56,8 @@ class ImageTagsRequest(BaseModel):
 
 class LogDeleteRequest(BaseModel):
     ids: list[str] = []
+class LogCleanupRequest(BaseModel):
+    days: int | None = None
 class BackupDeleteRequest(BaseModel):
     key: str = ""
 
@@ -132,6 +135,18 @@ def create_router(app_version: str) -> APIRouter:
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return log_service.delete(body.ids)
+
+    @router.get("/api/logs/retention")
+    async def get_log_retention(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return log_storage_info()
+
+    @router.post("/api/logs/cleanup")
+    async def cleanup_logs_endpoint(body: LogCleanupRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        if body.days is not None and body.days < 1:
+            raise HTTPException(status_code=400, detail={"error": "保留天数至少为 1"})
+        return await run_in_threadpool(cleanup_logs, body.days)
 
     @router.get("/api/stats/images")
     async def get_image_stats(start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
