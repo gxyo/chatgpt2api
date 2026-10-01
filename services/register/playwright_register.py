@@ -7,6 +7,7 @@ import os
 import random
 import secrets
 import string
+import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse
@@ -213,22 +214,26 @@ async def _install_oauth_routes(
     code_challenge: str,
     captured_codes: list[str],
     events: list[str] | None = None,
+    on_capture=None,
 ) -> None:
     """Install one catch-all route that keeps the one-time code ours to redeem.
 
     - 所有带 ``code_challenge`` 的请求都改写成我们自己的 S256 challenge，
       这样 authorize 端点换名字（``/oauth/authorize`` / ``/api/oauth/oauth2/auth`` /
       ``/api/accounts/authorize``）也不会漏网。
-    - 资料页提交后的那一跳由我们自己预取：从 ``Location`` 里读出 code 并就地结束导航，
-      浏览器永远不会真的落到 callback 页——平台也就没机会把 code 兑换掉。
-    - 万一还是落了 callback（多跳重定向等情况），callback 页面的出站请求一律阻断兜底。
+    - code 是纯观察拿到的：``page.on("response")`` 读那一跳 302 的 ``Location``。
+      重定向目标路由不到（Playwright 的限制），所以 callback 请求本身还是会被浏览器发出去，
+      我们只能比它更早动手：``on_capture`` 会在 code 到手的同一刻被调用，
+      由调用方立刻发起兑换，而不是等状态机跑完。
+    - 万一落了 callback，callback 页面的出站请求一律阻断兜底。
     """
 
-    state = {"callback_seen": False}
+    state = {"callback_seen": False, "callback_requested": False}
+    started = time.monotonic()
 
     def _record(message: str) -> None:
         if events is not None:
-            events.append(message)
+            events.append(f"{message} [t={int((time.monotonic() - started) * 1000)}ms]")
 
     def _capture(code: str, how: str) -> None:
         state["callback_seen"] = True
@@ -237,6 +242,24 @@ async def _install_oauth_routes(
         captured_codes.append(code)
         _record(f"获取 OAuth code（{how}）code_fp={_secret_fingerprint(code)}")
         step(index, "已拦截到 OAuth code")
+        if on_capture is not None:
+            try:
+                on_capture(code)
+            except Exception as error:
+                # 提前兑换只是抢时间，起不来也不能影响注册流程本身。
+                _record(f"提前兑换未启动: {error}")
+
+    def _on_request(request) -> None:
+        """记下浏览器真正发出 callback 请求的时刻（纯观察，用于判断谁先谁后）。"""
+        if state["callback_requested"]:
+            return
+        try:
+            target = str(getattr(request, "url", "") or "")
+        except Exception:
+            return
+        if _oauth_callback_code(target):
+            state["callback_requested"] = True
+            _record("浏览器已发出 callback 请求")
 
     def _on_response(response) -> None:
         """Read the code off the 302 that points at the callback.
@@ -311,6 +334,7 @@ async def _install_oauth_routes(
 
     await page.route(OAUTH_ROUTE_PATTERN, _handler)
     page.on("response", _on_response)
+    page.on("request", _on_request)
 
 
 def _install_oauth_trace(page, index: int) -> None:
@@ -730,12 +754,38 @@ async def _browser_register_flow(
     code_verifier, code_challenge = _generate_pkce()
     captured_code: list[str] = []
     oauth_events: list[str] = []
+    eager: dict[str, Any] = {"task": None, "error": None}
 
     def _dump_oauth_events() -> None:
-        for event in oauth_events[-12:]:
+        for event in oauth_events[-16:]:
             step(index, f"OAuth 诊断: {event}", "yellow")
 
-    await _install_oauth_routes(page, index, code_challenge, captured_code, oauth_events)
+    async def _eager_exchange(code: str) -> dict:
+        try:
+            return await _exchange_oauth_token_in_browser(
+                page, context, index, code, code_verifier, proxy
+            )
+        except Exception as error:
+            eager["error"] = error
+            return {}
+
+    def _start_eager_exchange(code: str) -> None:
+        """code 一到手就发起兑换，不再等状态机一步步返回。
+
+        轮询状态机、取 cookie、建会话加起来就是几百毫秒，而浏览器收到那个 302 之后
+        立刻就会去请求 callback，平台可能就在那一刻把 code 用掉——这一段时间差就是
+        成功率丢的那 20%。提前发起不改动任何浏览器请求，输了也只是回到原来的行为。
+        """
+        if eager["task"] is not None:
+            return
+        try:
+            eager["task"] = asyncio.create_task(_eager_exchange(code))
+        except RuntimeError:
+            eager["task"] = None
+
+    await _install_oauth_routes(
+        page, index, code_challenge, captured_code, oauth_events, _start_eager_exchange
+    )
 
     signup_url = f"{platform_base}/signup"
     step(index, "导航到注册页面")
@@ -808,16 +858,25 @@ async def _browser_register_flow(
             f"code_fp={_secret_fingerprint(captured_code[0])}, "
             f"verifier_fp={_secret_fingerprint(code_verifier)}",
         )
-    try:
-        tokens = await _exchange_oauth_token_in_browser(
-            page, context, index, captured_code[0], code_verifier, proxy
-        )
-    except Exception:
-        # invalid_grant 通常意味着 code 已经被别人兑换掉了：
-        # 先看平台自己是否登录成功（说明 code 被平台换走了），再打印拦截记录。
-        step(index, f"OAuth 诊断: {await _probe_platform_session(context)}", "yellow")
-        _dump_oauth_events()
-        raise
+    tokens: dict = {}
+    if eager["task"] is not None:
+        # code 到手那一刻就已经在兑换了，这里只是等它的结果。
+        tokens = await eager["task"]
+        if tokens:
+            _dump_oauth_events()
+        else:
+            step(index, f"提前兑换失败，退回常规兑换: {eager['error']}", "yellow")
+    if not tokens:
+        try:
+            tokens = await _exchange_oauth_token_in_browser(
+                page, context, index, captured_code[0], code_verifier, proxy
+            )
+        except Exception:
+            # invalid_grant 通常意味着 code 已经被别人兑换掉了：
+            # 先看平台自己是否登录成功（说明 code 被平台换走了），再打印拦截记录。
+            step(index, f"OAuth 诊断: {await _probe_platform_session(context)}", "yellow")
+            _dump_oauth_events()
+            raise
 
     if not tokens or not tokens.get("access_token"):
         raise RuntimeError("OAuth token 交换返回数据缺少 access_token")

@@ -226,6 +226,50 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(captured, ["first"])
 
+    async def test_on_capture_fires_the_instant_the_code_lands(self) -> None:
+        # 拿到 code 的同一刻就把兑换交出去，不再等状态机跑完 —— 抢的就是那几百毫秒。
+        page = FakePage()
+        captured: list[str] = []
+        handed_over: list[str] = []
+        await _install_oauth_routes(
+            page, 1, "our-challenge", captured, [], handed_over.append
+        )
+
+        page.listeners["response"](
+            FakeResponse(302, "https://auth.openai.com/api/oauth/oauth2/auth", "/auth/callback?code=abc")
+        )
+
+        self.assertEqual(handed_over, ["abc"])
+
+    async def test_on_capture_failure_never_breaks_the_route(self) -> None:
+        page = FakePage()
+        captured: list[str] = []
+        events: list[str] = []
+
+        def explode(_code: str) -> None:
+            raise RuntimeError("no loop")
+
+        await _install_oauth_routes(page, 1, "our-challenge", captured, events, explode)
+
+        route = FakeRoute("https://platform.openai.com/auth/callback?code=direct")
+        await page.routes["**/*"](route)
+
+        self.assertEqual(captured, ["direct"])
+        self.assertIsNotNone(route.fulfilled)
+        self.assertTrue(any("提前兑换未启动" in event for event in events))
+
+    async def test_callback_request_moment_is_recorded_once(self) -> None:
+        page = FakePage()
+        events: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", [], events)
+        on_request = page.listeners["request"]
+
+        on_request(FakeRequest("https://auth.openai.com/about-you"))
+        on_request(FakeRequest("https://platform.openai.com/auth/callback?code=abc"))
+        on_request(FakeRequest("https://platform.openai.com/auth/callback?code=abc"))
+
+        self.assertEqual(sum("浏览器已发出 callback 请求" in e for e in events), 1)
+
     async def test_callback_page_requests_are_blocked_so_the_code_survives(self) -> None:
         page = FakePage()
         events: list[str] = []
