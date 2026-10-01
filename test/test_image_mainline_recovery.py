@@ -17,7 +17,15 @@ from services.openai_backend_api import (
 from services.protocol import conversation
 from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput
 from test.test_upstream_retry import FakeAccountService, FakeResponse, FakeSession, FakeStreamResponse
-from utils.helper import CHANNEL_BUSY_MESSAGE, UpstreamHTTPError, ensure_ok, is_retriable_upstream_error
+from utils.helper import (
+    CHANNEL_BUSY_MESSAGE,
+    IMAGE_MAINLINE_REJECT_MESSAGE,
+    IMAGE_RETRY_MESSAGE,
+    UpstreamHTTPError,
+    ensure_ok,
+    is_retriable_upstream_error,
+    sanitize_image_error_text,
+)
 
 
 def error_stream(status: int = 400, chunks: list | None = None) -> requests.Response:
@@ -224,6 +232,91 @@ class ImageMainlineRecoveryTests(unittest.TestCase):
                         list(conversation.stream_image_outputs_with_pool(ConversationRequest(model="gpt-image-2", prompt="draw")))
                 self.assertIsInstance(raised.exception.__cause__, UpstreamHTTPError)
                 self.assertEqual(accounts.image_results, [("token-a", False)])
+
+
+class ImageErrorSanitizerTests(unittest.TestCase):
+    def test_skipped_mainline_forms_map_to_the_user_facing_message(self):
+        cases = [
+            'status_code=400, {"skipped_mainline":true}',
+            '{"skipped_mainline": true}',
+            'conversation failed: status=400, body={"skipped_mainline": true}',
+            'status_code=400, {"skipped_mainline":TRUE}',
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(sanitize_image_error_text(text), "status_code=400, 本次生图失败，请重试。")
+                self.assertEqual(sanitize_image_error_text(text), IMAGE_MAINLINE_REJECT_MESSAGE)
+
+    def test_upstream_plumbing_text_falls_back_to_the_generic_retry_message(self):
+        cases = [
+            "UpstreamHTTPError: /backend-api/f/conversation/prepare failed: status=500, body={}",
+            "GET https://chatgpt.com/backend-api/me returned 403",
+            "sentinel/chat-requirements failed",
+            "UpstreamHTTPError: /backend-api/f/conversation failed",
+            "",
+            None,
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(sanitize_image_error_text(text), IMAGE_RETRY_MESSAGE)
+
+    def test_business_messages_are_never_rewritten(self):
+        for text in (
+            CHANNEL_BUSY_MESSAGE,
+            "Image generation was rejected by upstream policy.",
+            "Image generation completed upstream but the result could not be retrieved.",
+            "你上传的图片包含违规内容，请更换后重试。",
+            IMAGE_RETRY_MESSAGE,
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(sanitize_image_error_text(text), text)
+
+
+class ImageHandshakeLockTests(unittest.TestCase):
+    class RecordingAccountService:
+        def __init__(self, events: list[tuple[str, str]]):
+            self.events = events
+
+        def get_account(self, access_token: str):
+            return {"email": "a@example.test"}
+
+        def acquire_image_handshake(self, access_token: str, timeout=None) -> bool:
+            self.events.append(("acquire", access_token))
+            return True
+
+        def release_image_handshake(self, access_token: str) -> None:
+            self.events.append(("release", access_token))
+
+        def image_inflight_count(self, access_token: str) -> int:
+            return 2
+
+    def test_picture_stream_holds_the_handshake_lock_only_until_the_stream_opens(self):
+        events: list[tuple[str, str]] = []
+        api = OpenAIBackendAPI("token-a")
+        success = FakeStreamResponse([b'data: [DONE]'])
+        with mock.patch("services.openai_backend_api.account_service", self.RecordingAccountService(events)), \
+             mock.patch.object(api, "_bootstrap"), \
+             mock.patch.object(api, "_get_chat_requirements", return_value=ChatRequirements("one")), \
+             mock.patch.object(api, "_prepare_image_conversation", return_value="one"), \
+             mock.patch.object(api, "_start_image_generation", return_value=success):
+            payloads = list(api._stream_picture_conversation("draw", "gpt-image-2", []))
+
+        self.assertEqual(payloads, ["[DONE]"])
+        self.assertEqual(events, [("acquire", "token-a"), ("release", "token-a")])
+
+    def test_picture_stream_releases_the_handshake_lock_when_the_handshake_fails(self):
+        events: list[tuple[str, str]] = []
+        api = OpenAIBackendAPI("token-a")
+        with mock.patch("services.openai_backend_api.account_service", self.RecordingAccountService(events)), \
+             mock.patch.object(api, "_bootstrap"), \
+             mock.patch.object(api, "_get_chat_requirements", return_value=ChatRequirements("one")), \
+             mock.patch.object(api, "_prepare_image_conversation", return_value="one"), \
+             mock.patch.object(api, "_start_image_generation", side_effect=UpstreamHTTPError("conversation", 400, {"skipped_mainline": True})), \
+             mock.patch.object(api, "_sleep_with_deadline"):
+            with self.assertRaises(UpstreamHTTPError):
+                list(api._stream_picture_conversation("draw", "gpt-image-2", []))
+
+        self.assertEqual(events, [("acquire", "token-a"), ("release", "token-a")])
 
 
 if __name__ == "__main__":

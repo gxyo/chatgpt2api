@@ -13,6 +13,7 @@ from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from utils.helper import sanitize_image_error_text
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -302,7 +303,7 @@ class ImageTaskService:
                 account_email=account_email,
             )
         except Exception as exc:
-            error_message = str(exc) or "image task failed"
+            error_message = sanitize_image_error_text(str(exc) or "image task failed")
             account_email = _clean(getattr(exc, "account_email", ""))
             conversation_id = _clean(getattr(exc, "conversation_id", ""))
             duration_ms = int((time.time() - started) * 1000)
@@ -571,7 +572,7 @@ class ImageTaskService:
                 urls=_collect_image_urls(data),
             )
         except Exception as exc:
-            error_message = str(exc) or "resume poll failed"
+            error_message = sanitize_image_error_text(str(exc) or "resume poll failed")
             duration_ms = int((time.time() - started) * 1000)
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[], duration_ms=duration_ms)
             self._log_call(

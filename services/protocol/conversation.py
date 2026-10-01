@@ -28,6 +28,7 @@ from utils.helper import (
     is_retriable_upstream_error,
     is_supported_image_model,
     public_error_message,
+    sanitize_image_error_text,
     split_image_model,
 )
 from utils.image_tokens import count_image_content_tokens
@@ -76,11 +77,7 @@ IMAGE_POLL_TIMEOUT_MESSAGE = "当前生图任务处理超时，请稍后重试"
 
 
 def public_image_error_message(message: str) -> str:
-    text = str(message or "").strip()
-    lower = text.lower()
-    if any(item in lower for item in ("backend-api/", "status=", "body=", "chatgpt.com", "upstreamhttperror")):
-        return "The image generation request failed. Please try again later."
-    return text or "The image generation request failed. Please try again later."
+    return sanitize_image_error_text(str(message or "").strip())
 
 
 def is_token_invalid_error(message: str) -> bool:
@@ -138,7 +135,7 @@ def image_stream_error_message(message: str) -> str:
         return CHANNEL_BUSY_MESSAGE
     if is_tls_connection_error(text) or is_connection_timeout_error(text):
         return CHANNEL_BUSY_MESSAGE
-    return text or "upstream completed without returning an image result"
+    return sanitize_image_error_text(text or "upstream completed without returning an image result")
 
 
 def transient_rescue_wait(deadline: float, attempt: int, request_deadline: float | None = None) -> bool:
@@ -936,11 +933,13 @@ def stream_image_outputs(
         # 尝试从 /backend-api/tasks/ 获取详细错误信息
         detailed_error = _get_detailed_error_from_tasks(backend, conversation_id)
         error_text = detailed_error or message or "Image generation was rejected by upstream policy."
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=error_text, conversation_id=conversation_id)
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total,
+                          text=sanitize_image_error_text(error_text), conversation_id=conversation_id)
         return
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
     if message and not file_ids and not sediment_ids and not should_poll_for_image:
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total,
+                          text=sanitize_image_error_text(message), conversation_id=conversation_id)
         return
 
     # 检测模型是否返回了文本描述（含 referenced_image_ids）而非实际生成图片
@@ -991,7 +990,8 @@ def stream_image_outputs(
                 "conversation_id": conversation_id,
                 "error": detailed_error,
             })
-            yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=detailed_error, conversation_id=conversation_id)
+            yield ImageOutput(kind="message", model=request.model, index=index, total=total,
+                              text=sanitize_image_error_text(detailed_error), conversation_id=conversation_id)
             return
         if detailed_error and (should_poll_for_image or is_text_reply):
             logger.info({

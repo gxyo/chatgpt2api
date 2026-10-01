@@ -120,6 +120,58 @@ class AccountCapabilityTests(unittest.TestCase):
             service.release_image_slot("token-1")
             self.assertNotIn("token-1", service._image_inflight)
 
+    def test_available_token_prefers_the_idle_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-busy", "token-idle"])
+            for token in ("token-busy", "token-idle"):
+                service.update_account(token, {"status": "正常", "quota": 5})
+            service._image_inflight["token-busy"] = [time.monotonic(), time.monotonic()]
+
+            picked = service.get_available_access_token()
+
+            self.assertEqual(picked, "token-idle")
+            self.assertEqual(len(service._image_inflight["token-idle"]), 1)
+            self.assertEqual(len(service._image_inflight["token-busy"]), 2)
+
+    def test_single_account_still_serves_the_configured_concurrency(self) -> None:
+        original_value = config.data.get("image_account_concurrency")
+        config.data["image_account_concurrency"] = 3
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+                service.add_accounts(["token-1"])
+                service.update_account("token-1", {"status": "正常", "quota": 5})
+
+                picked = [service.get_available_access_token() for _ in range(3)]
+
+                self.assertEqual(picked, ["token-1"] * 3)
+                self.assertEqual(len(service._image_inflight["token-1"]), 3)
+        finally:
+            if original_value is None:
+                config.data.pop("image_account_concurrency", None)
+            else:
+                config.data["image_account_concurrency"] = original_value
+
+    def test_image_handshake_lock_serializes_only_the_same_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1", "token-2"])
+
+            self.assertTrue(service.acquire_image_handshake("token-1", timeout=1.0))
+            try:
+                # 同账号的第二个握手必须等，短超时下拿不到锁
+                self.assertFalse(service.acquire_image_handshake("token-1", timeout=0.05))
+                # 换一个账号不受影响
+                self.assertTrue(service.acquire_image_handshake("token-2", timeout=0.05))
+                service.release_image_handshake("token-2")
+            finally:
+                service.release_image_handshake("token-1")
+
+            # 释放后立刻可以重新拿到
+            self.assertTrue(service.acquire_image_handshake("token-1", timeout=0.05))
+            service.release_image_handshake("token-1")
+
     def test_split_image_model_supports_plan_type_prefix(self) -> None:
         self.assertEqual(split_image_model("gpt-image-2"), (None, "gpt-image-2"))
         self.assertEqual(split_image_model("plus-codex-gpt-image-2"), ("plus", "codex-gpt-image-2"))

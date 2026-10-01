@@ -60,6 +60,12 @@ class AccountService:
         self._image_inflight: dict[str, list[float]] = {}
         self._image_expired_slots: dict[str, int] = {}
         self._token_aliases: dict[str, str] = {}
+        # 按账号串行化 prepare→mainline 握手窗口。同一账号并发跑多条握手会让上游
+        # 丢弃先前的 conduit 状态并返回 400 {"skipped_mainline":true}；这里只锁住
+        # 短握手窗口，长耗时的生图阶段仍然按 image_account_concurrency 并行。
+        # 注意 guard 必须独立于 self._lock，否则会持 _lock 阻塞在握手锁上。
+        self._image_handshake_locks: dict[str, Lock] = {}
+        self._image_handshake_locks_guard = Lock()
         self._cumulative_total = self._load_cumulative_total()
 
     def _get_cumulative_file(self) -> Path:
@@ -934,11 +940,16 @@ class AccountService:
     ) -> list[str]:
         self._prune_expired_image_slots_locked()
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
-        return [
+        candidates = [
             token
             for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
             if len(self._image_inflight.get(token, [])) < max_concurrency
         ]
+        # 优先挑当前零在途的账号，只有号池全忙时才复用已在跑图的号。同一账号上并发
+        # 跑多条 prepare→mainline 是 skipped_mainline 的直接诱因，能避开就避开。
+        # 稳定排序：并列时保留 _list_ready_candidate_tokens 的原始顺序。
+        candidates.sort(key=lambda token: len(self._image_inflight.get(token, [])))
+        return candidates
 
     def _image_slot_lease_timeout_secs(self) -> float:
         return max(30.0, float(config.image_poll_timeout_secs) * 1.2)
@@ -976,7 +987,15 @@ class AccountService:
                     )
                 tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
                 if tokens:
-                    access_token = tokens[self._index % len(tokens)]
+                    # tokens 已按在途数升序排列。只在「最空闲那一档」里轮询，而不是在整个
+                    # 列表上按全局 _index 取模 —— 否则 _index 会把请求推到已经在跑图的
+                    # 账号上，白白制造同账号并发。
+                    least_inflight = len(self._image_inflight.get(tokens[0], []))
+                    idle_group = [
+                        token for token in tokens
+                        if len(self._image_inflight.get(token, [])) == least_inflight
+                    ]
+                    access_token = idle_group[self._index % len(idle_group)]
                     self._index += 1
                     self._image_inflight.setdefault(access_token, []).append(time.monotonic())
                     return access_token
@@ -1007,6 +1026,45 @@ class AccountService:
             else:
                 self._image_inflight[access_token] = slots[1:]
             self._image_slot_condition.notify_all()
+
+    def _get_image_handshake_lock(self, access_token: str) -> Lock:
+        key = self.resolve_access_token(access_token) or access_token
+        with self._image_handshake_locks_guard:
+            lock = self._image_handshake_locks.get(key)
+            if lock is None:
+                lock = Lock()
+                self._image_handshake_locks[key] = lock
+            return lock
+
+    def acquire_image_handshake(self, access_token: str, timeout: float | None = None) -> bool:
+        """占用某账号的图片握手窗口，避免同一账号并发握手触发 skipped_mainline。
+
+        超时返回 False，调用方应按原行为继续，不能让用户卡死在这里。
+        """
+        if not access_token:
+            return False
+        try:
+            return bool(self._get_image_handshake_lock(access_token).acquire(timeout=timeout))
+        except Exception:
+            return False
+
+    def release_image_handshake(self, access_token: str) -> None:
+        if not access_token:
+            return
+        try:
+            lock = self._get_image_handshake_lock(access_token)
+            if lock.locked():
+                lock.release()
+        except Exception:
+            pass
+
+    def image_inflight_count(self, access_token: str) -> int:
+        """返回某账号当前在途的图片请求数（仅用于日志/诊断）。"""
+        if not access_token:
+            return 0
+        with self._image_slot_condition:
+            token = self._resolve_access_token_locked(access_token)
+            return len(self._image_inflight.get(token, []))
 
     def get_available_access_token(
             self,

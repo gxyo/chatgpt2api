@@ -25,6 +25,15 @@ IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS
 PUBLIC_IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 CHANNEL_BUSY_MESSAGE = "当前渠道拥堵，请稍后再试"
+# 上游图片链路失败时给用户看的兜底文案。上游原始报错（backend-api 路径、status=/status_code=、
+# body=、"skipped_mainline":true 等）对用户没有任何意义，一律替换掉。
+IMAGE_RETRY_MESSAGE = "本次生图失败，请重试。"
+IMAGE_MAINLINE_REJECT_MESSAGE = "status_code=400, 本次生图失败，请重试。"
+SKIPPED_MAINLINE_RE = re.compile(r'"skipped_mainline"\s*:\s*true', re.IGNORECASE)
+UPSTREAM_PLUMBING_RE = re.compile(
+    r"backend[-_]api/|sentinel/|status_code\s*[=:]|status\s*[=:]|\bbody\s*[=:]|chatgpt\.com|upstreamhttperror",
+    re.IGNORECASE,
+)
 RETRYABLE_UPSTREAM_STATUS_CODES = {429, 500, 502, 503, 504}
 RETRYABLE_UPSTREAM_STATUS_RE = re.compile(
     r"(?:status_code|status|http|response status code)\D*(429|500|502|503|504)\b",
@@ -233,6 +242,22 @@ def public_error_message(exc: BaseException) -> str:
     if is_retriable_upstream_error(exc):
         return CHANNEL_BUSY_MESSAGE
     return str(exc) or "request failed"
+
+
+def sanitize_image_error_text(message: object) -> str:
+    """把上游图片链路的原始报错替换成用户看得懂的中文。
+
+    只替换「一眼就是上游管道信息」的文本，其它文本（渠道拥堵、轮询超时、内容策略、
+    正常业务文案）原样返回，避免误伤。用于所有会把错误暴露给最终用户/前端的位置。
+    """
+    text = str(message or "")
+    if not text:
+        return IMAGE_RETRY_MESSAGE
+    if SKIPPED_MAINLINE_RE.search(text):
+        return IMAGE_MAINLINE_REJECT_MESSAGE
+    if UPSTREAM_PLUMBING_RE.search(text):
+        return IMAGE_RETRY_MESSAGE
+    return text
 
 
 def sse_json_stream(items) -> Iterator[str]:

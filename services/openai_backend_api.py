@@ -2840,52 +2840,66 @@ class OpenAIBackendAPI:
         self._bootstrap()
         response = None
         max_mainline_retries = 2
-        for attempt in range(1, max_mainline_retries + 1):
-            self._remaining_deadline_secs()
-            # The prepare response contains one-shot state for exactly one
-            # mainline message. Keep both identifiers stable across the two
-            # requests, while generating a completely new pair on retry.
-            parent_message_id = new_uuid()
-            message_id = new_uuid()
-            try:
-                self._report_progress("getting_token")
-                requirements = self._get_chat_requirements()
-                self._report_progress("preparing_conversation")
-                conduit_token = self._prepare_image_conversation(
-                    prompt,
-                    requirements,
-                    model,
-                    parent_message_id=parent_message_id,
-                    message_id=message_id,
-                )
-                self._report_progress("starting_generation")
-                response = self._start_image_generation(
-                    prompt,
-                    requirements,
-                    conduit_token,
-                    model,
-                    references,
-                    parent_message_id=parent_message_id,
-                    message_id=message_id,
-                )
-            except Exception as exc:
-                recoverable = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
-                if not recoverable or attempt >= max_mainline_retries:
-                    raise
-                upstream_model, thinking_effort = self._image_model_settings(model)
-                logger.warning({
-                    "event": "image_mainline_state_retry",
-                    "attempt": attempt,
-                    "max_attempts": max_mainline_retries,
-                    "upstream_model": upstream_model,
-                    "thinking_effort": thinking_effort or "auto",
-                    "error": str(exc)[:300],
-                })
-                # The requirements and conduit token are one-shot state.  The
-                # next iteration creates both again with fresh request IDs.
-                self._sleep_with_deadline(0.2)
-                continue
-            break
+        # 同一账号同时跑多条 prepare→mainline 时，上游会丢掉先到的 conduit 状态并回
+        # {"skipped_mainline": true}。这里只把「握手窗口」（get_chat_requirements →
+        # prepare → mainline，约 1-2 秒）按账号串行化，拿不到锁就按原行为继续，
+        # 生图阶段（几十秒）仍然是 image_account_concurrency 路并行。
+        remaining = self._remaining_deadline_secs()
+        handshake_timeout = 30.0 if remaining is None else max(1.0, min(remaining, 30.0))
+        handshake_held = account_service.acquire_image_handshake(self.access_token, handshake_timeout)
+        try:
+            for attempt in range(1, max_mainline_retries + 1):
+                self._remaining_deadline_secs()
+                # The prepare response contains one-shot state for exactly one
+                # mainline message. Keep both identifiers stable across the two
+                # requests, while generating a completely new pair on retry.
+                parent_message_id = new_uuid()
+                message_id = new_uuid()
+                try:
+                    self._report_progress("getting_token")
+                    requirements = self._get_chat_requirements()
+                    self._report_progress("preparing_conversation")
+                    conduit_token = self._prepare_image_conversation(
+                        prompt,
+                        requirements,
+                        model,
+                        parent_message_id=parent_message_id,
+                        message_id=message_id,
+                    )
+                    self._report_progress("starting_generation")
+                    response = self._start_image_generation(
+                        prompt,
+                        requirements,
+                        conduit_token,
+                        model,
+                        references,
+                        parent_message_id=parent_message_id,
+                        message_id=message_id,
+                    )
+                except Exception as exc:
+                    recoverable = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
+                    if not recoverable or attempt >= max_mainline_retries:
+                        raise
+                    upstream_model, thinking_effort = self._image_model_settings(model)
+                    logger.warning({
+                        "event": "image_mainline_state_retry",
+                        "attempt": attempt,
+                        "max_attempts": max_mainline_retries,
+                        "account_email": str(self.account.get("email") or ""),
+                        "image_inflight": account_service.image_inflight_count(self.access_token),
+                        "handshake_locked": handshake_held,
+                        "upstream_model": upstream_model,
+                        "thinking_effort": thinking_effort or "auto",
+                        "error": str(exc)[:300],
+                    })
+                    # The requirements and conduit token are one-shot state.  The
+                    # next iteration creates both again with fresh request IDs.
+                    self._sleep_with_deadline(0.2)
+                    continue
+                break
+        finally:
+            if handshake_held:
+                account_service.release_image_handshake(self.access_token)
         if response is None:
             raise ImageMainlineStateError("image generation did not start")
         self._report_progress("generating")
