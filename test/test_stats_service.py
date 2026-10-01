@@ -171,5 +171,106 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(second["totals"]["failed"], 1)
 
 
+class IncrementalAggregationTests(unittest.TestCase):
+    """增量聚合：只解析新追加的尾部，且文件被改写时不能留下陈旧计数。"""
+
+    def make_service(self, tmp_dir: str, lines: list[str]) -> tuple[ImageStatsService, Path]:
+        path = Path(tmp_dir) / "logs.jsonl"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return ImageStatsService(path), path
+
+    def test_repeated_queries_do_not_double_count(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, _ = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations"),
+            ])
+
+            counts = [service.summary("2026-09-28", "2026-09-28")["totals"]["requests"] for _ in range(5)]
+
+        self.assertEqual(counts, [1, 1, 1, 1, 1])
+
+    def test_appends_are_merged_incrementally(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, path = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations"),
+            ])
+            service.summary("2026-09-28", "2026-09-28")
+
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(log_line("2026-09-28 11:00:00", "/v1/images/edits", status="failed") + "\n")
+            after_one = service.summary("2026-09-28", "2026-09-28")
+
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(log_line("2026-09-28 12:00:00", "/v1/images/generations") + "\n")
+            after_two = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(after_one["totals"]["requests"], 2)
+        self.assertEqual(after_two["totals"]["requests"], 3)
+        self.assertEqual(after_two["totals"]["failed"], 1)
+
+    def test_trailing_partial_line_waits_until_it_is_completed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            # 模拟「日志正在写」：最后一行还没落换行符。
+            path.write_text(log_line("2026-09-28 10:00:00", "/v1/images/generations"), encoding="utf-8")
+            service = ImageStatsService(path)
+
+            while_incomplete = service.summary("2026-09-28", "2026-09-28")
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
+            after_complete = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(while_incomplete["totals"]["requests"], 0)
+        self.assertEqual(after_complete["totals"]["requests"], 1)
+
+    def test_truncated_file_is_rebuilt_from_scratch(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, path = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations"),
+                log_line("2026-09-28 11:00:00", "/v1/images/generations"),
+            ])
+            before = service.summary("2026-09-28", "2026-09-28")
+
+            path.write_text(log_line("2026-09-28 12:00:00", "/v1/images/generations") + "\n", encoding="utf-8")
+            after = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(before["totals"]["requests"], 2)
+        self.assertEqual(after["totals"]["requests"], 1)
+        self.assertEqual(after["series"][10]["requests"], 0)
+        self.assertEqual(after["series"][12]["requests"], 1)
+
+    def test_in_place_rewrite_is_detected_even_when_the_file_grows(self):
+        """删除部分日志会原地重写文件；若新内容比旧偏移更长，只靠大小判断会漏掉。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, path = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations"),
+            ])
+            before = service.summary("2026-09-28", "2026-09-28")
+
+            # 重写成前缀不同、但总体更长的内容，且不含任何生图调用。
+            rewritten = "".join(
+                log_line(f"2026-09-28 13:{minute:02d}:00", "/v1/messages", summary="无关调用")
+                for minute in range(10)
+            )
+            path.write_text(rewritten, encoding="utf-8")
+            after = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(before["totals"]["requests"], 1)
+        self.assertEqual(after["totals"]["requests"], 0)
+
+    def test_deleted_log_file_keeps_the_last_known_aggregate(self):
+        """文件暂时读不到时保持现状，不把已有统计清零。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, path = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations"),
+            ])
+            service.summary("2026-09-28", "2026-09-28")
+
+            path.unlink()
+            after = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(after["totals"]["requests"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
