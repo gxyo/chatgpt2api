@@ -113,6 +113,7 @@ function LogsContent() {
   const [retention, setRetention] = useState<LogRetentionInfo | null>(null);
   const [retentionDays, setRetentionDays] = useState("30");
   const [autoCleanup, setAutoCleanup] = useState(false);
+  const [cleanupTime, setCleanupTime] = useState("03:00");
   const [isSavingRetention, setIsSavingRetention] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
@@ -153,6 +154,7 @@ function LogsContent() {
       setRetention(data);
       setRetentionDays(String(data.days));
       setAutoCleanup(data.auto_cleanup);
+      setCleanupTime(data.cleanup_time || "03:00");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "读取日志清理设置失败");
     }
@@ -160,15 +162,24 @@ function LogsContent() {
 
   const parsedRetentionDays = Number.parseInt(retentionDays, 10);
   const retentionValid = Number.isFinite(parsedRetentionDays) && parsedRetentionDays >= 1;
+  const cleanupTimeValid = /^([01]\d|2[0-3]):[0-5]\d$/.test(cleanupTime);
 
   const saveRetention = async () => {
     if (!retentionValid) {
       toast.error("保留天数至少为 1");
       return;
     }
+    if (!cleanupTimeValid) {
+      toast.error("请选择每天自动清理的时间");
+      return;
+    }
     setIsSavingRetention(true);
     try {
-      await saveLogRetention({ log_retention_days: parsedRetentionDays, log_auto_cleanup: autoCleanup });
+      await saveLogRetention({
+        log_retention_days: parsedRetentionDays,
+        log_auto_cleanup: autoCleanup,
+        log_cleanup_time: cleanupTime,
+      });
       await loadRetention();
       toast.success("已保存日志清理设置");
     } catch (error) {
@@ -320,7 +331,21 @@ function LogsContent() {
               <Checkbox checked={autoCleanup} onCheckedChange={(checked) => setAutoCleanup(Boolean(checked))} />
               每天自动清理
             </label>
-            <Button variant="outline" className="h-10 rounded-xl border-neutral-200 bg-white px-4" onClick={() => void saveRetention()} disabled={isSavingRetention || !retentionValid}>
+            <label
+              className="flex items-center gap-2 text-sm text-neutral-600"
+              title="按北京时间（UTC+8）执行"
+            >
+              <Input
+                type="time"
+                step={60}
+                value={cleanupTime}
+                onChange={(event) => setCleanupTime(event.target.value)}
+                disabled={!autoCleanup}
+                className="h-10 w-32 rounded-xl border-neutral-200 bg-white text-center disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <span className={autoCleanup ? "" : "text-neutral-400"}>北京时间</span>
+            </label>
+            <Button variant="outline" className="h-10 rounded-xl border-neutral-200 bg-white px-4" onClick={() => void saveRetention()} disabled={isSavingRetention || !retentionValid || !cleanupTimeValid}>
               {isSavingRetention ? <LoaderCircle className="size-4 animate-spin" /> : null}
               保存设置
             </Button>

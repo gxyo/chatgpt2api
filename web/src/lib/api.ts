@@ -587,6 +587,8 @@ export type LogRetentionInfo = {
   days: number;
   /** 是否每天自动清理一次。 */
   auto_cleanup: boolean;
+  /** 每天自动清理的时刻，北京时间（UTC+8）的 HH:MM。 */
+  cleanup_time: string;
   size_bytes: number;
   /** 日志文件最后写入时间（Unix 秒）。 */
   updated_at: number;
@@ -605,8 +607,12 @@ export async function fetchLogRetention() {
   return httpRequest<LogRetentionInfo>("/api/logs/retention");
 }
 
-/** 只提交这两个键，配置接口按合并处理，不会影响其他设置。 */
-export async function saveLogRetention(settings: { log_retention_days?: number; log_auto_cleanup?: boolean }) {
+/** 只提交这三个键，配置接口按合并处理，不会影响其他设置。 */
+export async function saveLogRetention(settings: {
+  log_retention_days?: number;
+  log_auto_cleanup?: boolean;
+  log_cleanup_time?: string;
+}) {
   return httpRequest<{ config: SettingsConfig }>("/api/settings", {
     method: "POST",
     body: settings,

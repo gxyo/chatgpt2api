@@ -19,6 +19,8 @@ DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS = 1
 DEFAULT_IMAGE_CLEANUP_TIME = "03:00"
 IMAGE_CLEANUP_INTERVAL_CHOICES = {1, 3, 5, 7}
 DEFAULT_LOG_RETENTION_DAYS = 30
+# 每日自动清理的默认时刻（北京时间）。图片清理默认也是 03:00，两个任务各自独立。
+DEFAULT_LOG_CLEANUP_TIME = "03:00"
 # 上限十年：再长的保留期没有意义，也挡住了手滑填进来的天文数字。
 MAX_LOG_RETENTION_DAYS = 3650
 
@@ -99,6 +101,19 @@ def _normalize_image_cleanup_time(value: object) -> str:
         return DEFAULT_IMAGE_CLEANUP_TIME
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         return DEFAULT_IMAGE_CLEANUP_TIME
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _normalize_log_cleanup_time(value: object) -> str:
+    parts = str(value or "").strip().split(":")
+    if len(parts) != 2:
+        return DEFAULT_LOG_CLEANUP_TIME
+    try:
+        hour, minute = (int(part) for part in parts)
+    except ValueError:
+        return DEFAULT_LOG_CLEANUP_TIME
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return DEFAULT_LOG_CLEANUP_TIME
     return f"{hour:02d}:{minute:02d}"
 
 
@@ -245,6 +260,10 @@ class ConfigStore:
         return self.data.get("log_auto_cleanup") is True
 
     @property
+    def log_cleanup_time(self) -> str:
+        return _normalize_log_cleanup_time(self.data.get("log_cleanup_time"))
+
+    @property
     def image_cleanup_interval_days(self) -> int:
         return _normalize_image_cleanup_interval_days(self.data.get("image_cleanup_interval_days"))
 
@@ -388,6 +407,7 @@ class ConfigStore:
         data["image_retention_days"] = self.image_retention_days
         data["log_retention_days"] = self.log_retention_days
         data["log_auto_cleanup"] = self.log_auto_cleanup
+        data["log_cleanup_time"] = self.log_cleanup_time
         data["image_cleanup_interval_days"] = self.image_cleanup_interval_days
         data["image_cleanup_time"] = self.image_cleanup_time
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
@@ -429,6 +449,8 @@ class ConfigStore:
             next_data["image_cleanup_time"] = _normalize_image_cleanup_time(next_data.get("image_cleanup_time"))
         if "log_retention_days" in next_data:
             next_data["log_retention_days"] = _normalize_log_retention_days(next_data.get("log_retention_days"))
+        if "log_cleanup_time" in next_data:
+            next_data["log_cleanup_time"] = _normalize_log_cleanup_time(next_data.get("log_cleanup_time"))
         if "chat_completion_cache" in next_data:
             next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(
                 next_data.get("chat_completion_cache")
