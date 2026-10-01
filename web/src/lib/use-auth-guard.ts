@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { getValidatedAuthSession } from "@/lib/auth-session";
+import { getValidatedAuthSession, peekAuthSession } from "@/lib/auth-session";
 import {
   getDefaultRouteForRole,
   type AuthRole,
@@ -17,8 +17,10 @@ type UseAuthGuardResult = {
 
 export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
   const router = useRouter();
-  const [session, setSession] = useState<StoredAuthSession | null>(null);
-  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  // 首帧就吃内存里的校验结果：站内跳转时缓存是热的，页面直接渲染出来，
+  // 而不是先亮一屏整页 loading 再被真实内容换掉——那一下就是"卡顿感"的来源。
+  const [session, setSession] = useState<StoredAuthSession | null>(() => peekAuthSession()?.session ?? null);
+  const [isCheckingAuth, setIsCheckingAuth] = useState(() => !peekAuthSession());
   const allowedRolesKey = (allowedRoles || []).join(",");
 
   useEffect(() => {
@@ -60,7 +62,7 @@ export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
 
 export function useRedirectIfAuthenticated() {
   const router = useRouter();
-  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [isCheckingAuth, setIsCheckingAuth] = useState(() => !peekAuthSession());
 
   useEffect(() => {
     let active = true;

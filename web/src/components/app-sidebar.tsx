@@ -22,7 +22,7 @@ import { HeaderActions } from "@/components/header-actions";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { VersionReleaseDialog } from "@/components/version-release-dialog";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { getValidatedAuthSession } from "@/lib/auth-session";
+import { getValidatedAuthSession, peekAuthSession } from "@/lib/auth-session";
 import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
@@ -60,7 +60,9 @@ function isActiveRoute(pathname: string, href: string) {
 
 function useNavSession(pathname: string) {
   const router = useRouter();
-  const [session, setSession] = useState<StoredAuthSession | null | undefined>(undefined);
+  const [session, setSession] = useState<StoredAuthSession | null | undefined>(
+    () => peekAuthSession()?.session,
+  );
 
   useEffect(() => {
     let active = true;
@@ -73,7 +75,10 @@ function useNavSession(pathname: string) {
         return;
       }
 
-      const storedSession = await getValidatedAuthSession();
+      // 页面守卫通常已经校验过并写进了内存缓存，跳转时直接复用，
+      // 不再每点一次导航就多打一发 /auth/login。
+      const cached = peekAuthSession();
+      const storedSession = cached ? cached.session : await getValidatedAuthSession();
       if (active) {
         setSession(storedSession);
       }
@@ -102,16 +107,28 @@ function NavList({
   pathname: string;
   onNavigate?: () => void;
 }) {
+  // 点下去的瞬间就把高亮挪过去，不等路由落地 —— 否则这一下"点了没反应"就是卡顿感的来源。
+  // 记下点击时的 pathname：它一变说明这一跳已经落地，高亮交还给真实路由状态。
+  const [pending, setPending] = useState<{ href: string; from: string } | null>(null);
+  if (pending && pending.from !== pathname) {
+    setPending(null);
+  }
+
   return (
     <nav className="flex flex-col gap-0.5">
       {items.map((item) => {
-        const active = isActiveRoute(pathname, item.href);
+        const active = pending
+          ? pending.href === item.href
+          : isActiveRoute(pathname, item.href);
         const Icon = item.icon;
         return (
           <Link
             key={item.href}
             href={item.href}
-            onClick={onNavigate}
+            onClick={() => {
+              setPending({ href: item.href, from: pathname });
+              onNavigate?.();
+            }}
             aria-current={active ? "page" : undefined}
             className={cn(
               "relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",

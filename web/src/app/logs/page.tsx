@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, HardDrive, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import { ContentLoading } from "@/components/content-loading";
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { ImageThumbnail, getImageThumbnailUrl } from "@/components/image-thumbnail";
@@ -340,7 +341,7 @@ function LogsContent() {
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-neutral-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-neutral-600">
-              <span>共 {items.length} 条</span>
+              <span>共 {isLoading && items.length === 0 ? "—" : items.length} 条</span>
               <label className="flex items-center gap-2">
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => toggleIds(currentRows.map((item) => item.id), Boolean(checked))} />
                 本页全选
@@ -381,6 +382,13 @@ function LogsContent() {
                 </TableRow>
               </TableHeader>
               <TableBody>
+                {isLoading && items.length === 0 ? (
+                  <TableRow className="hover:bg-transparent">
+                    <TableCell colSpan={isCallLog ? 9 : 5} className="p-0">
+                      <ContentLoading label="正在加载日志" />
+                    </TableCell>
+                  </TableRow>
+                ) : null}
                 {currentRows.map((item) => {
                   const urls = getUrls(item);
                   return (

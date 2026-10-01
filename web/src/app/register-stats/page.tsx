@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { LoaderCircle, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
+import { ContentLoading } from "@/components/content-loading";
 import { StatTile } from "@/components/stat-tile";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -99,25 +100,25 @@ function RegisterStatsContent() {
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           label="累计成功"
-          value={String(totals.success)}
+          value={isLoading ? "—" : String(totals.success)}
           caption="Cloudflare 临时邮箱"
           tone={SUCCESS_DOT}
         />
         <StatTile
           label="累计失败"
-          value={String(totals.fail)}
+          value={isLoading ? "—" : String(totals.fail)}
           caption="含超时与上游异常"
           tone={FAILED_DOT}
         />
         <StatTile
           label="累计总数"
-          value={String(totals.total)}
+          value={isLoading ? "—" : String(totals.total)}
           caption="成功 + 失败"
           tone={TOTAL_DOT}
         />
         <StatTile
           label="整体成功率"
-          value={totals.total ? `${totals.successRate.toFixed(1)}%` : "-"}
+          value={isLoading ? "—" : totals.total ? `${totals.successRate.toFixed(1)}%` : "-"}
           caption="按总数加权，非各域名平均"
           tone={RATE_DOT}
         />
@@ -131,7 +132,7 @@ function RegisterStatsContent() {
               每个域名的累计注册结果，「重置」不会清空这里的数据。
             </div>
           </div>
-          <DomainStatsTable stats={stats} />
+          {isLoading ? <ContentLoading label="正在加载注册统计" /> : <DomainStatsTable stats={stats} />}
         </CardContent>
       </Card>
     </section>

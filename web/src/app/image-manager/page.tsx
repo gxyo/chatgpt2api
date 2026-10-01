@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Tag, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
+import { ContentLoading } from "@/components/content-loading";
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { Badge } from "@/components/ui/badge";
@@ -477,6 +478,7 @@ function ImageManagerContent() {
               </Button>
             </div>
           </div>
+          {isLoading && filteredItems.length === 0 ? <ContentLoading label="正在加载图片" /> : null}
           <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {currentRows.map((item) => {
               const imageIndex = filteredItems.findIndex((row) => row.url === item.url);

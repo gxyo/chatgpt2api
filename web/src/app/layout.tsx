@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Toaster } from "sonner";
 import "./globals.css";
 import { AppSidebar, MobileNavBar } from "@/components/app-sidebar";
+import { PageTransition } from "@/components/page-transition";
 import { ThemeScript } from "@/components/theme-script";
 
 export const metadata: Metadata = {
@@ -45,9 +46,7 @@ export default function RootLayout({
               页面里需要整屏的区块（生图 / 注册机）直接 flex-1 即可，无需各自算 dvh。
               gap 保留页面内多段内容（标题区 + 卡片区）之间的原有间距。 */}
           <main className="flex min-w-0 flex-1 flex-col lg:pl-60">
-            <div className="mx-auto box-border flex w-full max-w-[1440px] flex-1 flex-col gap-2 px-4 py-4 sm:gap-5 sm:px-6 sm:py-5 lg:px-8 lg:py-6">
-              {children}
-            </div>
+            <PageTransition>{children}</PageTransition>
           </main>
         </div>
       </body>

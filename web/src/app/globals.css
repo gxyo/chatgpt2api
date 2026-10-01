@@ -256,6 +256,30 @@ html:not(.dark) .border-white\/90 {
   to { transform: scaleX(1); }
 }
 
+/* 路由内容入场：淡入 + 轻微上浮。终点必须落在 transform: none —— 带 fill-mode
+   的动画会一直保留最后一帧，留个 translate3d(0,0,0) 就等于给内容区里的 fixed
+   元素凭空造出一个包含块，登录页那个 fixed 的头部按钮会被带偏。 */
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-page-enter {
+  animation: page-enter 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-page-enter {
+    animation: none;
+  }
+}
+
 ::view-transition-old(root), ::view-transition-new(root) {
     animation: none;
     mix-blend-mode: normal;
