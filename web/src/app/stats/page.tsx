@@ -5,7 +5,7 @@ import { LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
-import { ImageModeChart, ImageModeLegend } from "@/components/image-mode-chart";
+import { ImageModeChart } from "@/components/image-mode-chart";
 import { ImageStatsChart } from "@/components/image-stats-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -235,14 +235,11 @@ function StatsContent() {
 
       <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="space-y-4 p-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className="font-semibold text-stone-900 dark:text-stone-50">按调用方式</div>
-              <div className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">
-                条形总长 = 请求数，长度按最大的一条归一
-              </div>
+          <div>
+            <div className="font-semibold text-stone-900 dark:text-stone-50">按调用方式</div>
+            <div className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">
+              条形长度 = 各方式占总请求的比重；成功率条满格为 100%
             </div>
-            <ImageModeLegend className="pt-0.5" />
           </div>
           <ImageModeChart modes={data?.by_mode ?? []} />
         </CardContent>
