@@ -197,6 +197,8 @@ export type CloudflareDomainStat = {
   total: number;
   success_rate: number;
   updated_at?: string;
+  /** 是否仍在注册机页的域名列表里。false = 已从配置移除，但历史计数永久保留。 */
+  configured?: boolean;
 };
 
 export type RegisterConfig = {

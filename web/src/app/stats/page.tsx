@@ -5,18 +5,13 @@ import { LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
-import { DomainRegisterStats } from "@/components/domain-register-stats";
 import { ImageModeChart } from "@/components/image-mode-chart";
 import { ImageStatsChart } from "@/components/image-stats-chart";
+import { StatTile } from "@/components/stat-tile";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, statCardClass } from "@/components/ui/card";
-import {
-  fetchImageStats,
-  fetchRegisterConfig,
-  type CloudflareDomainStat,
-  type ImageStatsResponse,
-} from "@/lib/api";
+import { Card, CardContent } from "@/components/ui/card";
+import { fetchImageStats, type ImageStatsResponse } from "@/lib/api";
 import { getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -47,33 +42,6 @@ function formatDuration(value: number) {
   return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value} ms`;
 }
 
-function StatTile({
-  label,
-  value,
-  caption,
-  tone,
-}: {
-  label: string;
-  value: string;
-  caption?: string;
-  tone: string;
-}) {
-  return (
-    <Card className={statCardClass}>
-      <CardContent className="p-5">
-        <div className="flex items-center gap-2 text-xs font-medium text-neutral-500 dark:text-neutral-400">
-          <span className={cn("size-2 rounded-full", tone)} />
-          {label}
-        </div>
-        <div className="mt-3 text-3xl leading-none font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
-          {value}
-        </div>
-        <div className="mt-2 min-h-4 text-xs text-neutral-400 dark:text-neutral-500">{caption}</div>
-      </CardContent>
-    </Card>
-  );
-}
-
 function StatsContent() {
   const today = useMemo(() => getBeijingToday(), []);
   const [startDate, setStartDate] = useState(today);
@@ -82,24 +50,9 @@ function StatsContent() {
   const [preset, setPreset] = useState<PresetKey | null>("today");
   const [data, setData] = useState<ImageStatsResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [domainStats, setDomainStats] = useState<CloudflareDomainStat[]>([]);
-
-  // 域名注册表现的数据源是注册配置。它是历史累计值，和日期区间无关，
-  // 但挂在主统计的加载流程里最省事——查询/刷新/切换区间都会顺带更新它。
-  // 只是附加信息，拉失败就清空，不打断主统计。
-  const loadDomainStats = async () => {
-    try {
-      const payload = await fetchRegisterConfig();
-      setDomainStats(payload.register.cloudflare_domain_stats ?? []);
-    } catch {
-      setDomainStats([]);
-    }
-  };
 
   const loadStats = async (nextPreset = preset, start = startDate, end = endDate) => {
     setIsLoading(true);
-    // 不 await：域名这块独立失败，不该拖住或影响主统计的加载态。
-    void loadDomainStats();
     try {
       const filters =
         nextPreset === "all" ? { scope: "all" as const } : { start_date: start, end_date: end };
@@ -265,8 +218,6 @@ function StatsContent() {
           <ImageModeChart modes={data?.by_mode ?? []} />
         </CardContent>
       </Card>
-
-      <DomainRegisterStats stats={domainStats} />
 
       <div className="flex justify-end">
         <Button

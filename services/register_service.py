@@ -36,6 +36,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _safe_count(value: object) -> int:
+    """把计数收敛成非负整数。
+
+    存储文件可能被手工编辑过，非数字会让 int() 抛 ValueError——在 get() 里抛会让
+    /api/register 和 SSE 直接 500，在 _load() 里抛会把整份配置（含全部计数）静默重置。
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _normalize_cloudflare_domain_stats(value: object) -> list[dict]:
     rows = value if isinstance(value, list) else []
     normalized: list[dict] = []
@@ -46,8 +58,8 @@ def _normalize_cloudflare_domain_stats(value: object) -> list[dict]:
         domain = str(item.get("domain") or "").strip().lower().rstrip(".")
         if not domain:
             continue
-        success = max(0, int(item.get("success") or 0))
-        fail = max(0, int(item.get("fail") or 0))
+        success = _safe_count(item.get("success"))
+        fail = _safe_count(item.get("fail"))
         existing = by_domain.get(domain)
         if existing:
             existing["success"] += success
@@ -140,30 +152,44 @@ class RegisterService:
                     domains.append(domain)
         return domains
 
+    @staticmethod
+    def _cloudflare_domain_stats_row(item: dict, *, configured: bool) -> dict:
+        """显式列出字段而不是 {**item}：存储里若有遗留杂键，会被 get() 原样回吐。"""
+        success = _safe_count(item.get("success"))
+        fail = _safe_count(item.get("fail"))
+        total = success + fail
+        return {
+            "domain": item["domain"],
+            "success": success,
+            "fail": fail,
+            "total": total,
+            "success_rate": round(success * 100 / total, 1) if total else 0,
+            "updated_at": str(item.get("updated_at") or ""),
+            "configured": configured,
+        }
+
     def _cloudflare_domain_stats_snapshot(self) -> list[dict]:
+        """按域名返回累计注册结果：当前配置的域名 + 已从配置删除但仍有历史计数的域名。
+
+        未产生过结果的配置域名只作为零计数占位行出现在视图里，不写入存储，删除后自然消失；
+        已删除域名的历史行永久保留（configured=False），改配置不会清空累计值。
+
+        顺序必须跨调用稳定：SSE（api/register.py）是靠 json.dumps(get()) 逐次比对来决定要不要推的，
+        顺序一变就会每 0.5 秒给所有客户端重推一遍。updated_at 常为空串，不能当 tie-breaker。
+        """
         stored = _normalize_cloudflare_domain_stats(self._config.get("cloudflare_domain_stats"))
         by_domain = {item["domain"]: item for item in stored}
-        ordered_domains = self._configured_cloudflare_domains()
-        result = []
-        for domain in ordered_domains:
-            item = by_domain.get(domain, {"domain": domain, "success": 0, "fail": 0, "updated_at": ""})
-            success = int(item.get("success") or 0)
-            fail = int(item.get("fail") or 0)
-            total = success + fail
-            result.append({
-                **item,
-                "total": total,
-                "success_rate": round(success * 100 / total, 1) if total else 0,
-            })
+        configured_domains = self._configured_cloudflare_domains()
+        configured_set = set(configured_domains)
+        result: list[dict] = []
+        for domain in configured_domains:
+            item = by_domain.get(domain) or {"domain": domain, "success": 0, "fail": 0, "updated_at": ""}
+            result.append(self._cloudflare_domain_stats_row(item, configured=True))
+        for item in sorted(stored, key=lambda row: row["domain"]):
+            if item["domain"] in configured_set:
+                continue
+            result.append(self._cloudflare_domain_stats_row(item, configured=False))
         return result
-
-    def _prune_unconfigured_cloudflare_domain_stats(self) -> None:
-        configured_domains = set(self._configured_cloudflare_domains())
-        self._config["cloudflare_domain_stats"] = [
-            item
-            for item in _normalize_cloudflare_domain_stats(self._config.get("cloudflare_domain_stats"))
-            if item["domain"] in configured_domains
-        ]
 
     def _record_mailbox_result(self, mailbox: dict, *, success: bool, error: Exception | str | None = None) -> None:
         if str(mailbox.get("provider") or "") != "cloudflare_temp_email":
@@ -172,8 +198,6 @@ class RegisterService:
         if not domain:
             return
         with self._lock:
-            if domain not in self._configured_cloudflare_domains():
-                return
             rows = _normalize_cloudflare_domain_stats(self._config.get("cloudflare_domain_stats"))
             row = next((item for item in rows if item["domain"] == domain), None)
             if row is None:
@@ -260,9 +284,12 @@ class RegisterService:
 
     def update(self, updates: dict) -> dict:
         with self._lock:
+            # 累计账本只归服务端所有：请求模型里本来就没有这个字段，这里再挡一道，
+            # 免得将来谁加上它之后，一个空数组就能把历史计数全清空。
+            # 用推导式建新 dict，不要就地改调用方的入参（测试会复用传入的配置字典）。
+            updates = {k: v for k, v in updates.items() if k != "cloudflare_domain_stats"}
             self._merge_outlook_pools(updates)
             self._config = _normalize({**self._config, **updates})
-            self._prune_unconfigured_cloudflare_domain_stats()
             self._drop_mail_proxy()
             openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "engine")})
             self._save()
