@@ -71,7 +71,6 @@ OAUTH_HOSTS = frozenset({"auth.openai.com", "platform.openai.com"})
 OAUTH_STATIC_RESOURCE_TYPES = frozenset({"stylesheet", "image", "font", "media"})
 # Worker / Service Worker 的请求没有 frame，callback 出现后它们同样能把 code 换掉。
 OAUTH_FRAMELESS_BLOCK_TYPES = frozenset({"xhr", "fetch", "other", "ping", "eventsource"})
-OAUTH_REDIRECT_HOPS = 4
 OAUTH_TOKEN_EXCHANGE_ATTEMPTS = 3
 OAUTH_TRANSIENT_STATUSES = ("status=429", "status=500", "status=502", "status=503", "status=504")
 
@@ -187,33 +186,6 @@ def _should_block_browser_oauth_request(request) -> str:
     return f"callback 页面出站请求 ({resource_type})"
 
 
-def _should_inspect_navigation(request) -> bool:
-    """True for the navigation leaving the profile step — the hop that turns into the callback."""
-    try:
-        if str(request.resource_type or "") != "document":
-            return False
-        frame = request.frame
-    except Exception:
-        return False
-    return _page_at_profile(frame)
-
-
-def _should_peek_redirect_chain(request) -> bool:
-    """True only for hops taken while the page sits on the profile step.
-
-    The callback can only be imminent after the profile is submitted. Peeking anywhere else
-    corrupts unrelated navigations: the signup page load itself goes through
-    ``auth.openai.com/oauth/authorize?screen_hint=signup&code_challenge=...``, and replacing
-    that redirect with a fetched response leaves the platform SPA on an unroutable page
-    ("no result found for routeId LEGACY_LOGIN_WEB_PAGE_SPLAT") with no email input.
-    """
-    try:
-        frame = request.frame
-    except Exception:
-        return False
-    return _page_at_profile(frame)
-
-
 def _should_block_frameless_request(request, callback_seen: bool) -> str:
     """Block Worker / Service Worker requests aimed at OpenAI once the callback is in play.
 
@@ -266,51 +238,28 @@ async def _install_oauth_routes(
         _record(f"获取 OAuth code（{how}）code_fp={_secret_fingerprint(code)}")
         step(index, "已拦截到 OAuth code")
 
-    async def _inspect_navigation(route, url: str) -> bool:
-        """Walk this navigation's redirect chain ourselves, stopping before the callback.
+    def _on_response(response) -> None:
+        """Read the code off the 302 that points at the callback.
 
-        浏览器会跟着 302 走进 callback 页，而跳转目标拦不住；自己走一遍就能在
-        ``Location`` 上拿到 code，并且永远不把 callback 请求发出去。
+        跳转目标路由不到，但 ``page.on("response")`` 看得到那一跳的 ``location``。
+        这是纯观察：不改写、不重发任何请求，所以不可能影响注册流程本身；
+        它只是把拿到 code 的时刻从"轮询 page.url"提前到"code 刚签发的那一刻"。
         """
-        next_url = url
-        response = None
-        for _ in range(OAUTH_REDIRECT_HOPS):
-            # 每一跳都要换成我们的 challenge：链中间那跳（authorize）才是真正签发 code 的，
-            # 用浏览器原来的 challenge 去签，code 就和我们的 verifier 对不上。
-            if "code_challenge=" in next_url:
-                next_url = _replace_pkce_params(next_url, code_challenge)
-            try:
-                response = await route.fetch(url=next_url, max_redirects=0)
-            except Exception as error:
-                _record(f"预取失败，交回浏览器 {urlparse(next_url).path}: {error}")
-                return False
-            location = ""
-            try:
-                location = str((response.headers or {}).get("location") or "")
-            except Exception:
-                location = ""
-            target = urljoin(next_url, location) if location else ""
-            _record(
-                f"预取 {urlparse(next_url).netloc}{urlparse(next_url).path} -> {response.status}"
-                + (f" location={urlparse(target).netloc}{urlparse(target).path}" if target else "")
-            )
-            code = _oauth_callback_code(target)
-            if code:
-                _capture(code, "跳转 Location")
-                await route.fulfill(
-                    status=200,
-                    content_type="text/html; charset=utf-8",
-                    body=OAUTH_CALLBACK_STUB,
-                )
-                return True
-            if not target or response.status < 300 or response.status >= 400:
-                break
-            next_url = target
-        if response is None:
-            return False
-        # 不是 callback 就原样还给浏览器（含 Set-Cookie）。
-        await route.fulfill(response=response)
-        return True
+        if state["callback_seen"]:
+            return
+        try:
+            status = int(response.status)
+            if status < 300 or status >= 400:
+                return
+            location = str((response.headers or {}).get("location") or "")
+            if not location:
+                return
+            target = urljoin(str(response.url or ""), location)
+        except Exception:
+            return
+        code = _oauth_callback_code(target)
+        if code:
+            _capture(code, "响应 Location")
 
     async def _handler(route) -> None:
         request = route.request
@@ -340,13 +289,6 @@ async def _install_oauth_routes(
                         f"original_fp={_secret_fingerprint(original)}, "
                         f"replacement_fp={_secret_fingerprint(code_challenge)}",
                     )
-                # 资料页上的 authorize 就是那条通往 callback 的链的起点：它的 302 目标拦不住，
-                # 所以不交回浏览器，由我们走完这条链。命中 callback 就地收码并结束导航，
-                # 平台的 callback 请求从头到尾不会发出去。
-                # 只在资料页这么做：注册页自己那次 authorize 是普通页面加载，预取会把它弄坏。
-                if not state["callback_seen"] and _should_peek_redirect_chain(request):
-                    if await _inspect_navigation(route, url):
-                        return
                 await route.continue_(url=_replace_pkce_params(url, code_challenge))
                 return
             reason = _should_block_browser_oauth_request(request)
@@ -361,9 +303,6 @@ async def _install_oauth_routes(
                     step(index, f"OAuth trace: 阻断 callback 请求 {method} {url[:160]}", "yellow")
                 await route.abort("blockedbyclient")
                 return
-            if not state["callback_seen"] and _should_inspect_navigation(request):
-                if await _inspect_navigation(route, url):
-                    return
         except Exception as error:
             _record(f"路由异常放行 {method} {urlparse(url).path}: {error}")
             if _trace_enabled():
@@ -371,6 +310,7 @@ async def _install_oauth_routes(
         await route.continue_()
 
     await page.route(OAUTH_ROUTE_PATTERN, _handler)
+    page.on("response", _on_response)
 
 
 def _install_oauth_trace(page, index: int) -> None:
@@ -827,13 +767,18 @@ async def _browser_register_flow(
 
     step(index, f"点击继续后页面: {page.url}")
 
-    password_set = await _run_signup_state_machine(
-        page, index, password, name, age, mailbox, captured_code
-    )
+    try:
+        password_set = await _run_signup_state_machine(
+            page, index, password, name, age, mailbox, captured_code
+        )
+    except Exception:
+        # 状态机死掉时（比如停在认不出的页面上）也要留下拦截记录，
+        # 否则日志里只有一句"无法识别注册流程页面"，看不到前面发生了什么。
+        step(index, f"OAuth 诊断: 状态机中止于 {page.url[:120]}", "yellow")
+        _dump_oauth_events()
+        raise
     if not password_set:
         step(index, "当前流程未提供密码设置入口，账号将按无密码方式保存", "yellow")
-
-    step(index, "等待获取 OAuth code")
     for _ in range(15):
         if captured_code:
             break
@@ -843,11 +788,10 @@ async def _browser_register_flow(
             params = parse_qs(parsed.query)
             c = (params.get("code") or [""])[0]
             if c:
-                # 正常路径是预取时从 Location 里拿到 code。走到这里说明浏览器真的落到了
-                # callback 页，平台的服务端很可能已经先兑换过（失败的兑换也会烧掉 code），
-                # 所以既收下也报出来，方便下次排查预取为什么没接住。
+                # 正常路径是响应监听在 302 那一跳就拿到 code。走到这里说明监听没接住，
+                # 我们是在浏览器已经落到 callback 页之后才开始兑换，大概率已经晚了。
                 captured_code.append(c)
-                step(index, "OAuth 诊断: 兜底从浏览器 URL 取码（预取未接住，callback 可能已被平台兑换）", "yellow")
+                step(index, "OAuth 诊断: 兜底从浏览器 URL 取码（响应监听未接住，可能已晚一步）", "yellow")
                 _dump_oauth_events()
                 break
         await page.wait_for_timeout(2000)
