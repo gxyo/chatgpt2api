@@ -13,9 +13,11 @@ type DateRangeFilterProps = {
   startDate: string;
   endDate: string;
   onChange: (startDate: string, endDate: string) => void;
+  /** 未选日期时按钮上的文案，用于表达「全部时间」这类由外部预设决定的范围。 */
+  placeholder?: string;
 };
 
-export function DateRangeFilter({ startDate, endDate, onChange }: DateRangeFilterProps) {
+export function DateRangeFilter({ startDate, endDate, onChange, placeholder = "选择日期范围" }: DateRangeFilterProps) {
   const selected: DateRange | undefined = startDate
     ? {
         from: parse(startDate, "yyyy-MM-dd", new Date()),
@@ -23,7 +25,7 @@ export function DateRangeFilter({ startDate, endDate, onChange }: DateRangeFilte
       }
     : undefined;
 
-  const label = startDate ? `${startDate} 至 ${endDate || startDate}` : "选择日期范围";
+  const label = startDate ? `${startDate} 至 ${endDate || startDate}` : placeholder;
 
   return (
     <Field className="w-[240px]">

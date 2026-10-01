@@ -737,6 +737,8 @@ export type ImageStatsResponse = {
     end_date: string;
     granularity: "hour" | "day";
     days: number;
+    /** "all" 表示「全部」查询，此时区间由后端按已有记录的最早一天算出。 */
+    scope: "all" | "range";
   };
   totals: {
     requests: number;
@@ -750,10 +752,11 @@ export type ImageStatsResponse = {
   peak: ImageStatsPoint | null;
 };
 
-export async function fetchImageStats(filters: { start_date?: string; end_date?: string }) {
+export async function fetchImageStats(filters: { start_date?: string; end_date?: string; scope?: "all" }) {
   const params = new URLSearchParams();
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
+  if (filters.scope) params.set("scope", filters.scope);
   return httpRequest<ImageStatsResponse>(`/api/stats/images${params.toString() ? `?${params.toString()}` : ""}`);
 }
 

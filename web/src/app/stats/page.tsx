@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, LoaderCircle, RefreshCw, Search } from "lucide-react";
+import { LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
+import { ImageModeChart, ImageModeLegend } from "@/components/image-mode-chart";
 import { ImageStatsChart } from "@/components/image-stats-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,7 +19,20 @@ import { cn } from "@/lib/utils";
 const REQUESTS_DOT = "bg-[#2a78d6] dark:bg-[#3987e5]";
 const SUCCESS_DOT = "bg-[#2a78d6]/50 dark:bg-[#3987e5]/50";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
+const FAILED_TEXT = "text-[#d03b3b] dark:text-[#e66767]";
 const NEUTRAL_DOT = "bg-stone-300 dark:bg-stone-600";
+// 表头吸附在滚动容器顶部；背景用 bg-stone-50，暗色由 globals.css 的 .dark 覆盖统一处理。
+const HEAD_CELL = "sticky top-0 z-10 bg-stone-50";
+
+// days=0 表示不按天数取区间，交给后端按已有记录算「全部」。
+const PRESETS = [
+  { key: "today", label: "今天", days: 1 },
+  { key: "week", label: "近 7 天", days: 7 },
+  { key: "month", label: "近 30 天", days: 30 },
+  { key: "all", label: "全部", days: 0 },
+] as const;
+
+type PresetKey = (typeof PRESETS)[number]["key"];
 
 function formatRate(value: number) {
   return `${(value * 100).toFixed(1)}%`;
@@ -62,14 +76,17 @@ function StatsContent() {
   const today = useMemo(() => getBeijingToday(), []);
   const [startDate, setStartDate] = useState(today);
   const [endDate, setEndDate] = useState(today);
+  // 预设按钮的高亮状态；手动选过日期后置空，表示当前是自定义区间。
+  const [preset, setPreset] = useState<PresetKey | null>("today");
   const [data, setData] = useState<ImageStatsResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [showTable, setShowTable] = useState(false);
 
-  const loadStats = async (start = startDate, end = endDate) => {
+  const loadStats = async (nextPreset = preset, start = startDate, end = endDate) => {
     setIsLoading(true);
     try {
-      setData(await fetchImageStats({ start_date: start, end_date: end }));
+      const filters =
+        nextPreset === "all" ? { scope: "all" as const } : { start_date: start, end_date: end };
+      setData(await fetchImageStats(filters));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载统计数据失败");
     } finally {
@@ -78,15 +95,20 @@ function StatsContent() {
   };
 
   useEffect(() => {
-    void loadStats(startDate, endDate);
-    // 与 logs / image-manager 页面一致：日期变化即重新拉取。
-  }, [startDate, endDate]);
+    void loadStats(preset, startDate, endDate);
+    // 与 logs / image-manager 页面一致：筛选条件变化即重新拉取。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preset, startDate, endDate]);
 
-  const applyPreset = (days: number) => {
+  const applyPreset = (key: PresetKey, days: number) => {
+    if (key === "all") {
+      setPreset("all");
+      return;
+    }
     const end = getBeijingToday();
-    const start = days <= 1 ? end : shiftDate(end, -(days - 1));
-    setStartDate(start);
+    setStartDate(days <= 1 ? end : shiftDate(end, -(days - 1)));
     setEndDate(end);
+    setPreset(key);
   };
 
   const totals = data?.totals;
@@ -97,7 +119,7 @@ function StatsContent() {
       ? `${range.start_date} 全天 · 按小时`
       : `${range.start_date} 至 ${range.end_date} · 按天`
     : "";
-  const maxModeRequests = Math.max(1, ...(data?.by_mode ?? []).map((item) => item.requests));
+  const axisLabel = granularity === "hour" ? "小时" : "日期";
   const visibleRows = (data?.series ?? []).filter((point) => point.requests > 0);
 
   return (
@@ -112,27 +134,31 @@ function StatsContent() {
         </div>
         <div className="flex flex-wrap gap-2">
           <div className="flex items-center gap-1 rounded-xl border border-stone-200 bg-white p-1 dark:border-white/10 dark:bg-white/5">
-            {[
-              { label: "今天", days: 1 },
-              { label: "近 7 天", days: 7 },
-              { label: "近 30 天", days: 30 },
-            ].map((preset) => (
+            {PRESETS.map((item) => (
               <button
-                key={preset.days}
+                key={item.key}
                 type="button"
-                className="rounded-lg px-3 py-1.5 text-[13px] font-medium text-stone-600 transition hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white"
-                onClick={() => applyPreset(preset.days)}
+                aria-pressed={preset === item.key}
+                className={cn(
+                  "rounded-lg px-3 py-1.5 text-[13px] font-medium transition",
+                  preset === item.key
+                    ? "bg-stone-900 text-white shadow-sm dark:bg-white dark:text-stone-900"
+                    : "text-stone-600 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
+                )}
+                onClick={() => applyPreset(item.key, item.days)}
               >
-                {preset.label}
+                {item.label}
               </button>
             ))}
           </div>
           <DateRangeFilter
-            startDate={startDate}
-            endDate={endDate}
+            startDate={preset === "all" ? "" : startDate}
+            endDate={preset === "all" ? "" : endDate}
+            placeholder={preset === "all" ? "全部时间" : "选择日期范围"}
             onChange={(start, end) => {
               setStartDate(start);
               setEndDate(end);
+              setPreset(null);
             }}
           />
           <Button
@@ -141,6 +167,7 @@ function StatsContent() {
             onClick={() => {
               setStartDate(today);
               setEndDate(today);
+              setPreset("today");
             }}
           >
             重置
@@ -213,84 +240,78 @@ function StatsContent() {
         </CardContent>
       </Card>
 
-      <div className="grid gap-5 lg:grid-cols-2">
-        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="space-y-4 p-5">
-            <div className="font-semibold text-stone-900 dark:text-stone-50">按调用方式</div>
-            {(data?.by_mode ?? []).map((item) => (
-              <div key={item.mode} className="space-y-2">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="flex items-center gap-2 text-stone-600 dark:text-stone-300">
-                    {item.label}
-                    {item.failed > 0 ? (
-                      <span className="text-xs text-rose-500">失败 {item.failed}</span>
-                    ) : null}
-                  </span>
-                  <span className="font-medium text-stone-900 dark:text-stone-100">{item.requests}</span>
-                </div>
-                <div className="h-2 w-full overflow-hidden rounded-full bg-[#cde2fb] dark:bg-[#184f95]/40">
-                  <div
-                    className={cn("h-full rounded-full", REQUESTS_DOT)}
-                    style={{ width: `${(item.requests / maxModeRequests) * 100}%` }}
-                  />
-                </div>
+      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+        <CardContent className="space-y-4 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="font-semibold text-stone-900 dark:text-stone-50">按调用方式</div>
+              <div className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">
+                条形总长 = 请求数，长度按最大的一条归一
               </div>
-            ))}
-          </CardContent>
-        </Card>
+            </div>
+            <ImageModeLegend className="pt-0.5" />
+          </div>
+          <ImageModeChart modes={data?.by_mode ?? []} />
+        </CardContent>
+      </Card>
 
-        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="p-5">
-            <button
-              type="button"
-              className="flex w-full items-center justify-between text-left"
-              onClick={() => setShowTable((value) => !value)}
-            >
-              <span className="font-semibold text-stone-900 dark:text-stone-50">数据表</span>
-              <span className="flex items-center gap-2 text-xs text-stone-500 dark:text-stone-400">
-                共 {visibleRows.length} 条有数据的{granularity === "hour" ? "小时" : "日期"}
-                <ChevronDown className={cn("size-4 transition", showTable ? "rotate-180" : "")} />
-              </span>
-            </button>
+      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+        <CardContent className="space-y-4 p-5">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div className="font-semibold text-stone-900 dark:text-stone-50">数据表</div>
+            <div className="text-xs text-stone-500 dark:text-stone-400">
+              共 {visibleRows.length} 条有数据的{axisLabel}
+            </div>
+          </div>
 
-            {showTable ? (
-              <div className="mt-4 max-h-[320px] overflow-auto rounded-xl border border-stone-100 dark:border-white/10">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>{granularity === "hour" ? "小时" : "日期"}</TableHead>
-                      <TableHead className="text-right">请求数</TableHead>
-                      <TableHead className="text-right">成功</TableHead>
-                      <TableHead className="text-right">失败</TableHead>
-                      <TableHead className="text-right">成功率</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {visibleRows.map((point) => (
-                      <TableRow key={point.key} className="text-stone-600 dark:text-stone-300">
-                        <TableCell className="whitespace-nowrap">{point.full_label}</TableCell>
-                        <TableCell className="text-right tabular-nums">{point.requests}</TableCell>
-                        <TableCell className="text-right tabular-nums">{point.success}</TableCell>
-                        <TableCell className="text-right tabular-nums">{point.failed}</TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {formatRate(point.success / point.requests)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                    {visibleRows.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={5} className="py-8 text-center text-sm text-stone-400">
-                          该时间段没有生图请求
-                        </TableCell>
-                      </TableRow>
-                    ) : null}
-                  </TableBody>
-                </Table>
-              </div>
-            ) : null}
-          </CardContent>
-        </Card>
-      </div>
+          <div className="max-h-[420px] overflow-auto rounded-xl border border-stone-100 dark:border-white/10">
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className={HEAD_CELL}>{axisLabel}</TableHead>
+                  <TableHead className={cn(HEAD_CELL, "text-right")}>请求数</TableHead>
+                  <TableHead className={cn(HEAD_CELL, "text-right")}>成功</TableHead>
+                  <TableHead className={cn(HEAD_CELL, "text-right")}>失败</TableHead>
+                  <TableHead className={cn(HEAD_CELL, "text-right")}>成功率</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {visibleRows.map((point) => (
+                  <TableRow key={point.key}>
+                    <TableCell className="px-4 py-2.5 whitespace-nowrap text-stone-600 dark:text-stone-300">
+                      {point.full_label}
+                    </TableCell>
+                    <TableCell className="px-4 py-2.5 text-right font-medium text-stone-900 tabular-nums dark:text-stone-100">
+                      {point.requests}
+                    </TableCell>
+                    <TableCell className="px-4 py-2.5 text-right text-stone-600 tabular-nums dark:text-stone-300">
+                      {point.success}
+                    </TableCell>
+                    <TableCell
+                      className={cn(
+                        "px-4 py-2.5 text-right tabular-nums",
+                        point.failed > 0 ? cn("font-medium", FAILED_TEXT) : "text-stone-400",
+                      )}
+                    >
+                      {point.failed}
+                    </TableCell>
+                    <TableCell className="px-4 py-2.5 text-right text-stone-600 tabular-nums dark:text-stone-300">
+                      {formatRate(point.success / point.requests)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {visibleRows.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="py-10 text-center text-sm text-stone-400">
+                      该时间段没有生图请求
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="flex justify-end">
         <Button

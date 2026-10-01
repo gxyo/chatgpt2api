@@ -29,6 +29,9 @@ GRANULARITY_DAY = "day"
 # 单次查询最多返回的每日数据点，超出时只统计最近的这一段。
 MAX_SERIES_POINTS = 1000
 _STATUS_SUCCESS = "success"
+# scope=all：不从入参取日期，改为从聚合里已知的最早一天算到今天。
+SCOPE_ALL = "all"
+SCOPE_RANGE = "range"
 
 # 聚合快照的落盘格式版本。格式变了就换版本号，旧快照会被忽略并重建。
 SNAPSHOT_VERSION = 1
@@ -370,16 +373,27 @@ class ImageStatsService:
             bucket = self._hours.setdefault(hour_key, _empty_bucket())
             _accumulate(bucket, mode=mode, status=status, duration_ms=duration_ms)
 
-    def summary(self, start_date: str = "", end_date: str = "") -> dict[str, Any]:
-        start, end = _normalize_range(start_date, end_date)
-        days = _iter_days(start, end)
-        if days:
-            # 超出上限时只统计最近的一段，返回的 range 与统计口径保持一致。
-            start, end = days[0], days[-1]
+    def summary(self, start_date: str = "", end_date: str = "", scope: str = "") -> dict[str, Any]:
+        scope = SCOPE_ALL if (scope or "").strip().lower() == SCOPE_ALL else SCOPE_RANGE
 
         # 汇总全程持锁：既避免并发查询各自重扫一遍，也避免读到正被 _consume 改写的桶。
+        # scope=all 的起点要读聚合，所以区间归一化也一并放进锁里。
         with self._lock:
             self._refresh()
+            if scope == SCOPE_ALL:
+                # 全部：从聚合里最早的一天算到今天。聚合只增不减，所以这里给的是「有记录以来的全部」，
+                # 日志过了保留期被清掉也不影响更早的统计。
+                start = min(self._hours)[:10] if self._hours else beijing_today()
+                end = beijing_today()
+                if end < start:
+                    start = end
+            else:
+                start, end = _normalize_range(start_date, end_date)
+            days = _iter_days(start, end)
+            if days:
+                # 超出上限时只统计最近的一段，返回的 range 与统计口径保持一致。
+                start, end = days[0], days[-1]
+
             hours = self._hours
             granularity = GRANULARITY_HOUR if start == end else GRANULARITY_DAY
 
@@ -420,6 +434,7 @@ class ImageStatsService:
                 "end_date": end,
                 "granularity": granularity,
                 "days": len(days),
+                "scope": scope,
             },
             "totals": {
                 "requests": requests,
@@ -437,11 +452,13 @@ class ImageStatsService:
 image_stats_service = ImageStatsService(log_service.path)
 
 
-def build_image_stats(start_date: str = "", end_date: str = "") -> dict[str, Any]:
-    return image_stats_service.summary(start_date, end_date)
+def build_image_stats(start_date: str = "", end_date: str = "", scope: str = "") -> dict[str, Any]:
+    return image_stats_service.summary(start_date, end_date, scope)
 
 
 __all__ = [
+    "SCOPE_ALL",
+    "SCOPE_RANGE",
     "ImageStatsService",
     "beijing_now",
     "beijing_today",

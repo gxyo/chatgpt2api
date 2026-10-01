@@ -149,10 +149,15 @@ def create_router(app_version: str) -> APIRouter:
         return await run_in_threadpool(cleanup_logs, body.days)
 
     @router.get("/api/stats/images")
-    async def get_image_stats(start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_image_stats(
+        start_date: str = "",
+        end_date: str = "",
+        scope: str = "",
+        authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
         try:
-            return await run_in_threadpool(build_image_stats, start_date.strip(), end_date.strip())
+            return await run_in_threadpool(build_image_stats, start_date.strip(), end_date.strip(), scope.strip())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 

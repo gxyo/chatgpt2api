@@ -155,6 +155,61 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(result["range"]["end_date"], "2026-09-30")
         self.assertEqual(len(result["series"]), stats_service.MAX_SERIES_POINTS)
 
+    def test_scope_all_spans_from_the_earliest_recorded_day(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 09:00:00", "/v1/images/generations"),
+                log_line("2026-09-30 10:00:00", "/v1/images/edits"),
+            ])
+
+            result = service.summary(scope="all")
+
+        self.assertEqual(result["range"]["scope"], "all")
+        self.assertEqual(result["range"]["start_date"], "2026-09-28")
+        self.assertEqual(result["range"]["end_date"], beijing_today())
+        self.assertEqual(result["range"]["granularity"], "day")
+        self.assertEqual(result["totals"]["requests"], 2)
+
+    def test_scope_all_without_records_falls_back_to_today(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [])
+
+            result = service.summary(scope="all")
+
+        self.assertEqual(result["range"]["start_date"], beijing_today())
+        self.assertEqual(result["range"]["end_date"], beijing_today())
+        self.assertEqual(result["range"]["granularity"], "hour")
+        self.assertEqual(len(result["series"]), 24)
+        self.assertEqual(result["totals"]["requests"], 0)
+
+    def test_scope_all_keeps_days_that_the_log_no_longer_has(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text(
+                log_line("2026-09-28 09:00:00", "/v1/images/generations") + "\n"
+                + log_line("2026-09-30 09:00:00", "/v1/images/generations") + "\n",
+                encoding="utf-8",
+            )
+            service = ImageStatsService(path)
+            service.summary("2026-09-28", "2026-09-30")
+
+            # 按保留期清理掉最老的一天：聚合只增不减，「全部」仍应把它算进来。
+            path.write_text(log_line("2026-09-30 09:00:00", "/v1/images/generations") + "\n", encoding="utf-8")
+            result = service.summary(scope="all")
+
+        self.assertEqual(result["range"]["start_date"], "2026-09-28")
+        self.assertEqual(result["totals"]["requests"], 2)
+
+    def test_non_all_scope_reports_the_range_scope(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 09:00:00", "/v1/images/generations"),
+            ])
+
+            result = service.summary("2026-09-28", "2026-09-28", "  ")
+
+        self.assertEqual(result["range"]["scope"], "range")
+
     def test_aggregate_cache_refreshes_when_the_log_file_changes(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "logs.jsonl"
