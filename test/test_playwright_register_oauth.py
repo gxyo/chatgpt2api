@@ -5,14 +5,15 @@ from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.register.playwright_register import (
-    OAUTH_AUTHORIZE_PATTERNS,
-    OAUTH_CALLBACK_PATTERN,
+    OAUTH_ROUTE_PATTERN,
+    OAUTH_TOKEN_PATH,
     _install_oauth_routes,
     _exchange_oauth_token_in_browser,
     _fill_birthdate,
     _replace_pkce_params,
     _return_to_otp_signup,
     _run_signup_state_machine,
+    _should_block_browser_oauth_request,
     _submit_password,
     _switch_to_password_if_offered,
     _wait_for_signup_step,
@@ -27,17 +28,52 @@ class FakePage:
         self.routes[pattern] = handler
 
 
+class FakeFrame:
+    """Stands in for a Playwright Frame; ``page.frames`` is what the blocker inspects."""
+
+    def __init__(self, url: str, page=None) -> None:
+        self.url = url
+        self.page = page
+
+
+def frame_at(url: str) -> FakeFrame:
+    """A frame belonging to a page whose only frame currently sits at ``url``."""
+    page = SimpleNamespace(frames=[])
+    frame = FakeFrame(url, page)
+    page.frames = [frame]
+    return frame
+
+
+class FakeRequest:
+    def __init__(self, url: str, method: str = "GET", resource_type: str = "document", frame=None) -> None:
+        self.url = url
+        self.method = method
+        self.resource_type = resource_type
+        self._frame = frame
+
+    @property
+    def frame(self):
+        # APIRequestContext 之类的非页面请求没有 frame，访问时会抛异常。
+        if self._frame is None:
+            raise Exception("frame is not available")
+        return self._frame
+
+
 class FakeRoute:
-    def __init__(self, url: str) -> None:
-        self.request = SimpleNamespace(url=url)
+    def __init__(self, url: str, **request_kwargs) -> None:
+        self.request = FakeRequest(url, **request_kwargs)
         self.continued_url = None
         self.fulfilled = None
+        self.aborted = None
 
     async def continue_(self, url=None) -> None:
         self.continued_url = url or self.request.url
 
     async def fulfill(self, **kwargs) -> None:
         self.fulfilled = kwargs
+
+    async def abort(self, code=None) -> None:
+        self.aborted = code or "aborted"
 
 
 class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
@@ -55,47 +91,140 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["code_challenge"], ["new-challenge"])
         self.assertEqual(params["code_challenge_method"], ["S256"])
 
-    async def test_current_and_legacy_authorize_routes_replace_pkce(self) -> None:
+    async def test_single_catch_all_route_replaces_pkce_on_every_authorize_endpoint(self) -> None:
         page = FakePage()
-        captured_codes = []
-        await _install_oauth_routes(page, 1, "our-challenge", captured_codes)
+        await _install_oauth_routes(page, 1, "our-challenge", [])
 
-        self.assertEqual(set(page.routes), {*OAUTH_AUTHORIZE_PATTERNS, OAUTH_CALLBACK_PATTERN})
-        for pattern, path in zip(
-            OAUTH_AUTHORIZE_PATTERNS,
-            ("oauth/authorize", "api/oauth/oauth2/auth", "api/accounts/authorize"),
+        # 授权端点会换名字，而且经常是 302 跳过来的，所以必须靠内容判断而不是 glob。
+        self.assertEqual(set(page.routes), {OAUTH_ROUTE_PATTERN})
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
+        for path in (
+            "oauth/authorize",
+            "api/oauth/oauth2/auth",
+            "api/accounts/authorize",
+            "api/accounts/oauth2/authorize",
         ):
             route = FakeRoute(
                 f"https://auth.openai.com/{path}?state=a&code_challenge=browser-challenge&code_challenge_method=S256"
             )
-            await page.routes[pattern](route)
+            await handler(route)
             params = parse_qs(urlparse(route.continued_url).query)
             self.assertEqual(params["code_challenge"], ["our-challenge"])
             self.assertEqual(params["code_challenge_method"], ["S256"])
+            self.assertIsNone(route.aborted)
 
-    async def test_platform_callback_is_fulfilled_without_reaching_platform(self) -> None:
+    async def test_callback_page_requests_are_blocked_so_the_code_survives(self) -> None:
         page = FakePage()
-        captured_codes = []
-        await _install_oauth_routes(page, 1, "our-challenge", captured_codes)
+        events: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", [], events)
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
 
-        route = FakeRoute("https://platform.openai.com/auth/callback?code=one-time-code&state=state-a")
-        await page.routes[OAUTH_CALLBACK_PATTERN](route)
+        callback_frame = frame_at("https://platform.openai.com/auth/callback?code=one-time-code&state=a")
+        route = FakeRoute(
+            "https://platform.openai.com/backend-api/auth/session",
+            method="POST",
+            resource_type="fetch",
+            frame=callback_frame,
+        )
+        await handler(route)
 
-        self.assertEqual(captured_codes, ["one-time-code"])
+        self.assertIsNotNone(route.aborted)
         self.assertIsNone(route.continued_url)
-        self.assertEqual(route.fulfilled["status"], 200)
+        self.assertTrue(any("阻断" in event for event in events))
 
-    async def test_unrelated_callback_is_not_intercepted(self) -> None:
+    async def test_token_endpoint_call_from_a_page_is_blocked(self) -> None:
+        # 即使不是 callback 页面发起的，浏览器也不该自己去兑换 code（那是我们的活）。
+        reason = _should_block_browser_oauth_request(
+            FakeRequest(
+                f"https://auth.openai.com{OAUTH_TOKEN_PATH}",
+                method="POST",
+                resource_type="fetch",
+                frame=frame_at("https://platform.openai.com/auth/callback"),
+            )
+        )
+
+        self.assertNotEqual(reason, "")
+
+    async def test_callback_page_scripts_are_blocked_and_static_assets_allowed(self) -> None:
         page = FakePage()
-        captured_codes = []
-        await _install_oauth_routes(page, 1, "our-challenge", captured_codes)
+        await _install_oauth_routes(page, 1, "our-challenge", [])
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
+        callback_frame = frame_at("https://platform.openai.com/auth/callback?code=one-time-code")
 
-        route = FakeRoute("https://auth.openai.com/auth/callback?code=other-code")
-        await page.routes[OAUTH_CALLBACK_PATTERN](route)
+        script = FakeRoute(
+            "https://platform.openai.com/_next/static/chunks/main.js",
+            resource_type="script",
+            frame=callback_frame,
+        )
+        await handler(script)
+        self.assertIsNotNone(script.aborted)
 
-        self.assertEqual(captured_codes, [])
+        stylesheet = FakeRoute(
+            "https://platform.openai.com/_next/static/css/app.css",
+            resource_type="stylesheet",
+            frame=callback_frame,
+        )
+        await handler(stylesheet)
+        self.assertIsNone(stylesheet.aborted)
+        self.assertEqual(stylesheet.continued_url, stylesheet.request.url)
+
+    async def test_own_navigation_away_from_callback_is_not_blocked(self) -> None:
+        # 页面停在 callback 上时，注册流程自己的跳转/重试仍要放行，
+        # 否则一次失败就没法恢复（曾经误伤过 page.goto）。
+        page = FakePage()
+        await _install_oauth_routes(page, 1, "our-challenge", [])
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
+        callback_frame = frame_at("https://platform.openai.com/auth/callback?code=one-time-code")
+
+        navigation = FakeRoute(
+            "https://platform.openai.com/signup",
+            resource_type="document",
+            frame=callback_frame,
+        )
+        await handler(navigation)
+        self.assertIsNone(navigation.aborted)
+
+        form_post = FakeRoute(
+            "https://platform.openai.com/auth/complete",
+            method="POST",
+            resource_type="document",
+            frame=callback_frame,
+        )
+        await handler(form_post)
+        self.assertIsNotNone(form_post.aborted)
+
+    async def test_signup_flow_requests_are_left_alone(self) -> None:
+        page = FakePage()
+        await _install_oauth_routes(page, 1, "our-challenge", [])
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
+
+        route = FakeRoute(
+            "https://auth.openai.com/api/accounts/email-otp/validate",
+            method="POST",
+            resource_type="fetch",
+            frame=frame_at("https://auth.openai.com/email-verification"),
+        )
+        await handler(route)
+
+        self.assertIsNone(route.aborted)
         self.assertEqual(route.continued_url, route.request.url)
-        self.assertIsNone(route.fulfilled)
+
+    async def test_requests_without_a_frame_are_never_blocked(self) -> None:
+        page = FakePage()
+        await _install_oauth_routes(page, 1, "our-challenge", [])
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
+
+        # APIRequestContext(page.request) 发出的请求不走 page.route；
+        # 万一走到这里，也必须放行，否则我们自己的兑换请求会被自己拦掉。
+        route = FakeRoute(
+            f"https://auth.openai.com{OAUTH_TOKEN_PATH}",
+            method="POST",
+            resource_type="fetch",
+        )
+        await handler(route)
+
+        self.assertIsNone(route.aborted)
+        self.assertEqual(route.continued_url, route.request.url)
 
     async def test_legacy_password_then_otp_flow(self) -> None:
         page = SimpleNamespace()
@@ -355,6 +484,7 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
         )
         session = MagicMock()
         page = MagicMock()
+        page.wait_for_timeout = AsyncMock()
         context = MagicMock()
         context.cookies = AsyncMock(return_value=[])
         context.request.post = AsyncMock(return_value=response)
@@ -371,6 +501,62 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tokens["access_token"], "access")
         context.request.post.assert_awaited_once()
+        session.close.assert_called_once()
+
+    async def test_transient_exchange_failure_is_retried_on_the_same_session(self) -> None:
+        session = MagicMock()
+        page = MagicMock()
+        page.wait_for_timeout = AsyncMock()
+        context = MagicMock()
+        context.cookies = AsyncMock(return_value=[])
+
+        with patch(
+            "services.register.playwright_register.curl_requests.Session", return_value=session
+        ), patch(
+            "services.register.playwright_register.request_platform_oauth_token",
+            side_effect=[
+                RuntimeError("OAuth token 交换失败: status=503, body=upstream"),
+                {"access_token": "access"},
+            ],
+        ) as exchange_token:
+            tokens = await _exchange_oauth_token_in_browser(
+                page, context, 5, "one-time-code", "code-verifier", ""
+            )
+
+        self.assertEqual(tokens["access_token"], "access")
+        self.assertEqual(exchange_token.call_count, 2)
+        page.wait_for_timeout.assert_awaited_once()
+        session.close.assert_called_once()
+
+    async def test_invalid_grant_is_not_retried(self) -> None:
+        session = MagicMock()
+        page = MagicMock()
+        page.wait_for_timeout = AsyncMock()
+        context = MagicMock()
+        context.cookies = AsyncMock(return_value=[])
+        context.request.post = AsyncMock(return_value=SimpleNamespace(
+            status=400,
+            text=AsyncMock(return_value=json.dumps({"error": "invalid_grant"})),
+            headers={},
+        ))
+
+        with patch(
+            "services.register.playwright_register.curl_requests.Session", return_value=session
+        ), patch(
+            "services.register.playwright_register.request_platform_oauth_token",
+            side_effect=RuntimeError(
+                'OAuth token 交换失败: status=400, body={ "error": "invalid_grant" }'
+            ),
+        ) as exchange_token:
+            with self.assertRaises(RuntimeError) as raised:
+                await _exchange_oauth_token_in_browser(
+                    page, context, 5, "one-time-code", "code-verifier", ""
+                )
+
+        # 400 是确定性的：重试没有意义，也不能把失败原因盖掉。
+        self.assertEqual(exchange_token.call_count, 1)
+        self.assertIn("invalid_grant", str(raised.exception))
+        page.wait_for_timeout.assert_not_awaited()
         session.close.assert_called_once()
 
 

@@ -58,12 +58,16 @@ BIRTHDATE_INPUT_SELECTOR = (
     'input[placeholder*="birth" i]'
 )
 BIRTHDATE_SEGMENT_SELECTOR = '[role="spinbutton"]'
-OAUTH_AUTHORIZE_PATTERNS = (
-    "**/oauth/authorize*",
-    "**/api/oauth/oauth2/auth*",
-    "**/api/accounts/authorize*",
-)
-OAUTH_CALLBACK_PATTERN = "**/auth/callback*"
+# 注意：不能再用 "**/oauth/authorize*" / "**/auth/callback*" 这类 glob 分模式注册路由。
+# Playwright 的 route 只在重定向链的第一个 URL 上回调，302 跳转的目标永远不会被拦截：
+# 授权端点和 callback 都是跳转过去的，所以 glob 命中与否全看运气。改用一条 "**/*" 万用路由
+# 按 URL 内容判断，再拦掉 callback 页面自己的出站请求，让一次性 code 保持可用。
+OAUTH_CALLBACK_PATH = "/auth/callback"
+OAUTH_TOKEN_PATH = "/api/accounts/oauth/token"
+OAUTH_ROUTE_PATTERN = "**/*"
+OAUTH_STATIC_RESOURCE_TYPES = frozenset({"stylesheet", "image", "font", "media"})
+OAUTH_TOKEN_EXCHANGE_ATTEMPTS = 3
+OAUTH_TRANSIENT_STATUSES = ("status=429", "status=500", "status=502", "status=503", "status=504")
 
 
 def _secret_fingerprint(value: str) -> str:
@@ -98,42 +102,117 @@ def _replace_pkce_params(url: str, code_challenge: str) -> str:
     return parsed._replace(query=urlencode(query)).geturl()
 
 
-async def _install_oauth_routes(page, index: int, code_challenge: str, captured_codes: list[str]) -> None:
-    async def _intercept_authorize(route):
-        """Replace PKCE on both the current and legacy authorize endpoints."""
-        url = route.request.url
-        original_challenge = str((parse_qs(urlparse(url).query).get("code_challenge") or [""])[0])
-        if _trace_enabled():
-            step(
-                index,
-                "OAuth trace: authorize PKCE "
-                f"original_fp={_secret_fingerprint(original_challenge)}, "
-                f"replacement_fp={_secret_fingerprint(code_challenge)}",
-            )
-        await route.continue_(url=_replace_pkce_params(url, code_challenge))
+def _callback_frames(frame) -> tuple[Any, ...]:
+    """Return the frames of the page the request belongs to, or () for non-page requests."""
+    try:
+        page = frame.page
+    except Exception:
+        return ()
+    if page is None:
+        return ()
+    try:
+        return tuple(page.frames)
+    except Exception:
+        return ()
 
-    async def _intercept_callback(route):
-        """Capture the one-time code and prevent the callback page from consuming it."""
-        parsed = urlparse(route.request.url)
-        params = parse_qs(parsed.query)
-        code = str((params.get("code") or [""])[0]).strip()
-        if parsed.netloc != "platform.openai.com" or not code:
-            await route.continue_()
-            return
-        if code not in captured_codes:
-            captured_codes.append(code)
-            step(index, "已拦截到 OAuth code")
+
+def _page_has_oauth_callback(frame) -> bool:
+    """True once the requesting page has a frame sitting on the OAuth callback."""
+    for candidate in _callback_frames(frame):
+        try:
+            if OAUTH_CALLBACK_PATH in str(candidate.url or ""):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _should_block_browser_oauth_request(request) -> str:
+    """Return a reason to block an in-page request, or "" to let it through.
+
+    After ``/auth/callback`` loads, the platform's own page (or a nested frame) calls its
+    backend to redeem the one-time code. That request can be stopped even though the
+    redirect that produced the callback page cannot be intercepted, which is what keeps
+    the code alive for our own exchange.
+    """
+    try:
+        frame = request.frame
+    except Exception:
+        return ""  # APIRequestContext 等非页面请求，放行
+    try:
+        url = str(request.url or "")
+        resource_type = str(request.resource_type or "")
+        method = str(request.method or "")
+    except Exception:
+        return ""
+    path = urlparse(url).path
+    if path == OAUTH_TOKEN_PATH or path.startswith(f"{OAUTH_TOKEN_PATH}/"):
+        return f"页面直接调用 token 接口 ({method})"
+    if resource_type in OAUTH_STATIC_RESOURCE_TYPES:
+        return ""
+    if not _page_has_oauth_callback(frame):
+        return ""
+    # 放行 GET 文档导航：那是注册流程自己的跳转/重试，不是 callback 页面在兑换 code。
+    if resource_type == "document" and method.upper() == "GET":
+        return ""
+    return f"callback 页面出站请求 ({resource_type})"
+
+
+async def _install_oauth_routes(
+    page,
+    index: int,
+    code_challenge: str,
+    captured_codes: list[str],
+    events: list[str] | None = None,
+) -> None:
+    """Install one catch-all route that keeps the one-time code ours to redeem.
+
+    - 所有带 ``code_challenge`` 的请求都改写成我们自己的 S256 challenge，
+      这样 authorize 端点换名字（``/oauth/authorize`` / ``/api/oauth/oauth2/auth`` /
+      ``/api/accounts/authorize``）也不会漏网。
+    - callback 页面的出站请求一律阻断：Playwright 拦不住 302 跳转的目标，
+      只能保证跳过来的 callback 页什么也做不了。
+    """
+
+    def _record(message: str) -> None:
+        if events is not None:
+            events.append(message)
+
+    async def _handler(route) -> None:
+        request = route.request
+        url = str(getattr(request, "url", "") or "")
+        method = str(getattr(request, "method", "") or "")
+        try:
+            if "code_challenge=" in url:
+                original = str((parse_qs(urlparse(url).query).get("code_challenge") or [""])[0])
+                _record(
+                    f"改写 authorize PKCE {urlparse(url).path} "
+                    f"original_fp={_secret_fingerprint(original)}"
+                )
+                if _trace_enabled():
+                    step(
+                        index,
+                        "OAuth trace: authorize PKCE "
+                        f"original_fp={_secret_fingerprint(original)}, "
+                        f"replacement_fp={_secret_fingerprint(code_challenge)}",
+                    )
+                await route.continue_(url=_replace_pkce_params(url, code_challenge))
+                return
+            reason = _should_block_browser_oauth_request(request)
+            if reason:
+                parsed = urlparse(url)
+                _record(f"阻断 {method} {parsed.netloc}{parsed.path}（{reason}）")
+                if _trace_enabled():
+                    step(index, f"OAuth trace: 阻断 callback 请求 {method} {url[:160]}", "yellow")
+                await route.abort("blockedbyclient")
+                return
+        except Exception as error:
+            _record(f"路由异常放行 {method} {urlparse(url).path}: {error}")
             if _trace_enabled():
-                step(index, f"OAuth trace: callback code_fp={_secret_fingerprint(code)}")
-        await route.fulfill(
-            status=200,
-            content_type="text/html; charset=utf-8",
-            body="<!doctype html><title>OAuth complete</title>",
-        )
+                step(index, f"OAuth trace: 路由异常放行 {error}", "yellow")
+        await route.continue_()
 
-    for pattern in OAUTH_AUTHORIZE_PATTERNS:
-        await page.route(pattern, _intercept_authorize)
-    await page.route(OAUTH_CALLBACK_PATTERN, _intercept_callback)
+    await page.route(OAUTH_ROUTE_PATTERN, _handler)
 
 
 def _install_oauth_trace(page, index: int) -> None:
@@ -339,6 +418,14 @@ async def _submit_otp(page, index: int, mailbox: dict) -> None:
         await page.wait_for_timeout(1000)
 
 
+def _is_transient_exchange_error(error: Exception) -> bool:
+    """Retry network hiccups and 429/5xx, but never a deterministic 4xx like invalid_grant."""
+    message = str(error)
+    if "status=" not in message:
+        return True
+    return any(fragment in message for fragment in OAUTH_TRANSIENT_STATUSES)
+
+
 async def _exchange_oauth_token_in_browser(
     page, context, index: int, code: str, code_verifier: str, proxy: str
 ) -> dict:
@@ -376,10 +463,21 @@ async def _exchange_oauth_token_in_browser(
                 path=str(cookie.get("path") or "/"),
                 secure=bool(cookie.get("secure")),
             )
-        try:
-            return request_platform_oauth_token(session, code, code_verifier)
-        except Exception as error:
-            step(index, f"Chrome OAuth token 交换失败，尝试 Playwright 会话: {error}", "yellow")
+        last_error: Exception | None = None
+        for attempt in range(OAUTH_TOKEN_EXCHANGE_ATTEMPTS):
+            try:
+                return request_platform_oauth_token(session, code, code_verifier)
+            except Exception as error:
+                last_error = error
+                if attempt + 1 >= OAUTH_TOKEN_EXCHANGE_ATTEMPTS or not _is_transient_exchange_error(error):
+                    break
+                step(
+                    index,
+                    f"Chrome OAuth token 交换暂时失败，重试 ({attempt + 2}/{OAUTH_TOKEN_EXCHANGE_ATTEMPTS}): {error}",
+                    "yellow",
+                )
+                await page.wait_for_timeout(1000 * (attempt + 1))
+        step(index, f"Chrome OAuth token 交换失败，尝试 Playwright 会话: {last_error}", "yellow")
     finally:
         session.close()
 
@@ -514,7 +612,13 @@ async def _browser_register_flow(
 ) -> dict:
     code_verifier, code_challenge = _generate_pkce()
     captured_code: list[str] = []
-    await _install_oauth_routes(page, index, code_challenge, captured_code)
+    oauth_events: list[str] = []
+
+    def _dump_oauth_events() -> None:
+        for event in oauth_events[-12:]:
+            step(index, f"OAuth 诊断: {event}", "yellow")
+
+    await _install_oauth_routes(page, index, code_challenge, captured_code, oauth_events)
 
     signup_url = f"{platform_base}/signup"
     step(index, "导航到注册页面")
@@ -567,6 +671,7 @@ async def _browser_register_flow(
         await page.wait_for_timeout(2000)
 
     if not captured_code:
+        _dump_oauth_events()
         raise RuntimeError(f"未能获取到 OAuth code, 最终页面: {page.url}")
 
     step(index, "用 OAuth code 换取 token")
@@ -577,9 +682,15 @@ async def _browser_register_flow(
             f"code_fp={_secret_fingerprint(captured_code[0])}, "
             f"verifier_fp={_secret_fingerprint(code_verifier)}",
         )
-    tokens = await _exchange_oauth_token_in_browser(
-        page, context, index, captured_code[0], code_verifier, proxy
-    )
+    try:
+        tokens = await _exchange_oauth_token_in_browser(
+            page, context, index, captured_code[0], code_verifier, proxy
+        )
+    except Exception:
+        # invalid_grant 通常意味着 code 已被平台自己的 callback 页面用掉，
+        # 把拦截记录打出来，便于确认是授权改写漏了还是 callback 抢先兑换。
+        _dump_oauth_events()
+        raise
 
     if not tokens or not tokens.get("access_token"):
         raise RuntimeError("OAuth token 交换返回数据缺少 access_token")
