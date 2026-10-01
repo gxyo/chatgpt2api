@@ -29,6 +29,10 @@ CHANNEL_BUSY_MESSAGE = "当前渠道拥堵，请稍后再试"
 # body=、"skipped_mainline":true 等）对用户没有任何意义，一律替换掉。
 IMAGE_RETRY_MESSAGE = "本次生图失败，请重试。"
 IMAGE_MAINLINE_REJECT_MESSAGE = "status_code=400, 本次生图失败，请重试。"
+# 号池里没有可用生图额度：上游原文是 no available image quota，指定能力（plus/team/pro）时
+# 会变成 no available plus image quota，所以按片段匹配而不是整串相等。
+DEFAULT_IMAGE_QUOTA_ERROR_MESSAGE = "no available image quota"
+IMAGE_NO_QUOTA_RE = re.compile(r"no available[^\n]{0,40}?image quota", re.IGNORECASE)
 SKIPPED_MAINLINE_RE = re.compile(r'"skipped_mainline"\s*:\s*true', re.IGNORECASE)
 UPSTREAM_PLUMBING_RE = re.compile(
     r"backend[-_]api/|sentinel/|status_code\s*[=:]|status\s*[=:]|\bbody\s*[=:]|chatgpt\.com|upstreamhttperror",
@@ -296,6 +300,42 @@ def describe_exception(exc: BaseException, limit: int = _EXCEPTION_TEXT_LIMIT) -
     return frames
 
 
+def is_image_quota_error(message: object) -> bool:
+    """判断报错是不是「号池无可用生图额度」。"""
+    return bool(IMAGE_NO_QUOTA_RE.search(str(message or "")))
+
+
+def is_image_quota_error_in_chain(exc: BaseException) -> bool:
+    """沿异常链判断报错是不是「号池无可用生图额度」。
+
+    额度错误经常在外层被重新包装成 ImageGenerationError（消息还会被 sanitize 换成
+    自定义文案），只看最外层就认不出来了；原始 RuntimeError 挂在 __cause__/__context__
+    上，从那里找才稳。
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    for _ in range(8):
+        if current is None or id(current) in seen:
+            return False
+        seen.add(id(current))
+        if is_image_quota_error(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def image_quota_error_text() -> str:
+    """「无可用生图额度」给用户看的文案。
+
+    设置页可以把它换成任意提示（例如「请联系管理员补号」）；留空时保持上游原文，
+    用户至少能从 OpenAI 兼容客户端里认出这是额度问题。
+    """
+    # 局部导入：utils 被 services 反向依赖，模块顶层导入容易踩到加载顺序。
+    from services.config import config
+
+    return config.image_quota_error_message or DEFAULT_IMAGE_QUOTA_ERROR_MESSAGE
+
+
 def sanitize_image_error_text(message: object) -> str:
     """把上游图片链路的原始报错替换成用户看得懂的中文。
 
@@ -305,6 +345,11 @@ def sanitize_image_error_text(message: object) -> str:
     text = str(message or "")
     if not text:
         return IMAGE_RETRY_MESSAGE
+    # 额度错误排在管道信息之前：它常常带着 status_code= 一起冒出来（例如
+    # "status_code=429 no available image quota"），按管道信息兜底会把可操作的
+    # 提示换成「请重试」。
+    if is_image_quota_error(text):
+        return image_quota_error_text()
     if SKIPPED_MAINLINE_RE.search(text):
         return IMAGE_MAINLINE_REJECT_MESSAGE
     if UPSTREAM_PLUMBING_RE.search(text):

@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarClock, LoaderCircle, PlugZap, Save } from "lucide-react";
+import { Ban, CalendarClock, LoaderCircle, PlugZap, Save } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -27,6 +27,7 @@ export function ConfigCard() {
   const setImageCleanupTime = useSettingsStore((state) => state.setImageCleanupTime);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
+  const setImageQuotaErrorMessage = useSettingsStore((state) => state.setImageQuotaErrorMessage);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
@@ -198,6 +199,21 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-neutral-200 bg-white"
             />
             <p className="text-xs text-neutral-500">限制每个账号同时处理的图片请求数量，默认 3。</p>
+          </div>
+          <div className="space-y-2 md:col-span-2">
+            <label className="flex items-center gap-2 text-sm text-neutral-700">
+              <Ban className="size-4 text-neutral-500" />
+              无可用生图额度提示语
+            </label>
+            <Input
+              value={String(config?.image_quota_error_message || "")}
+              onChange={(event) => setImageQuotaErrorMessage(event.target.value)}
+              placeholder="留空返回 no available image quota"
+              className="h-10 rounded-xl border-neutral-200 bg-white"
+            />
+            <p className="text-xs leading-5 text-neutral-500">
+              号池里没有可用的生图额度时，把 no available image quota 换成这里填写的文字，例如「请联系管理员补号」；留空则原样返回 no available image quota。
+            </p>
           </div>
           <div className="space-y-2">
             <label className="flex items-center gap-3 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-700">

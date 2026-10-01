@@ -23,6 +23,8 @@ DEFAULT_LOG_RETENTION_DAYS = 30
 DEFAULT_LOG_CLEANUP_TIME = "03:00"
 # 上限十年：再长的保留期没有意义，也挡住了手滑填进来的天文数字。
 MAX_LOG_RETENTION_DAYS = 3650
+# 「无可用生图额度」提示语的长度上限：这是个错误文案，不是留言板。
+MAX_IMAGE_QUOTA_ERROR_MESSAGE_LENGTH = 200
 
 DEFAULT_CHAT_COMPLETION_CACHE = {
     "enabled": True,
@@ -102,6 +104,11 @@ def _normalize_image_cleanup_time(value: object) -> str:
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         return DEFAULT_IMAGE_CLEANUP_TIME
     return f"{hour:02d}:{minute:02d}"
+
+
+def _normalize_image_quota_error_message(value: object) -> str:
+    # 留空 = 不改写，继续把上游原文 no available image quota 返回给用户。
+    return str(value or "").strip()[:MAX_IMAGE_QUOTA_ERROR_MESSAGE_LENGTH]
 
 
 def _normalize_log_cleanup_time(value: object) -> str:
@@ -249,6 +256,11 @@ class ConfigStore:
             return max(1, int(self.data.get("image_retention_days", 30)))
         except (TypeError, ValueError):
             return 30
+
+    @property
+    def image_quota_error_message(self) -> str:
+        """号池无可用生图额度时给用户返回的文案；留空表示返回上游原文。"""
+        return _normalize_image_quota_error_message(self.data.get("image_quota_error_message"))
 
     @property
     def log_retention_days(self) -> int:
@@ -405,6 +417,7 @@ class ConfigStore:
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["refresh_all_accounts_interval_minute"] = self.refresh_all_accounts_interval_minute
         data["image_retention_days"] = self.image_retention_days
+        data["image_quota_error_message"] = self.image_quota_error_message
         data["log_retention_days"] = self.log_retention_days
         data["log_auto_cleanup"] = self.log_auto_cleanup
         data["log_cleanup_time"] = self.log_cleanup_time
@@ -447,6 +460,10 @@ class ConfigStore:
             )
         if "image_cleanup_time" in next_data:
             next_data["image_cleanup_time"] = _normalize_image_cleanup_time(next_data.get("image_cleanup_time"))
+        if "image_quota_error_message" in next_data:
+            next_data["image_quota_error_message"] = _normalize_image_quota_error_message(
+                next_data.get("image_quota_error_message")
+            )
         if "log_retention_days" in next_data:
             next_data["log_retention_days"] = _normalize_log_retention_days(next_data.get("log_retention_days"))
         if "log_cleanup_time" in next_data:

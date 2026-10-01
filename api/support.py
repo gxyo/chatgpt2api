@@ -11,7 +11,7 @@ from fastapi.responses import Response
 from services.account_service import account_service
 from services.auth_service import auth_service
 from services.config import config
-from utils.helper import public_error_message
+from utils.helper import image_quota_error_text, is_image_quota_error_in_chain, public_error_message
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
@@ -85,9 +85,8 @@ def resolve_image_base_url(request: Request) -> str:
 
 
 def raise_image_quota_error(exc: Exception) -> None:
-    message = str(exc)
-    if "no available image quota" in message.lower():
-        raise HTTPException(status_code=429, detail={"error": "no available image quota"}) from exc
+    if is_image_quota_error_in_chain(exc):
+        raise HTTPException(status_code=429, detail={"error": image_quota_error_text()}) from exc
     raise HTTPException(status_code=502, detail={"error": public_error_message(exc)}) from exc
 
 

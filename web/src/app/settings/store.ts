@@ -44,6 +44,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       : "03:00",
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 75),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
+    image_quota_error_message: String(config.image_quota_error_message || ""),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
@@ -79,6 +80,7 @@ type SettingsStore = {
   setImageCleanupTime: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
+  setImageQuotaErrorMessage: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
@@ -158,6 +160,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           : "03:00",
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 75),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
+        image_quota_error_message: String(config.image_quota_error_message || "").trim(),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
@@ -227,6 +230,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageAccountConcurrency: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value } } : {});
+  },
+
+  setImageQuotaErrorMessage: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_quota_error_message: value } } : {});
   },
 
   setAutoRemoveInvalidAccounts: (value) => {

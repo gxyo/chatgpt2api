@@ -383,30 +383,6 @@ def storage_stats() -> dict:
     }
 
 
-def compress_images(quality: int = 60) -> dict:
-    """重新压缩所有图片，返回节省的空间"""
-    saved = 0
-    count = 0
-    for p in sorted(config.images_dir.rglob("*.png")):
-        if not p.is_file():
-            continue
-        try:
-            orig = p.stat().st_size
-            with Image.open(p) as img:
-                img = ImageOps.exif_transpose(img)
-                img.save(str(p) + ".tmp", format="PNG", optimize=True)
-            new_size = Path(str(p) + ".tmp").stat().st_size
-            if new_size < orig:
-                Path(str(p) + ".tmp").replace(p)
-                saved += orig - new_size
-                count += 1
-            else:
-                Path(str(p) + ".tmp").unlink()
-        except Exception:
-            pass
-    return {"compressed": count, "saved_bytes": saved, "saved_mb": saved // (1024 * 1024)}
-
-
 def delete_to_free_space_target(target_free_mb: int, dry_run: bool = False) -> dict[str, int | bool]:
     """Delete local images until the filesystem has at least ``target_free_mb`` free."""
     target_free_mb = max(0, int(target_free_mb))

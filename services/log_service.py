@@ -217,13 +217,16 @@ def _request_excerpt(text: object, limit: int = 1000) -> str:
 
 def _image_error_response(exc: Exception) -> JSONResponse:
     from services.protocol.conversation import public_image_error_message
+    from utils.helper import image_quota_error_text, is_image_quota_error_in_chain
 
-    message = public_image_error_message(public_error_message(exc))
-    if "no available image quota" in message.lower():
+    # 额度判断必须沿异常链按原始报错来：文案可以由设置项替换成任意文字，一旦替换完
+    # 就认不出来了，状态码和 error.code 得继续按「额度不足」返回。
+    raw_message = public_error_message(exc)
+    if is_image_quota_error_in_chain(exc):
         return openai_error_response(
             {
                 "error": {
-                    "message": "no available image quota",
+                    "message": image_quota_error_text(),
                     "type": "insufficient_quota",
                     "param": None,
                     "code": "insufficient_quota",
@@ -231,6 +234,7 @@ def _image_error_response(exc: Exception) -> JSONResponse:
             },
             429,
         )
+    message = public_image_error_message(raw_message)
     if hasattr(exc, "to_openai_error") and hasattr(exc, "status_code"):
         return JSONResponse(status_code=int(exc.status_code), content=exc.to_openai_error())
     return openai_error_response(message, 502)

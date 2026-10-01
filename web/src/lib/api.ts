@@ -108,6 +108,7 @@ export type SettingsConfig = {
   image_cleanup_time?: string;
   image_poll_timeout_secs?: number | string;
   image_account_concurrency?: number | string;
+  image_quota_error_message?: string;
   image_parallel_generation?: boolean;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
@@ -507,10 +508,6 @@ export type ImageStorageStats = {
 
 export async function fetchImageStorage() {
   return httpRequest<ImageStorageStats>("/api/images/storage");
-}
-
-export async function compressAllImages() {
-  return httpRequest<{ compressed: number; saved_bytes: number; saved_mb: number }>("/api/images/storage/compress", { method: "POST" });
 }
 
 export async function fetchSystemLogs(filters: { type?: string; status?: string; start_date?: string; end_date?: string }) {

@@ -14,7 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { compressAllImages, deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageStorage, fetchImageTags, fetchManagedImages, setImageTags, type ImageStorageStats, type ManagedImage } from "@/lib/api";
+import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageStorage, fetchImageTags, fetchManagedImages, setImageTags, type ImageStorageStats, type ManagedImage } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
@@ -72,7 +72,6 @@ function ImageManagerContent() {
   const [allTags, setAllTags] = useState<string[]>([]);
   const [storage, setStorage] = useState<ImageStorageStats | null>(null);
   const [storageLoading, setStorageLoading] = useState(false);
-  const [compressResult, setCompressResult] = useState<string>("");
 
   const loadStorage = useCallback(async () => {
     try {
@@ -368,18 +367,10 @@ function ImageManagerContent() {
               <Button size="sm" variant="outline" className="h-7 text-xs" disabled={storageLoading} onClick={() => { void loadStorage(); }}>
                 <RefreshCw className={`size-3 mr-1 ${storageLoading ? "animate-spin" : ""}`} />刷新
               </Button>
-              <Button size="sm" variant="outline" className="h-7 text-xs"
-                onClick={async () => {
-                  try { const r = await compressAllImages(); setCompressResult(`已压缩${r.saved_mb}MB`); void loadStorage(); }
-                  catch { setCompressResult("压缩失败"); }
-                }}>
-                🗜️ 压缩优化
-              </Button>
               <Button size="sm" variant="outline" className="h-7 text-xs border-rose-200 text-rose-600"
                 onClick={() => setDeleteMode("byDate")}>
                 🗑️ 按日期删除
               </Button>
-              {compressResult ? <span className="text-xs text-green-600 ml-1">{compressResult}</span> : null}
             </div>
           </>
         ) : (
