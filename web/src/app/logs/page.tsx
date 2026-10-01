@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, HardDrive, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, HardDrive, ImageIcon, LoaderCircle, RefreshCw, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
@@ -346,7 +346,10 @@ function LogsContent() {
               <span className={autoCleanup ? "" : "text-neutral-400"}>北京时间</span>
             </label>
             <Button variant="outline" className="h-10 rounded-xl border-neutral-200 bg-white px-4" onClick={() => void saveRetention()} disabled={isSavingRetention || !retentionValid || !cleanupTimeValid}>
-              {isSavingRetention ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              {/* 图标常驻再原地换成转圈：只在加载时插入图标会让按钮变宽（图标 + gap-2，
+                  外加基础样式的 has-[>svg]:px-3 收窄内边距），把「立即清理」挤到下一行。
+                  同页的「查询」按钮也是这么换的。 */}
+              {isSavingRetention ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
               保存设置
             </Button>
             <Button

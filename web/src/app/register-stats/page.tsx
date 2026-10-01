@@ -37,6 +37,15 @@ const PRESETS = [
 
 type PresetKey = (typeof PRESETS)[number]["key"];
 
+/**
+ * 注册结果画堆叠柱：成功 + 失败 = 尝试次数，一根柱子就是一个桶，
+ * 柱高是总数、蓝段是成功、红段是失败，成功率直接读蓝段占比。
+ *
+ * 但柱子超过这个密度就退化——相邻柱要留 2px 表面间隙，而「全部」最多能到 400 个日点，
+ * 那时柱宽只剩 1px。所以区间一长就退回折线，那是唯一只看长期走势、不需要逐桶细读的场景。
+ */
+const MAX_BAR_POINTS = 60;
+
 /** 抽出来给 effect 和刷新按钮共用，本身不碰组件状态。 */
 async function loadDomainStats(): Promise<CloudflareDomainStat[]> {
   const payload = await fetchRegisterConfig();
@@ -256,6 +265,7 @@ function RegisterStatsContent() {
               series={history.series}
               granularity={granularity}
               primary="success"
+              form={history.series.length > MAX_BAR_POINTS ? "line" : "bar"}
               labels={{
                 primary: "成功数",
                 secondary: "失败数",

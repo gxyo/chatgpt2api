@@ -8,10 +8,23 @@ import { cn } from "@/lib/utils";
 // 主线条画哪个字段。生图统计把它对准 requests（请求总数），注册统计对准 success（成功数）。
 type WaveChartPrimary = "requests" | "success";
 
+/**
+ * 画法。选哪种由「这张图在讲什么」决定，不是由数据量决定：
+ *
+ * - ``line``：讲**一个总量随时间**。请求统计用它，主线是请求总数、失败数是稀疏背景。
+ * - ``bar``：讲**成功与失败的拆分**。一根柱子就是一个桶，柱高 = 总数、下段 = 成功、上段 = 失败，
+ *   成功率直接读蓝段占比；配合弱化副线用两条线互相穿插要读得轻松得多。
+ *
+ * 只与 ``primary="success"`` 搭配：柱子的分段固定是 success（下）+ failed（上），
+ * 图例和悬浮提示里的 primary 指的就是下段。用 ``primary="requests"`` 会出现
+ * 「请求数」这个图例项对应整根柱子而不是某一段的错位。
+ */
+type WaveChartForm = "line" | "bar";
+
 type WaveChartLabels = {
   /** 主线的名字，图例与悬浮提示首行都用它。 */
   primary: string;
-  /** 稀疏副线的名字。 */
+  /** 稀疏副线／柱子上段的名字。 */
   secondary: string;
   ariaLabel: string;
 };
@@ -20,6 +33,7 @@ type WaveChartProps = {
   series: ImageStatsPoint[];
   granularity: "hour" | "day";
   primary?: WaveChartPrimary;
+  form?: WaveChartForm;
   labels?: WaveChartLabels;
 };
 
@@ -32,6 +46,12 @@ const DEFAULT_LABELS: WaveChartLabels = {
 const CHART_HEIGHT = 288;
 const PADDING = { top: 24, right: 18, bottom: 30, left: 46 };
 const MAX_X_LABELS = 8;
+
+// 柱形规格：细柱、相邻柱之间 2px 表面间隙、柱顶 4px 圆角而柱底贴基线不圆角。
+// 上限 24px 是防止点少时（近 7 天只有 7 个点）长出又宽又饱和的色块。
+const BAR_MAX_WIDTH = 24;
+const BAR_MIN_GAP = 2;
+const BAR_RADIUS = 4;
 
 // 校验过的成对配色（蓝/红，protan/deutan ΔE ≈ 21.6 亮色、19.2 暗色），
 // 红绿组合在色觉障碍下不可分辨，因此失败数不用绿色系。
@@ -62,10 +82,32 @@ function formatRate(value: number) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+/** 顶部圆角、底部方角的柱体。圆角只给数据端，柱底要平贴基线。 */
+function topRoundedPath(x: number, y: number, width: number, height: number, radius: number) {
+  if (width <= 0 || height <= 0) {
+    return "";
+  }
+  const safeRadius = Math.max(0, Math.min(radius, width / 2, height));
+  const bottom = y + height;
+  if (safeRadius <= 0) {
+    return `M ${x} ${bottom} L ${x} ${y} L ${x + width} ${y} L ${x + width} ${bottom} Z`;
+  }
+  return [
+    `M ${x} ${bottom}`,
+    `L ${x} ${y + safeRadius}`,
+    `Q ${x} ${y} ${x + safeRadius} ${y}`,
+    `L ${x + width - safeRadius} ${y}`,
+    `Q ${x + width} ${y} ${x + width} ${y + safeRadius}`,
+    `L ${x + width} ${bottom}`,
+    "Z",
+  ].join(" ");
+}
+
 export function WaveChart({
   series,
   granularity,
   primary = "requests",
+  form = "line",
   labels = DEFAULT_LABELS,
 }: WaveChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -91,9 +133,11 @@ export function WaveChart({
 
   const primaryValue = (point: ImageStatsPoint) => point[primary];
 
+  // 柱形按总数（成功 + 失败）定轴：堆叠起来的高度就是总数，只按 success 定轴的话
+  // 失败多的桶会顶出画面，被 yAt 截断后各段长度就加不起来了。
   const scale = useMemo(
-    () => niceScale(Math.max(0, ...series.map((item) => item[primary]))),
-    [series, primary],
+    () => niceScale(Math.max(0, ...series.map((item) => (form === "bar" ? item.requests : item[primary])))),
+    [series, primary, form],
   );
 
   const pointCount = series.length;
@@ -104,6 +148,12 @@ export function WaveChart({
     return PADDING.left + (innerWidth * index) / (pointCount - 1);
   };
   const yAt = (value: number) => PADDING.top + innerHeight - (innerHeight * Math.min(value, scale.max)) / scale.max;
+
+  // 柱形把每个桶摆在等宽槽位里居中；折线的 xAt 是把首尾点顶到两端的坐标，排柱子会一边高一边低。
+  const slotWidth = pointCount > 0 ? innerWidth / pointCount : 0;
+  const barWidth = Math.max(1, Math.min(BAR_MAX_WIDTH, slotWidth - BAR_MIN_GAP));
+  /** 一个桶的水平中心：悬浮高亮、提示框、峰值标记都以它为准。 */
+  const centerX = (index: number) => (form === "bar" ? PADDING.left + slotWidth * (index + 0.5) : xAt(index));
 
   const toLine = (pick: (point: ImageStatsPoint) => number) =>
     series
@@ -151,9 +201,13 @@ export function WaveChart({
     return best;
   }, [series, primary]);
 
+  // 峰值标记的落点：柱形挂在整根柱顶（柱高是总数），折线落在主线上。
+  const peakTop = (index: number) =>
+    yAt(form === "bar" ? series[index].requests : series[index][primary]);
+
   const labelStep = Math.max(1, Math.ceil(pointCount / MAX_X_LABELS));
   const active = activeIndex === null ? null : series[activeIndex];
-  const activeX = activeIndex === null ? 0 : xAt(activeIndex);
+  const activeX = activeIndex === null ? 0 : centerX(activeIndex);
   const tooltipLeft = Math.min(Math.max(activeX, 78), Math.max(78, width - 78));
   const axisLabel = granularity === "hour" ? "小时" : "日期";
 
@@ -213,40 +267,99 @@ export function WaveChart({
           ) : null,
         )}
 
-        {primaryArea ? <path d={primaryArea} className={cn(REQUESTS_FILL, "opacity-[0.14] dark:opacity-[0.18]")} /> : null}
-        {pointCount > 1 ? (
-          <path
-            d={primaryLine}
-            fill="none"
-            strokeWidth={2}
-            strokeLinejoin="round"
-            strokeLinecap="round"
-            className={REQUESTS_STROKE}
+        {/* 柱形的悬浮高亮是一整条槽位底纹，要垫在柱体下面所以先画。 */}
+        {form === "bar" && activeIndex !== null && slotWidth > 0 ? (
+          <rect
+            x={PADDING.left + slotWidth * activeIndex}
+            y={PADDING.top}
+            width={slotWidth}
+            height={innerHeight}
+            className="fill-neutral-900/[0.04] dark:fill-white/[0.06]"
           />
         ) : null}
-        {failedLine ? (
-          <path
-            d={failedLine}
-            fill="none"
-            strokeWidth={2}
-            strokeLinejoin="round"
-            strokeLinecap="round"
-            className={FAILED_STROKE}
-          />
+
+        {form === "bar"
+          ? series.map((point, index) => {
+              if (point.requests <= 0) {
+                return null;
+              }
+              const x = centerX(index) - barWidth / 2;
+              const stackTop = yAt(point.requests);
+              const successTop = yAt(point.success);
+              const hasFailure = point.failed > 0;
+              // 两段之间留 2px 表面间隙；失败数只占 1 个单位时保底 2px，
+              // 宁可让红段压掉一点间隙，也不能让它细到看不见。
+              const failureHeight = hasFailure
+                ? Math.max(BAR_MIN_GAP, successTop - stackTop - BAR_MIN_GAP)
+                : 0;
+              return (
+                <g key={point.key}>
+                  {hasFailure ? (
+                    <path
+                      d={topRoundedPath(x, stackTop, barWidth, failureHeight, BAR_RADIUS)}
+                      className={FAILED_FILL}
+                    />
+                  ) : null}
+                  {/* 上面压着红段时蓝段的顶就是平的，圆角只属于整根柱子的数据端。 */}
+                  {successTop < baseline ? (
+                    <path
+                      d={topRoundedPath(
+                        x,
+                        successTop,
+                        barWidth,
+                        baseline - successTop,
+                        hasFailure ? 0 : BAR_RADIUS,
+                      )}
+                      className={REQUESTS_FILL}
+                    />
+                  ) : null}
+                </g>
+              );
+            })
+          : null}
+
+        {form === "line" ? (
+          <>
+            {primaryArea ? (
+              <path d={primaryArea} className={cn(REQUESTS_FILL, "opacity-[0.14] dark:opacity-[0.18]")} />
+            ) : null}
+            {pointCount > 1 ? (
+              <path
+                d={primaryLine}
+                fill="none"
+                strokeWidth={2}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                className={REQUESTS_STROKE}
+              />
+            ) : null}
+            {failedLine ? (
+              <path
+                d={failedLine}
+                fill="none"
+                strokeWidth={2}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                className={FAILED_STROKE}
+              />
+            ) : null}
+          </>
         ) : null}
 
         {peakIndex >= 0 && activeIndex === null ? (
           <g>
-            <circle
-              cx={xAt(peakIndex)}
-              cy={yAt(series[peakIndex][primary])}
-              r={4.5}
-              strokeWidth={2}
-              className={cn(REQUESTS_FILL, "stroke-white dark:stroke-neutral-900")}
-            />
+            {form === "line" ? (
+              <circle
+                cx={centerX(peakIndex)}
+                cy={peakTop(peakIndex)}
+                r={4.5}
+                strokeWidth={2}
+                className={cn(REQUESTS_FILL, "stroke-white dark:stroke-neutral-900")}
+              />
+            ) : null}
             <text
-              x={Math.min(Math.max(xAt(peakIndex), 26), Math.max(26, width - 26))}
-              y={Math.max(14, yAt(series[peakIndex][primary]) - 14)}
+              x={Math.min(Math.max(centerX(peakIndex), 26), Math.max(26, width - 26))}
+              y={Math.max(14, peakTop(peakIndex) - 14)}
               textAnchor="middle"
               className="fill-neutral-500 text-[11px] font-medium tabular-nums dark:fill-neutral-300"
             >
@@ -255,7 +368,7 @@ export function WaveChart({
           </g>
         ) : null}
 
-        {active && activeIndex !== null ? (
+        {form === "line" && active && activeIndex !== null ? (
           <g>
             <line
               x1={activeX}
@@ -295,8 +408,12 @@ export function WaveChart({
               return;
             }
             const rect = event.currentTarget.getBoundingClientRect();
-            const ratio = (event.clientX - rect.left) / innerWidth;
-            const index = Math.round(Math.min(1, Math.max(0, ratio)) * (pointCount - 1));
+            const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / innerWidth));
+            // 折线的命中点是端点，柱子的是槽位：柱子少取一次 floor 会让指针落到隔壁桶上。
+            const index =
+              form === "bar"
+                ? Math.min(pointCount - 1, Math.floor(ratio * pointCount))
+                : Math.round(ratio * (pointCount - 1));
             setActiveIndex(index);
           }}
         />
