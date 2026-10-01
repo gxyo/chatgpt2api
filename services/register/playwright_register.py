@@ -9,7 +9,7 @@ import secrets
 import string
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse
 
 from curl_cffi import requests as curl_requests
 
@@ -64,8 +64,14 @@ BIRTHDATE_SEGMENT_SELECTOR = '[role="spinbutton"]'
 # 按 URL 内容判断，再拦掉 callback 页面自己的出站请求，让一次性 code 保持可用。
 OAUTH_CALLBACK_PATH = "/auth/callback"
 OAUTH_TOKEN_PATH = "/api/accounts/oauth/token"
+OAUTH_PROFILE_PATH = "/about-you"
 OAUTH_ROUTE_PATTERN = "**/*"
+OAUTH_CALLBACK_STUB = "<!doctype html><title>OAuth complete</title>"
+OAUTH_HOSTS = frozenset({"auth.openai.com", "platform.openai.com"})
 OAUTH_STATIC_RESOURCE_TYPES = frozenset({"stylesheet", "image", "font", "media"})
+# Worker / Service Worker 的请求没有 frame，callback 出现后它们同样能把 code 换掉。
+OAUTH_FRAMELESS_BLOCK_TYPES = frozenset({"xhr", "fetch", "other", "ping", "eventsource"})
+OAUTH_REDIRECT_HOPS = 4
 OAUTH_TOKEN_EXCHANGE_ATTEMPTS = 3
 OAUTH_TRANSIENT_STATUSES = ("status=429", "status=500", "status=502", "status=503", "status=504")
 
@@ -116,15 +122,38 @@ def _callback_frames(frame) -> tuple[Any, ...]:
         return ()
 
 
-def _page_has_oauth_callback(frame) -> bool:
-    """True once the requesting page has a frame sitting on the OAuth callback."""
+def _frame_urls(frame) -> tuple[str, ...]:
+    """Return the URLs of every frame on the requesting page (empty for non-page requests)."""
+    urls: list[str] = []
     for candidate in _callback_frames(frame):
         try:
-            if OAUTH_CALLBACK_PATH in str(candidate.url or ""):
-                return True
+            urls.append(str(candidate.url or ""))
         except Exception:
             continue
-    return False
+    return tuple(urls)
+
+
+def _page_has_oauth_callback(frame) -> bool:
+    """True once the requesting page has a frame sitting on the OAuth callback."""
+    return any(OAUTH_CALLBACK_PATH in url for url in _frame_urls(frame))
+
+
+def _page_at_profile(frame) -> bool:
+    """True while the requesting page is on the profile step, whose submit hops to callback."""
+    return any(OAUTH_PROFILE_PATH in url for url in _frame_urls(frame))
+
+
+def _oauth_callback_code(url: str) -> str:
+    """Return the one-time code when ``url`` is the platform OAuth callback, else ""."""
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    if parsed.netloc not in OAUTH_HOSTS or not parsed.path.startswith(OAUTH_CALLBACK_PATH):
+        return ""
+    return str((parse_qs(parsed.query).get("code") or [""])[0]).strip()
 
 
 def _should_block_browser_oauth_request(request) -> str:
@@ -158,6 +187,38 @@ def _should_block_browser_oauth_request(request) -> str:
     return f"callback 页面出站请求 ({resource_type})"
 
 
+def _should_inspect_navigation(request) -> bool:
+    """True for the navigation leaving the profile step — the hop that turns into the callback."""
+    try:
+        if str(request.resource_type or "") != "document":
+            return False
+        frame = request.frame
+    except Exception:
+        return False
+    return _page_at_profile(frame)
+
+
+def _should_block_frameless_request(request, callback_seen: bool) -> str:
+    """Block Worker / Service Worker requests aimed at OpenAI once the callback is in play.
+
+    Worker requests have no frame, so the frame-based rules above cannot see them; a
+    service worker is one of the few ways the platform can still redeem the code behind
+    our back. Nothing legitimate in this flow needs a worker call to OpenAI by then.
+    """
+    if not callback_seen:
+        return ""
+    try:
+        url = str(request.url or "")
+        resource_type = str(request.resource_type or "")
+    except Exception:
+        return ""
+    if urlparse(url).netloc not in OAUTH_HOSTS:
+        return ""
+    if resource_type not in OAUTH_FRAMELESS_BLOCK_TYPES:
+        return ""
+    return f"无 frame 请求 ({resource_type})"
+
+
 async def _install_oauth_routes(
     page,
     index: int,
@@ -170,19 +231,82 @@ async def _install_oauth_routes(
     - 所有带 ``code_challenge`` 的请求都改写成我们自己的 S256 challenge，
       这样 authorize 端点换名字（``/oauth/authorize`` / ``/api/oauth/oauth2/auth`` /
       ``/api/accounts/authorize``）也不会漏网。
-    - callback 页面的出站请求一律阻断：Playwright 拦不住 302 跳转的目标，
-      只能保证跳过来的 callback 页什么也做不了。
+    - 资料页提交后的那一跳由我们自己预取：从 ``Location`` 里读出 code 并就地结束导航，
+      浏览器永远不会真的落到 callback 页——平台也就没机会把 code 兑换掉。
+    - 万一还是落了 callback（多跳重定向等情况），callback 页面的出站请求一律阻断兜底。
     """
+
+    state = {"callback_seen": False}
 
     def _record(message: str) -> None:
         if events is not None:
             events.append(message)
+
+    def _capture(code: str, how: str) -> None:
+        state["callback_seen"] = True
+        if code in captured_codes:
+            return
+        captured_codes.append(code)
+        _record(f"获取 OAuth code（{how}）code_fp={_secret_fingerprint(code)}")
+        step(index, "已拦截到 OAuth code")
+
+    async def _inspect_navigation(route, url: str) -> bool:
+        """Walk this navigation's redirect chain ourselves, stopping before the callback.
+
+        浏览器会跟着 302 走进 callback 页，而跳转目标拦不住；自己走一遍就能在
+        ``Location`` 上拿到 code，并且永远不把 callback 请求发出去。
+        """
+        next_url = _replace_pkce_params(url, code_challenge) if "code_challenge=" in url else url
+        response = None
+        for _ in range(OAUTH_REDIRECT_HOPS):
+            try:
+                response = await route.fetch(url=next_url, max_redirects=0)
+            except Exception as error:
+                _record(f"预取失败，交回浏览器 {urlparse(next_url).path}: {error}")
+                return False
+            location = ""
+            try:
+                location = str((response.headers or {}).get("location") or "")
+            except Exception:
+                location = ""
+            target = urljoin(next_url, location) if location else ""
+            _record(
+                f"预取 {urlparse(next_url).netloc}{urlparse(next_url).path} -> {response.status}"
+                + (f" location={urlparse(target).netloc}{urlparse(target).path}" if target else "")
+            )
+            code = _oauth_callback_code(target)
+            if code:
+                _capture(code, "跳转 Location")
+                await route.fulfill(
+                    status=200,
+                    content_type="text/html; charset=utf-8",
+                    body=OAUTH_CALLBACK_STUB,
+                )
+                return True
+            if not target or response.status < 300 or response.status >= 400:
+                break
+            next_url = target
+        if response is None:
+            return False
+        # 不是 callback 就原样还给浏览器（含 Set-Cookie）。
+        await route.fulfill(response=response)
+        return True
 
     async def _handler(route) -> None:
         request = route.request
         url = str(getattr(request, "url", "") or "")
         method = str(getattr(request, "method", "") or "")
         try:
+            direct_code = _oauth_callback_code(url)
+            if direct_code:
+                # code 就在这次导航的 URL 里：收下它，请求根本不用发出去。
+                _capture(direct_code, "直接导航")
+                await route.fulfill(
+                    status=200,
+                    content_type="text/html; charset=utf-8",
+                    body=OAUTH_CALLBACK_STUB,
+                )
+                return
             if "code_challenge=" in url:
                 original = str((parse_qs(urlparse(url).query).get("code_challenge") or [""])[0])
                 _record(
@@ -199,6 +323,10 @@ async def _install_oauth_routes(
                 await route.continue_(url=_replace_pkce_params(url, code_challenge))
                 return
             reason = _should_block_browser_oauth_request(request)
+            if not reason:
+                reason = _should_block_frameless_request(
+                    request, bool(state["callback_seen"])
+                )
             if reason:
                 parsed = urlparse(url)
                 _record(f"阻断 {method} {parsed.netloc}{parsed.path}（{reason}）")
@@ -206,6 +334,9 @@ async def _install_oauth_routes(
                     step(index, f"OAuth trace: 阻断 callback 请求 {method} {url[:160]}", "yellow")
                 await route.abort("blockedbyclient")
                 return
+            if not state["callback_seen"] and _should_inspect_navigation(request):
+                if await _inspect_navigation(route, url):
+                    return
         except Exception as error:
             _record(f"路由异常放行 {method} {urlparse(url).path}: {error}")
             if _trace_enabled():
@@ -416,6 +547,25 @@ async def _submit_otp(page, index: int, mailbox: dict) -> None:
         await code_inputs.first.wait_for(state="hidden", timeout=15_000)
     except Exception:
         await page.wait_for_timeout(1000)
+
+
+async def _probe_platform_session(context) -> str:
+    """Report whether the platform itself ended up logged in — i.e. it redeemed the code."""
+    try:
+        response = await context.request.get(
+            f"{platform_base}/api/auth/session",
+            headers={"accept": "application/json", "referer": f"{platform_base}/"},
+            fail_on_status_code=False,
+            timeout=15_000,
+        )
+    except Exception as error:
+        return f"平台会话探测失败: {error}"
+    try:
+        body = (await response.text()).strip()
+    except Exception:
+        body = ""
+    logged_in = any(token in body[:400] for token in ('"user"', '"accessToken"', '"email"'))
+    return f"平台会话探测: status={response.status}, 平台已登录={logged_in}"
 
 
 def _is_transient_exchange_error(error: Exception) -> bool:
@@ -687,8 +837,9 @@ async def _browser_register_flow(
             page, context, index, captured_code[0], code_verifier, proxy
         )
     except Exception:
-        # invalid_grant 通常意味着 code 已被平台自己的 callback 页面用掉，
-        # 把拦截记录打出来，便于确认是授权改写漏了还是 callback 抢先兑换。
+        # invalid_grant 通常意味着 code 已经被别人兑换掉了：
+        # 先看平台自己是否登录成功（说明 code 被平台换走了），再打印拦截记录。
+        step(index, f"OAuth 诊断: {await _probe_platform_session(context)}", "yellow")
         _dump_oauth_events()
         raise
 
