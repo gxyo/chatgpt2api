@@ -6,7 +6,7 @@ import shutil
 import threading
 import time
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -22,7 +22,14 @@ THUMBNAIL_SIZE = (320, 320)
 MEGABYTE = 1024 * 1024
 IMAGE_CLEANUP_CHECK_SECONDS = 30
 STORAGE_CLEANUP_CHECK_SECONDS = 1800
+BEIJING_TZ = timezone(timedelta(hours=8))
+IMAGE_CLEANUP_TIMEZONE_KEY = "+08:00"
 _image_cleanup_state_lock = threading.Lock()
+
+
+def _beijing_now() -> datetime:
+    """Current Beijing time (UTC+8) as a naive datetime, regardless of the host timezone."""
+    return datetime.now(BEIJING_TZ).replace(tzinfo=None)
 
 
 def _cleanup_empty_dirs(root: Path) -> None:
@@ -283,10 +290,10 @@ def run_scheduled_image_cleanup_if_due(now: datetime | None = None) -> dict[str,
     if not config.image_cleanup_schedule_configured:
         return None
 
-    current = now or datetime.now()
+    current = now or _beijing_now()
     interval_days = config.image_cleanup_interval_days
     scheduled_time = config.image_cleanup_time
-    schedule_key = f"{interval_days}:{scheduled_time}"
+    schedule_key = f"{interval_days}:{scheduled_time}@{IMAGE_CLEANUP_TIMEZONE_KEY}"
     state_path = _image_cleanup_state_path()
 
     with _image_cleanup_state_lock:
