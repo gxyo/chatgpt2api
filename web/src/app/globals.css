@@ -256,17 +256,17 @@ html:not(.dark) .border-white\/90 {
   to { transform: scaleX(1); }
 }
 
-/* 路由内容入场：淡入 + 轻微上浮。终点必须落在 transform: none —— 带 fill-mode
-   的动画会一直保留最后一帧，留个 translate3d(0,0,0) 就等于给内容区里的 fixed
-   元素凭空造出一个包含块，登录页那个 fixed 的头部按钮会被带偏。 */
+/* 路由内容入场：只做淡入，不能碰 transform。
+   带 fill-mode 的动画会一直挂着最后一帧，而浏览器把最后一帧的 transform（哪怕写的是
+   none）算成实打实的变换矩阵（实测 matrix(1, 0, 0, 1, 0, 0)），这个容器于是永久成为
+   内容区里所有 fixed 元素的包含块：设置页的保存按钮、图片页的设置浮层都不再以视口为
+   参照，而是钉在这块内容的右下角、跟着页面一起滚。所以"轻微上浮"那 6px 只能放弃。 */
 @keyframes page-enter {
   from {
     opacity: 0;
-    transform: translateY(6px);
   }
   to {
     opacity: 1;
-    transform: none;
   }
 }
 
