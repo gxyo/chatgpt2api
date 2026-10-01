@@ -10,7 +10,6 @@ import { ImageStatsChart } from "@/components/image-stats-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchImageStats, type ImageStatsResponse } from "@/lib/api";
 import { getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -19,10 +18,7 @@ import { cn } from "@/lib/utils";
 const REQUESTS_DOT = "bg-[#2a78d6] dark:bg-[#3987e5]";
 const SUCCESS_DOT = "bg-[#2a78d6]/50 dark:bg-[#3987e5]/50";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
-const FAILED_TEXT = "text-[#d03b3b] dark:text-[#e66767]";
 const NEUTRAL_DOT = "bg-stone-300 dark:bg-stone-600";
-// 表头吸附在滚动容器顶部；背景用 bg-stone-50，暗色由 globals.css 的 .dark 覆盖统一处理。
-const HEAD_CELL = "sticky top-0 z-10 bg-stone-50";
 
 // days=0 表示不按天数取区间，交给后端按已有记录算「全部」。
 const PRESETS = [
@@ -119,9 +115,6 @@ function StatsContent() {
       ? `${range.start_date} 全天 · 按小时`
       : `${range.start_date} 至 ${range.end_date} · 按天`
     : "";
-  const axisLabel = granularity === "hour" ? "小时" : "日期";
-  const visibleRows = (data?.series ?? []).filter((point) => point.requests > 0);
-
   return (
     <section className="space-y-5">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
@@ -252,64 +245,6 @@ function StatsContent() {
             <ImageModeLegend className="pt-0.5" />
           </div>
           <ImageModeChart modes={data?.by_mode ?? []} />
-        </CardContent>
-      </Card>
-
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-        <CardContent className="space-y-4 p-5">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <div className="font-semibold text-stone-900 dark:text-stone-50">数据表</div>
-            <div className="text-xs text-stone-500 dark:text-stone-400">
-              共 {visibleRows.length} 条有数据的{axisLabel}
-            </div>
-          </div>
-
-          <div className="max-h-[420px] overflow-auto rounded-xl border border-stone-100 dark:border-white/10">
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead className={HEAD_CELL}>{axisLabel}</TableHead>
-                  <TableHead className={cn(HEAD_CELL, "text-right")}>请求数</TableHead>
-                  <TableHead className={cn(HEAD_CELL, "text-right")}>成功</TableHead>
-                  <TableHead className={cn(HEAD_CELL, "text-right")}>失败</TableHead>
-                  <TableHead className={cn(HEAD_CELL, "text-right")}>成功率</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {visibleRows.map((point) => (
-                  <TableRow key={point.key}>
-                    <TableCell className="px-4 py-2.5 whitespace-nowrap text-stone-600 dark:text-stone-300">
-                      {point.full_label}
-                    </TableCell>
-                    <TableCell className="px-4 py-2.5 text-right font-medium text-stone-900 tabular-nums dark:text-stone-100">
-                      {point.requests}
-                    </TableCell>
-                    <TableCell className="px-4 py-2.5 text-right text-stone-600 tabular-nums dark:text-stone-300">
-                      {point.success}
-                    </TableCell>
-                    <TableCell
-                      className={cn(
-                        "px-4 py-2.5 text-right tabular-nums",
-                        point.failed > 0 ? cn("font-medium", FAILED_TEXT) : "text-stone-400",
-                      )}
-                    >
-                      {point.failed}
-                    </TableCell>
-                    <TableCell className="px-4 py-2.5 text-right text-stone-600 tabular-nums dark:text-stone-300">
-                      {formatRate(point.success / point.requests)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-                {visibleRows.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={5} className="py-10 text-center text-sm text-stone-400">
-                      该时间段没有生图请求
-                    </TableCell>
-                  </TableRow>
-                ) : null}
-              </TableBody>
-            </Table>
-          </div>
         </CardContent>
       </Card>
 
