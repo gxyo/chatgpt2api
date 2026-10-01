@@ -21,6 +21,11 @@ const REQUESTS_FILL = "fill-[#2a78d6] dark:fill-[#3987e5]";
 const FAILED_STROKE = "stroke-[#e34948] dark:stroke-[#e66767]";
 const FAILED_FILL = "fill-[#e34948] dark:fill-[#e66767]";
 
+// 图例/提示框里的色点是 HTML <span>，不是 SVG 节点 —— fill-* 是 SVG 专用属性，
+// 套在 span 上不产生任何可见效果（色点会变成空白），必须用 bg-*。
+const REQUESTS_DOT = "bg-[#2a78d6] dark:bg-[#3987e5]";
+const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
+
 function niceScale(max: number) {
   const safeMax = Math.max(1, Math.ceil(max));
   const rough = safeMax / 4;
@@ -127,11 +132,11 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
     <div ref={containerRef} className="relative w-full">
       <div className="mb-2 flex flex-wrap items-center justify-end gap-4 text-xs text-neutral-500 dark:text-neutral-400">
         <span className="inline-flex items-center gap-1.5">
-          <span className={cn("size-2.5 rounded-full", REQUESTS_FILL)} />
+          <span className={cn("size-2.5 rounded-full", REQUESTS_DOT)} />
           请求数
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <span className={cn("size-2.5 rounded-full", FAILED_FILL)} />
+          <span className={cn("size-2.5 rounded-full", FAILED_DOT)} />
           失败数
         </span>
       </div>
@@ -277,21 +282,21 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
           <div className="space-y-1 text-neutral-600 dark:text-neutral-300">
             <div className="flex items-center justify-between gap-4">
               <span className="inline-flex items-center gap-1.5">
-                <span className={cn("size-2 rounded-full", REQUESTS_FILL)} />
+                <span className={cn("size-2 rounded-full", REQUESTS_DOT)} />
                 请求数
               </span>
               <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">{active.requests}</span>
             </div>
             <div className="flex items-center justify-between gap-4">
               <span className="inline-flex items-center gap-1.5">
-                <span className={cn("size-2 rounded-full", REQUESTS_FILL, "opacity-50")} />
+                <span className={cn("size-2 rounded-full", REQUESTS_DOT, "opacity-50")} />
                 成功
               </span>
               <span className="tabular-nums">{active.success}</span>
             </div>
             <div className="flex items-center justify-between gap-4">
               <span className="inline-flex items-center gap-1.5">
-                <span className={cn("size-2 rounded-full", FAILED_FILL)} />
+                <span className={cn("size-2 rounded-full", FAILED_DOT)} />
                 失败
               </span>
               <span className="tabular-nums">{active.failed}</span>

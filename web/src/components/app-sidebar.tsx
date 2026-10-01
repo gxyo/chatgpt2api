@@ -10,6 +10,7 @@ import {
   Menu,
   ScrollText,
   Settings,
+  Sparkles,
   UserPlus,
   Users,
   type LucideIcon,
@@ -39,7 +40,16 @@ const adminNavItems: NavItem[] = [
 const userNavItems: NavItem[] = [{ href: "/image", label: "画图", icon: ImageIcon }];
 
 const brandLinkClass =
-  "text-[15px] font-bold tracking-tight text-neutral-950 transition hover:text-neutral-600 dark:text-neutral-50 dark:hover:text-neutral-300";
+  "group inline-flex items-center gap-2.5 text-[15px] font-bold tracking-tight text-neutral-950 transition hover:opacity-80 dark:text-neutral-50";
+
+/** 品牌标识：蓝→紫渐变方块，和强调色同源。 */
+function BrandMark() {
+  return (
+    <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-[#2a78d6] to-[#7c5cf0] text-white shadow-[0_4px_12px_-4px_rgba(42,120,214,0.6)]">
+      <Sparkles className="size-4" />
+    </span>
+  );
+}
 
 /** 导航项是否处于选中态：子路由（如 /image/xxx）也算命中。 */
 function isActiveRoute(pathname: string, href: string) {
@@ -102,16 +112,20 @@ function NavList({
             onClick={onNavigate}
             aria-current={active ? "page" : undefined}
             className={cn(
-              "flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
+              "relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
               active
-                ? "bg-neutral-100 font-semibold text-neutral-950 dark:bg-white/10 dark:text-white"
-                : "font-medium text-neutral-500 hover:bg-neutral-50 hover:text-neutral-950 dark:text-neutral-400 dark:hover:bg-white/5 dark:hover:text-white",
+                ? "bg-brand-soft font-semibold text-brand"
+                : "font-medium text-neutral-500 hover:bg-neutral-100 hover:text-neutral-950 dark:text-neutral-400 dark:hover:bg-white/8 dark:hover:text-white",
             )}
           >
+            {/* 选中态左侧的强调色竖条 */}
+            {active ? (
+              <span className="absolute top-1/2 -left-1.5 h-5 w-[3px] -translate-y-1/2 rounded-full bg-brand" />
+            ) : null}
             <Icon
               className={cn(
                 "size-4 shrink-0 transition-colors",
-                active ? "text-neutral-950 dark:text-white" : "text-neutral-400 dark:text-neutral-500",
+                active ? "text-brand" : "text-neutral-400 dark:text-neutral-500",
               )}
             />
             <span className="truncate">{item.label}</span>
@@ -168,6 +182,7 @@ export function AppSidebar() {
     <aside className="fixed inset-y-0 left-0 z-40 hidden w-60 flex-col border-r border-neutral-200 bg-white lg:flex dark:border-white/10 dark:bg-neutral-900">
       <div className="flex h-14 shrink-0 items-center px-5">
         <Link href={navItems[0].href} className={brandLinkClass}>
+          <BrandMark />
           chatgpt2api
         </Link>
       </div>
@@ -210,6 +225,7 @@ export function MobileNavBar() {
         <SheetContent side="left" className="w-72 gap-0 p-0">
           <div className="flex h-14 shrink-0 items-center px-5">
             <Link href={navItems[0].href} className={brandLinkClass} onClick={() => setOpen(false)}>
+              <BrandMark />
               chatgpt2api
             </Link>
           </div>
@@ -229,6 +245,7 @@ export function MobileNavBar() {
         </SheetContent>
       </Sheet>
       <Link href={navItems[0].href} className={brandLinkClass}>
+        <BrandMark />
         chatgpt2api
       </Link>
       <HeaderActions className="ml-auto" />
