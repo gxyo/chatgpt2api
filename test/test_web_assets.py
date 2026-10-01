@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from api import support
+from api.app import create_app
 
 
 class WebAssetTests(unittest.TestCase):
@@ -43,6 +44,30 @@ class WebAssetTests(unittest.TestCase):
         response = support.web_asset_response(asset, "_next/static/chunk.js")
         self.assertEqual(response.headers["cache-control"], "public, max-age=31536000, immutable")
         self.assertIn("application/javascript", response.headers["content-type"])
+
+    def test_head_requests_skip_the_body(self) -> None:
+        index = self.web_dist / "index.html"
+        index.write_text("<!doctype html><html></html>", encoding="utf-8")
+
+        asset = support.resolve_web_asset("")
+        response = support.web_asset_response(asset, "", include_body=False)
+
+        self.assertEqual(response.body, b"")
+        self.assertEqual(response.headers["cache-control"], "no-store, max-age=0")
+        self.assertIn("text/html", response.headers["content-type"])
+
+    def test_web_assets_route_answers_head(self) -> None:
+        # Next.js 的 output: "export" 预取会先对目标路由发 HEAD 探测，
+        # 非 2xx 会让它把该路由的缓存判为不可用，从而彻底跳过预取。
+        index = self.web_dist / "index.html"
+        index.write_text("<!doctype html><html></html>", encoding="utf-8")
+        (self.web_dist / "stats").mkdir()
+        (self.web_dist / "stats" / "index.html").write_text("<!doctype html><html></html>", encoding="utf-8")
+
+        self.assertIn(
+            "HEAD",
+            {method for route in create_app().routes for method in (route.methods or set())},
+        )
 
     def test_path_traversal_is_not_resolved(self) -> None:
         outside = self.web_dist.parent / "outside.txt"

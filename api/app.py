@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from threading import Event
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from api import accounts, ai, image_tasks, register, system
@@ -57,16 +57,19 @@ def create_app() -> FastAPI:
     app.include_router(register.create_router())
     app.include_router(system.create_router(app_version))
 
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_web(full_path: str):
+    # HEAD 必须一并支持：Next.js 在 output: "export" 模式下预取路由前会先发 HEAD 探测，
+    # 405 会让它把这些路由缓存标记为不可用，前端每次点导航都要现拉一次 RSC。
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def serve_web(request: Request, full_path: str):
+        include_body = request.method != "HEAD"
         asset = resolve_web_asset(full_path)
         if asset is not None:
-            return web_asset_response(asset, full_path)
+            return web_asset_response(asset, full_path, include_body=include_body)
         if full_path.strip("/").startswith("_next/"):
             raise HTTPException(status_code=404, detail="Not Found")
         fallback = resolve_web_asset("")
         if fallback is None:
             raise HTTPException(status_code=404, detail="Not Found")
-        return web_asset_response(fallback, "")
+        return web_asset_response(fallback, "", include_body=include_body)
 
     return app

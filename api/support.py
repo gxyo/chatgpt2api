@@ -226,8 +226,7 @@ def _cached_web_asset(path: Path) -> CachedWebAsset:
     return asset
 
 
-def web_asset_response(path: Path, requested_path: str) -> Response:
-    asset = _cached_web_asset(path)
+def web_asset_response(path: Path, requested_path: str, *, include_body: bool = True) -> Response:
     clean_path = requested_path.strip("/")
     is_html = path.suffix.lower() == ".html"
     cache_control = (
@@ -237,11 +236,22 @@ def web_asset_response(path: Path, requested_path: str) -> Response:
         if is_html
         else "public, max-age=3600"
     )
+    headers = {
+        "Cache-Control": cache_control,
+        "X-Content-Type-Options": "nosniff",
+    }
+    # Next.js 的在导出模式下的预取会先对目标路由发一个 HEAD 探测（见 next 的
+    # segment-cache/cache.js）。HEAD 响应必须是非 4xx/5xx，否则该路由会被判为
+    # 不可用并冷却 10 秒，导致每次点击导航都要现拉一次 RSC，页面迟迟不跳转。
+    if not include_body:
+        return Response(
+            content=b"",
+            media_type=_web_asset_media_type(path),
+            headers=headers,
+        )
+    asset = _cached_web_asset(path)
     return Response(
         content=asset.content,
         media_type=asset.media_type,
-        headers={
-            "Cache-Control": cache_control,
-            "X-Content-Type-Options": "nosniff",
-        },
+        headers=headers,
     )
