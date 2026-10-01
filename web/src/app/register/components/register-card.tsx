@@ -3,7 +3,6 @@
 import type { ReactNode } from "react";
 import {
   AlertTriangle,
-  Globe2,
   LoaderCircle,
   Mail,
   Plus,
@@ -148,18 +147,6 @@ export function RegisterCard() {
   const providers = config.mail.providers || [];
   const logs = config.logs || [];
   const locked = config.enabled;
-  const hasCloudflareTempEmail = providers.some((provider) => provider.type === "cloudflare_temp_email");
-  const cloudflareDomainStats = [...(config.cloudflare_domain_stats || [])].sort((left, right) => {
-    const rateDifference = right.success_rate - left.success_rate;
-    if (rateDifference !== 0) return rateDifference;
-    const totalDifference = right.total - left.total;
-    if (totalDifference !== 0) return totalDifference;
-    return left.domain.localeCompare(right.domain);
-  });
-  const cloudflareTotals = cloudflareDomainStats.reduce(
-    (totals, item) => ({ success: totals.success + item.success, fail: totals.fail + item.fail }),
-    { success: 0, fail: 0 },
-  );
   const updateProviderType = (index: number, type: string) => {
     updateProvider(index, {
       type,
@@ -761,57 +748,6 @@ export function RegisterCard() {
           </CardContent>
         </Card>
 
-        {hasCloudflareTempEmail ? (
-          <Card className={PANEL_CARD_CLASS}>
-            <CardContent className="space-y-3 p-5">
-              <PanelHeading
-                icon={<Globe2 className="size-4 text-neutral-600" />}
-                title="域名注册表现"
-                description="Cloudflare 临时邮箱 · 历史累计"
-                action={
-                  <div className="flex shrink-0 items-center gap-1.5 font-mono text-[11px] tabular-nums">
-                    <span className="rounded-md bg-emerald-100 px-2 py-1 text-emerald-700">成功 {cloudflareTotals.success}</span>
-                    <span className="rounded-md bg-rose-100 px-2 py-1 text-rose-700">失败 {cloudflareTotals.fail}</span>
-                  </div>
-                }
-              />
-              <div className="max-h-52 overflow-y-auto rounded-xl border border-neutral-200">
-                {cloudflareDomainStats.length === 0 ? (
-                  <div className="px-3 py-6 text-center text-xs text-neutral-500">配置域名后，注册结果会在这里按域名累计。</div>
-                ) : (
-                  cloudflareDomainStats.map((item) => (
-                    <div
-                      key={item.domain}
-                      className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-neutral-200/80 px-3 py-2.5 last:border-b-0"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="truncate font-mono text-xs font-medium text-neutral-700" title={item.domain}>
-                            {item.domain}
-                          </span>
-                          <span className="shrink-0 font-mono text-[11px] text-neutral-500 tabular-nums">
-                            {item.total ? `${item.success_rate}%` : "暂无结果"}
-                          </span>
-                        </div>
-                        <div className={`mt-1.5 h-1 overflow-hidden rounded-full ${item.total ? "bg-rose-200/70" : "bg-neutral-200"}`}>
-                          <div
-                            className="h-full rounded-full bg-emerald-500 transition-[width] duration-500"
-                            style={{ width: `${item.total ? item.success_rate : 0}%` }}
-                          />
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-3 gap-1 font-mono text-[11px] tabular-nums">
-                        <span className="rounded-md bg-white px-2 py-1 text-center text-neutral-500 shadow-sm">总 {item.total}</span>
-                        <span className="rounded-md bg-emerald-50 px-2 py-1 text-center text-emerald-700">成 {item.success}</span>
-                        <span className="rounded-md bg-rose-50 px-2 py-1 text-center text-rose-700">败 {item.fail}</span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        ) : null}
 
         <Card className={`${PANEL_CARD_CLASS} xl:min-h-[260px] xl:flex-1`}>
           <CardContent className="flex min-h-0 flex-1 flex-col space-y-3 p-5">
@@ -825,7 +761,9 @@ export function RegisterCard() {
                 </Badge>
               }
             />
-            <div className="h-[320px] overflow-y-auto rounded-xl border border-neutral-200 bg-white/70 p-3 font-mono text-xs leading-6 xl:h-auto xl:min-h-[200px] xl:flex-1">
+            {/* overflow-y-auto 会把 overflow-x 的计算值也变成 auto，日志里的 URL/token 这类
+                超长不可断词就会顶出一条横向滚动条；这里显式盖掉，并让长词换行而不是被裁掉。 */}
+            <div className="h-[320px] overflow-x-hidden overflow-y-auto rounded-xl border border-neutral-200 bg-white/70 p-3 font-mono text-xs leading-6 xl:h-auto xl:min-h-[200px] xl:flex-1">
               {logs.length === 0 ? (
                 <div className="text-neutral-500">暂无日志</div>
               ) : (
@@ -843,7 +781,7 @@ export function RegisterCard() {
                     }
                   >
                     <span className="text-neutral-400">{formatBeijingTimeOfDay(item.time)}</span>
-                    <span className="pl-2">{item.text}</span>
+                    <span className="break-words pl-2">{item.text}</span>
                   </div>
                 ))
               )}

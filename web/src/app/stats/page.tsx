@@ -5,12 +5,18 @@ import { LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
+import { DomainRegisterStats } from "@/components/domain-register-stats";
 import { ImageModeChart } from "@/components/image-mode-chart";
 import { ImageStatsChart } from "@/components/image-stats-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, statCardClass } from "@/components/ui/card";
-import { fetchImageStats, type ImageStatsResponse } from "@/lib/api";
+import {
+  fetchImageStats,
+  fetchRegisterConfig,
+  type CloudflareDomainStat,
+  type ImageStatsResponse,
+} from "@/lib/api";
 import { getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -76,9 +82,24 @@ function StatsContent() {
   const [preset, setPreset] = useState<PresetKey | null>("today");
   const [data, setData] = useState<ImageStatsResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [domainStats, setDomainStats] = useState<CloudflareDomainStat[]>([]);
+
+  // 域名注册表现的数据源是注册配置。它是历史累计值，和日期区间无关，
+  // 但挂在主统计的加载流程里最省事——查询/刷新/切换区间都会顺带更新它。
+  // 只是附加信息，拉失败就清空，不打断主统计。
+  const loadDomainStats = async () => {
+    try {
+      const payload = await fetchRegisterConfig();
+      setDomainStats(payload.register.cloudflare_domain_stats ?? []);
+    } catch {
+      setDomainStats([]);
+    }
+  };
 
   const loadStats = async (nextPreset = preset, start = startDate, end = endDate) => {
     setIsLoading(true);
+    // 不 await：域名这块独立失败，不该拖住或影响主统计的加载态。
+    void loadDomainStats();
     try {
       const filters =
         nextPreset === "all" ? { scope: "all" as const } : { start_date: start, end_date: end };
@@ -244,6 +265,8 @@ function StatsContent() {
           <ImageModeChart modes={data?.by_mode ?? []} />
         </CardContent>
       </Card>
+
+      <DomainRegisterStats stats={domainStats} />
 
       <div className="flex justify-end">
         <Button
