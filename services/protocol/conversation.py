@@ -1722,6 +1722,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     # yield 结果：跳过索引顺序限制，不再让低索引失败阻塞高索引成功结果
     emitted = False
     last_error = ""
+    first_error: Exception | None = None
     # 先 yield 所有成功的结果
     for index in range(1, request.n + 1):
         if index in results:
@@ -1730,6 +1731,8 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 yield output
         elif index in errors:
             last_error = str(errors[index])
+            if first_error is None:
+                first_error = errors[index]
             if not emitted:
                 logger.warning({
                     "event": "image_parallel_failure_before_success",
@@ -1750,7 +1753,8 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     if not emitted:
         if not last_error:
             last_error = "no account in the pool could generate images — check account quota and rate-limit status"
-        raise ImageGenerationError(image_stream_error_message(last_error), conversation_id="")
+        # 这里把文案洗成了用户看得懂的说法，原始异常挂到 cause 上，日志才排得动。
+        raise ImageGenerationError(image_stream_error_message(last_error), conversation_id="") from first_error
 
 
 def stream_image_chunks(outputs: Iterable[ImageOutput]) -> Iterator[dict[str, Any]]:

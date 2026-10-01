@@ -244,6 +244,58 @@ def public_error_message(exc: BaseException) -> str:
     return str(exc) or "request failed"
 
 
+_EXCEPTION_TEXT_LIMIT = 2000
+_EXCEPTION_CHAIN_LIMIT = 8
+
+
+def _excerpt(value: Any, limit: int) -> str:
+    if isinstance(value, (dict, list)):
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = repr(value)
+    else:
+        text = str(value)
+    text = text.strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…[truncated]"
+    return text
+
+
+def describe_exception(exc: BaseException, limit: int = _EXCEPTION_TEXT_LIMIT) -> list[dict[str, Any]]:
+    """沿异常链收集排错需要的原始信息（类型、状态码、上游响应体）。
+
+    上游报错往上抛时会一层层被包装成面向用户的文案（例如「当前渠道拥堵」），原始状态码和
+    响应体只剩在 __cause__/__context__ 里。这里把整条链摊平成列表：第一个元素是最终抛给
+    用户的异常，越往后越接近上游原始报错，只记 error 文案时丢掉的线索都能在这里找回。
+    """
+    frames: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen and len(frames) < _EXCEPTION_CHAIN_LIMIT:
+        seen.add(id(current))
+        frame: dict[str, Any] = {
+            "type": current.__class__.__name__,
+            "message": _excerpt(str(current), limit),
+        }
+        context = getattr(current, "context", None)
+        if isinstance(context, str) and context:
+            frame["context"] = context
+        status_code = getattr(current, "status_code", None)
+        if isinstance(status_code, int):
+            frame["status_code"] = status_code
+        retry_after = getattr(current, "retry_after", None)
+        if isinstance(retry_after, int):
+            frame["retry_after"] = retry_after
+        body = getattr(current, "body", None)
+        # 上游响应体常是 dict/list，原样转成文本存进日志，方便事后直接看。
+        if body is not None and body != "":
+            frame["body"] = _excerpt(body, limit)
+        frames.append(frame)
+        current = current.__cause__ or current.__context__
+    return frames
+
+
 def sanitize_image_error_text(message: object) -> str:
     """把上游图片链路的原始报错替换成用户看得懂的中文。
 

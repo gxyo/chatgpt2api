@@ -13,7 +13,7 @@ from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.openai_backend_api import EDITABLE_FILE_MODEL, OpenAIBackendAPI
 from utils.beijing_time import beijing_now_text, beijing_text_from_timestamp
-from utils.helper import new_uuid
+from utils.helper import describe_exception, new_uuid
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -147,7 +147,8 @@ class EditableFileTaskService:
         except Exception as exc:
             error = str(exc) or "editable file task failed"
             self._update_task(key, status=TASK_STATUS_ERROR, error=error, account_email=account_email, ended_ts=time.time())
-            self._log_call(identity, kind, started, request_text(prompt), status="failed", error=error, account_email=account_email)
+            self._log_call(identity, kind, started, request_text(prompt), status="failed", error=error,
+                           account_email=account_email, exc=exc)
 
     def public_file_path(self, relative_path: str) -> Path:
         raw = str(relative_path or "").replace("\\", "/").lstrip("/")
@@ -227,6 +228,7 @@ class EditableFileTaskService:
             error: str = "",
             account_email: str = "",
             result: dict[str, str] | None = None,
+            exc: BaseException | None = None,
     ) -> None:
         detail = {
             "key_id": identity.get("id"),
@@ -245,6 +247,11 @@ class EditableFileTaskService:
             detail["account_email"] = account_email
         if error:
             detail["error"] = error
+        if exc is not None:
+            try:
+                detail["upstream_error"] = describe_exception(exc)
+            except Exception:
+                pass
         if result:
             detail["result"] = result
         try:

@@ -51,25 +51,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         HITS.append(f"GET {self.path}")
-        if self.path.startswith("/about-you-post"):  # 必须先判，否则会被 /about-you 前缀吃掉
+        # 按去掉 query 的路径精确匹配：startswith 会被前缀吃掉（/authorize-nav vs /authorize）。
+        route = self.path.split("?", 1)[0]
+        if route == "/about-you-post":
             self._send(200, "<html><body><form id=f method=post action=/submit>"
                             "<input name=x value=1></form>"
                             "<script>setTimeout(() => document.getElementById('f').submit(), 600)</script>"
                             "</body></html>")
             return
-        if self.path.startswith("/about-you"):
+        if route == "/about-you":
             self._send(200, "<html><body>profile<script>setTimeout(() => location.href='/start', 600)</script></body></html>")
             return
-        if self.path.startswith("/start"):
+        if route == "/start":
             self._send(302, location="/auth/callback?code=from-redirect&state=s1")
             return
-        if self.path.startswith("/normal-start"):
+        if route == "/normal-start":
             self._send(302, location="/landing")
             return
-        if self.path.startswith("/auth/callback"):
+        if route == "/authorize":
+            # 真实链路：authorize 自己 302 到 callback，Location 里带 code。
+            self._send(302, location="/auth/callback?code=from-authorize&state=s3")
+            return
+        if route == "/authorize-nav":
+            self._send(200, "<html><body>nav<script>setTimeout(() => "
+                            "location.href='/authorize?code_challenge=browser-challenge&code_challenge_method=S256', 600)"
+                            "</script></body></html>")
+            return
+        if route == "/authorize-xhr":
+            self._send(200, "<html><body>xhr<script>setTimeout(() => "
+                            "fetch('/authorize?code_challenge=browser-challenge&code_challenge_method=S256')"
+                            ".then(r => r.text()).then(t => document.title = 'xhr:' + t.length), 600)"
+                            "</script></body></html>")
+            return
+        if route == "/auth/callback":
             self._send(200, "<html><body>REAL CALLBACK PAGE</body></html>")
             return
-        if self.path.startswith("/landing"):
+        if route == "/landing":
             self._send(200, "<html><body>landing</body></html>")
             return
         self._send(200, "<html><body>start</body></html>")
@@ -133,6 +150,10 @@ async def main() -> None:
             await run_case("js", f"{base}/about-you")
             # 用例 2：form POST -> 302 -> callback
             await run_case("post", f"{base}/about-you-post")
+            # 用例 3：真实形状 —— authorize 自己 302 到 callback（文档导航）
+            await run_case("auth-nav", f"{base}/authorize-nav")
+            # 用例 4：真实形状的 XHR 版 —— JS fetch(authorize)，响应是 302
+            await run_case("auth-xhr", f"{base}/authorize-xhr")
 
             cookies = {c["name"]: c["value"] for c in await context.cookies()}
             print(f"[cookies] {cookies}")

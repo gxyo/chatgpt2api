@@ -127,9 +127,15 @@ def create_router(app_version: str) -> APIRouter:
         return get_image_download_response(image_path)
 
     @router.get("/api/logs")
-    async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_logs(type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+                       authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"items": log_service.list(type=type.strip(), start_date=start_date.strip(), end_date=end_date.strip())}
+        return {"items": log_service.list(
+            type=type.strip(),
+            status=status.strip(),
+            start_date=start_date.strip(),
+            end_date=end_date.strip(),
+        )}
 
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):

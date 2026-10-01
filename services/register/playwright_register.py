@@ -320,6 +320,11 @@ async def _install_oauth_routes(
                         f"original_fp={_secret_fingerprint(original)}, "
                         f"replacement_fp={_secret_fingerprint(code_challenge)}",
                     )
+                # authorize 自己就是那条通往 callback 的链的起点：它的 302 目标拦不住，
+                # 所以不交回浏览器，由我们走完这条链。命中 callback 就地收码并结束导航，
+                # 平台的 callback 请求从头到尾不会发出去。
+                if not state["callback_seen"] and await _inspect_navigation(route, url):
+                    return
                 await route.continue_(url=_replace_pkce_params(url, code_challenge))
                 return
             reason = _should_block_browser_oauth_request(request)
@@ -816,7 +821,12 @@ async def _browser_register_flow(
             params = parse_qs(parsed.query)
             c = (params.get("code") or [""])[0]
             if c:
+                # 正常路径是预取时从 Location 里拿到 code。走到这里说明浏览器真的落到了
+                # callback 页，平台的服务端很可能已经先兑换过（失败的兑换也会烧掉 code），
+                # 所以既收下也报出来，方便下次排查预取为什么没接住。
                 captured_code.append(c)
+                step(index, "OAuth 诊断: 兜底从浏览器 URL 取码（预取未接住，callback 可能已被平台兑换）", "yellow")
+                _dump_oauth_events()
                 break
         await page.wait_for_timeout(2000)
 

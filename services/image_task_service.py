@@ -14,7 +14,7 @@ from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 from utils.beijing_time import beijing_now_text, beijing_text_from_timestamp
-from utils.helper import sanitize_image_error_text
+from utils.helper import describe_exception, sanitize_image_error_text
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -321,6 +321,7 @@ class ImageTaskService:
                 status="failed",
                 error=error_message,
                 account_email=account_email,
+                exc=exc,
             )
 
     def _timeout_secs(self) -> float:
@@ -363,6 +364,7 @@ class ImageTaskService:
         error: str = "",
         urls: list[str] | None = None,
         account_email: str = "",
+        exc: BaseException | None = None,
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
         summary_prefix = "图生图" if mode == "edit" else "文生图"
@@ -381,6 +383,11 @@ class ImageTaskService:
             detail["request_text"] = request_preview
         if error:
             detail["error"] = error
+        if exc is not None:
+            try:
+                detail["upstream_error"] = describe_exception(exc)
+            except Exception:
+                pass
         if account_email:
             detail["account_email"] = account_email
         if urls:
@@ -584,6 +591,7 @@ class ImageTaskService:
                 "调用失败（续轮询）",
                 status="failed",
                 error=error_message,
+                exc=exc,
             )
 
 

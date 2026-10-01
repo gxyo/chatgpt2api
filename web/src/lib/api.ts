@@ -706,9 +706,10 @@ export async function deleteToTarget(targetImageMb: number) {
   );
 }
 
-export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {
+export async function fetchSystemLogs(filters: { type?: string; status?: string; start_date?: string; end_date?: string }) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
+  if (filters.status) params.set("status", filters.status);
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);

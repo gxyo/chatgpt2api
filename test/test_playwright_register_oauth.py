@@ -59,12 +59,32 @@ class FakeRequest:
         return self._frame
 
 
+class FakeFetchedResponse:
+    """What ``route.fetch(max_redirects=0)`` hands back: a status and its Location."""
+
+    def __init__(self, status: int, location: str = "") -> None:
+        self.status = status
+        self.headers = {"location": location} if location else {}
+
+
 class FakeRoute:
-    def __init__(self, url: str, **request_kwargs) -> None:
+    def __init__(self, url: str, fetch_responses=None, fetch_error=None, **request_kwargs) -> None:
         self.request = FakeRequest(url, **request_kwargs)
         self.continued_url = None
         self.fulfilled = None
         self.aborted = None
+        self.fetched_urls: list[str] = []
+        self._fetch_responses = list(fetch_responses or [FakeFetchedResponse(200)])
+        self._fetch_error = fetch_error
+
+    async def fetch(self, url=None, max_redirects=None):
+        # max_redirects=0 才有意义：默认跟随会把我们带进 callback 页。
+        if self._fetch_error is not None:
+            raise self._fetch_error
+        self.fetched_urls.append(url or self.request.url)
+        if len(self._fetch_responses) > 1:
+            return self._fetch_responses.pop(0)
+        return self._fetch_responses[0]
 
     async def continue_(self, url=None) -> None:
         self.continued_url = url or self.request.url
@@ -108,10 +128,90 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
                 f"https://auth.openai.com/{path}?state=a&code_challenge=browser-challenge&code_challenge_method=S256"
             )
             await handler(route)
-            params = parse_qs(urlparse(route.continued_url).query)
+            # 这一跳由我们自己走（它的 302 目标拦不住），所以挑战要体现在我们发出的 URL 上。
+            params = parse_qs(urlparse(route.fetched_urls[0]).query)
             self.assertEqual(params["code_challenge"], ["our-challenge"])
             self.assertEqual(params["code_challenge_method"], ["S256"])
             self.assertIsNone(route.aborted)
+
+    async def test_authorize_redirect_to_callback_captures_code_without_following_it(self) -> None:
+        # 真实链路就是这条：authorize 的 302 Location 里带着 code。
+        # 一旦让浏览器跟过去，平台 callback 会先在服务端把它兑换掉（观测到 invalid_grant
+        # 且平台会话仍未登录，正是"兑换尝试先把 code 烧掉"的特征）。
+        page = FakePage()
+        captured: list[str] = []
+        events: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", captured, events)
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
+
+        route = FakeRoute(
+            "https://auth.openai.com/oauth/authorize?state=a&code_challenge=browser-challenge",
+            fetch_responses=[
+                FakeFetchedResponse(302, "https://platform.openai.com/auth/callback?code=one-time-code&state=a")
+            ],
+        )
+        await handler(route)
+
+        self.assertEqual(captured, ["one-time-code"])
+        self.assertIsNone(route.continued_url)  # 绝不能交回浏览器
+        self.assertEqual(route.fulfilled["status"], 200)  # 就地给个空壳页收尾
+        self.assertIsNone(route.aborted)
+        self.assertTrue(any("获取 OAuth code" in event for event in events))
+
+    async def test_authorize_chain_is_walked_through_intermediate_redirects(self) -> None:
+        page = FakePage()
+        captured: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", captured, [])
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
+
+        route = FakeRoute(
+            "https://auth.openai.com/oauth/authorize?state=a&code_challenge=browser-challenge",
+            fetch_responses=[
+                FakeFetchedResponse(302, "/api/accounts/continue?state=a"),  # 相对地址
+                FakeFetchedResponse(302, "https://platform.openai.com/auth/callback?code=multi-hop&state=a"),
+            ],
+        )
+        await handler(route)
+
+        self.assertEqual(captured, ["multi-hop"])
+        self.assertIsNone(route.continued_url)
+        self.assertEqual(len(route.fetched_urls), 2)
+
+    async def test_authorize_chain_without_a_callback_is_served_untouched(self) -> None:
+        page = FakePage()
+        captured: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", captured, [])
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
+
+        response = FakeFetchedResponse(200)
+        route = FakeRoute(
+            "https://auth.openai.com/oauth/authorize?state=a&code_challenge=browser-challenge",
+            fetch_responses=[response],
+        )
+        await handler(route)
+
+        self.assertEqual(captured, [])
+        self.assertIs(route.fulfilled["response"], response)  # 原样还给浏览器
+        self.assertIsNone(route.aborted)
+
+    async def test_pkce_rewrite_still_reaches_the_browser_when_the_peek_fails(self) -> None:
+        # route.fetch 失败时必须退化回"改写后交给浏览器"，不能把这一跳吞掉。
+        page = FakePage()
+        captured: list[str] = []
+        events: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", captured, events)
+        handler = page.routes[OAUTH_ROUTE_PATTERN]
+
+        route = FakeRoute(
+            "https://auth.openai.com/oauth/authorize?state=a&code_challenge=browser-challenge",
+            fetch_error=RuntimeError("net::ERR_FAILED"),
+        )
+        await handler(route)
+
+        self.assertEqual(captured, [])
+        params = parse_qs(urlparse(route.continued_url).query)
+        self.assertEqual(params["code_challenge"], ["our-challenge"])
+        self.assertTrue(any("预取失败" in event for event in events))
 
     async def test_callback_page_requests_are_blocked_so_the_code_survives(self) -> None:
         page = FakePage()

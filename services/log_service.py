@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from services.config import DATA_DIR
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from utils.beijing_time import beijing_now_text, beijing_text_from_timestamp
-from utils.helper import anthropic_sse_stream, public_error_message, sse_json_stream
+from utils.helper import anthropic_sse_stream, describe_exception, public_error_message, sse_json_stream
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
@@ -49,10 +49,14 @@ class LogService:
         return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
-    def _matches_filters(item: dict[str, Any], *, type: str = "", start_date: str = "", end_date: str = "") -> bool:
+    def _matches_filters(
+        item: dict[str, Any], *, type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+    ) -> bool:
         t = str(item.get("time") or "")
         day = t[:10]
         if type and item.get("type") != type:
+            return False
+        if status and str((item.get("detail") or {}).get("status") or "") != status:
             return False
         if start_date and day < start_date:
             return False
@@ -71,7 +75,8 @@ class LogService:
         with self.path.open("a", encoding="utf-8") as file:
             file.write(self._serialize_item(item) + "\n")
 
-    def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
+    def list(self, type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+             limit: int = 200) -> list[dict[str, Any]]:
         if not self.path.exists():
             return []
         items: list[dict[str, Any]] = []
@@ -80,7 +85,7 @@ class LogService:
             item = self._parse_line(lines[line_number], line_number)
             if item is None:
                 continue
-            if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
+            if not self._matches_filters(item, type=type, status=status, start_date=start_date, end_date=end_date):
                 continue
             items.append(item)
             if len(items) >= limit:
@@ -261,14 +266,14 @@ class LoggedCall:
         try:
             result = await run_in_threadpool(handler, *args)
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+            self.log("调用失败", status="failed", error=str(exc), exc=exc, account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
+            self.log("调用失败", status="failed", error=str(exc.detail), exc=exc)
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+            self.log("调用失败", status="failed", error=str(exc), exc=exc, account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
@@ -283,14 +288,14 @@ class LoggedCall:
         try:
             has_first, first = await run_in_threadpool(_next_item, result)
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+            self.log("调用失败", status="failed", error=str(exc), exc=exc, account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
+            self.log("调用失败", status="failed", error=str(exc.detail), exc=exc)
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+            self.log("调用失败", status="failed", error=str(exc), exc=exc, account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
@@ -316,6 +321,7 @@ class LoggedCall:
                 "流式调用失败",
                 status="failed",
                 error=str(exc),
+                exc=exc,
                 urls=urls,
                 account_email=(account_emails[0] if account_emails else getattr(exc, "account_email", "")),
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
@@ -331,7 +337,8 @@ class LoggedCall:
                          conversation_id=conversation_ids[0] if conversation_ids else "")
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
-            urls: list[str] | None = None, account_email: str = "", conversation_id: str = "") -> None:
+            urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
+            exc: BaseException | None = None) -> None:
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -350,6 +357,13 @@ class LoggedCall:
             detail["request_shape"] = self.request_shape
         if error:
             detail["error"] = error
+        if exc is not None:
+            # error 是给用户看的文案，上游的状态码和响应体在异常链里，单独记一份。
+            try:
+                detail["upstream_error"] = describe_exception(exc)
+            except Exception:
+                # 记日志本身永远不能影响请求处理。
+                pass
         email = str(account_email or "").strip()
         if not email:
             emails = _collect_account_emails(result)
