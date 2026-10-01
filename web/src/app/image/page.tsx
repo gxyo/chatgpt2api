@@ -29,6 +29,7 @@ import {
   type Model,
   type ImageTask,
 } from "@/lib/api";
+import { formatBeijing } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { useSettingsStore } from "@/app/settings/store";
 import {
@@ -103,16 +104,14 @@ function buildConversationTitle(prompt: string) {
 }
 
 function formatConversationTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  return new Intl.DateTimeFormat("zh-CN", {
+  // 会话时间本地存的是 toISOString()（UTC），展示统一按北京时间。
+  const formatted = formatBeijing(value, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(date);
+  });
+  return formatted === "—" ? "" : formatted;
 }
 
 function formatAvailableQuota(accounts: Account[]) {

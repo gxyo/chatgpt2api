@@ -20,6 +20,7 @@ from urllib3.util.retry import Retry
 
 from services.account_service import account_service
 from services.register import mail_provider
+from utils.beijing_time import beijing_now
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 base_dir = Path(__file__).resolve().parent
@@ -119,7 +120,7 @@ def log(text: str, color: str = "") -> None:
     with print_lock:
         prefix = colors.get(color, "")
         suffix = "\033[0m" if prefix else ""
-        print(f"{prefix}{datetime.now().strftime('%H:%M:%S')} {text}{suffix}")
+        print(f"{prefix}{beijing_now().strftime('%H:%M:%S')} {text}{suffix}")
 
 
 def step(index: int, text: str, color: str = "") -> None:

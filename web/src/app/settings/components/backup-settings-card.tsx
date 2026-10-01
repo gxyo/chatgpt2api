@@ -12,24 +12,19 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input";
 import webConfig from "@/constants/common-env";
 import { fetchBackupDetail, getBackupDownloadUrl, type BackupDetail, type BackupInclude } from "@/lib/api";
+import { formatBeijing } from "@/lib/beijing-time";
 import { getStoredAuthKey } from "@/store/auth";
 import { useSettingsStore } from "../store";
 
 function formatDateTime(value?: string | null) {
-  if (!value) {
-    return "—";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return new Intl.DateTimeFormat("zh-CN", {
+  // 备份时间戳是后端按 UTC 存的（Z 结尾），这里统一按北京时间展示。
+  return formatBeijing(value, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(date);
+  });
 }
 
 function formatBytes(value: number) {

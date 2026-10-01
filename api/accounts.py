@@ -6,7 +6,6 @@ import json
 import re
 import uuid
 import zipfile
-from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException
@@ -15,6 +14,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from services.auth_service import auth_service
+from utils.beijing_time import beijing_now
 
 from api.support import (
     require_admin,
@@ -130,7 +130,7 @@ def _unique_tokens(tokens: list[str]) -> list[str]:
 
 
 def _download_timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
+    return beijing_now().strftime("%Y%m%d-%H%M%S")
 
 
 def _safe_export_name(value: str, fallback: str) -> str:

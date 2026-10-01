@@ -58,6 +58,7 @@ import {
   type Model,
   type RefreshProgressResponse,
 } from "@/lib/api";
+import { formatBeijing, formatBeijingClock, parseInstant } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
@@ -123,8 +124,9 @@ function formatRestoreAt(value?: string | null) {
     return { absolute: "—", relative: "" };
   }
 
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
+  // restore_at 来自上游，带时区；剩余时长只跟时刻有关，展示统一按北京时间。
+  const date = parseInstant(value);
+  if (!date) {
     return { absolute: value, relative: "" };
   }
 
@@ -134,12 +136,7 @@ function formatRestoreAt(value?: string | null) {
   const hours = totalHours % 24;
   const relative = diffMs > 0 ? `剩余 ${days}d ${hours}h` : "已到恢复时间";
 
-  const pad = (num: number) => String(num).padStart(2, "0");
-  const absolute = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-
-  return { absolute, relative };
+  return { absolute: formatBeijingClock(value), relative };
 }
 
 function formatQuotaSummary(accounts: Account[]) {
@@ -1153,11 +1150,12 @@ function AccountsPageContent() {
                           {(() => {
                             const raw = (account as any).created_at;
                             if (!raw) return "—";
-                            try {
-                              const d = new Date(raw + "Z");
-                              if (isNaN(d.getTime())) return String(raw).slice(0, 10);
-                              return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-                            } catch { return String(raw).slice(0, 10); }
+                            // 历史数据是不带时区的 UTC 文本，新数据带 +00:00，两种情况都按 UTC 解析。
+                            return formatBeijing(
+                              raw,
+                              { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" },
+                              "utc",
+                            );
                           })()}
                         </td>
                         <td className="px-4 py-3">

@@ -13,6 +13,7 @@ from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from utils.beijing_time import beijing_now_text, beijing_text_from_timestamp
 from utils.helper import sanitize_image_error_text
 
 TASK_STATUS_QUEUED = "queued"
@@ -25,7 +26,7 @@ TASK_TIMEOUT_MESSAGE = "图片任务处理超时，请稍后重试"
 
 
 def _now_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return beijing_now_text()
 
 
 def _timestamp(value: object) -> float:
@@ -371,7 +372,7 @@ class ImageTaskService:
             "role": identity.get("role"),
             "endpoint": endpoint,
             "model": model,
-            "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
+            "started_at": beijing_text_from_timestamp(started),
             "ended_at": _now_iso(),
             "duration_ms": int((time.time() - started) * 1000),
             "status": status,

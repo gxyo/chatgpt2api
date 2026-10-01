@@ -6,7 +6,7 @@ import shutil
 import threading
 import time
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -16,20 +16,18 @@ from PIL import Image, ImageOps
 from services.config import config
 from services.image_storage_service import IMAGE_EXTENSIONS, image_storage_service
 from services.image_tags_service import load_tags, remove_tags
+from utils.beijing_time import beijing_now
 from utils.log import logger
 
 THUMBNAIL_SIZE = (320, 320)
 MEGABYTE = 1024 * 1024
 IMAGE_CLEANUP_CHECK_SECONDS = 30
 STORAGE_CLEANUP_CHECK_SECONDS = 1800
-BEIJING_TZ = timezone(timedelta(hours=8))
 IMAGE_CLEANUP_TIMEZONE_KEY = "+08:00"
 _image_cleanup_state_lock = threading.Lock()
 
-
-def _beijing_now() -> datetime:
-    """Current Beijing time (UTC+8) as a naive datetime, regardless of the host timezone."""
-    return datetime.now(BEIJING_TZ).replace(tzinfo=None)
+# 北京时间换算统一放在 utils/beijing_time.py，这里保留 _beijing_now 作为模块内的别名。
+_beijing_now = beijing_now
 
 
 def _cleanup_empty_dirs(root: Path) -> None:

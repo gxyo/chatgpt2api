@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from services.log_service import LOG_TYPE_CALL, log_service
-
-BEIJING_TZ = timezone(timedelta(hours=8))
+from utils.beijing_time import beijing_now
 
 # 直接调用 /v1/images/* 的请求，成功与失败都会写入日志。
 IMAGE_ENDPOINT_MODES = {
@@ -29,11 +28,6 @@ GRANULARITY_DAY = "day"
 # 单次查询最多返回的每日数据点，超出时只统计最近的这一段。
 MAX_SERIES_POINTS = 1000
 _STATUS_SUCCESS = "success"
-
-
-def beijing_now() -> datetime:
-    """当前北京时间（UTC+8）的 naive datetime，不受宿主机时区影响。"""
-    return datetime.now(BEIJING_TZ).replace(tzinfo=None)
 
 
 def beijing_today() -> str:

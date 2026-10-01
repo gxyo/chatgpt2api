@@ -19,6 +19,7 @@ from services.log_service import (
     log_service,
 )
 from services.storage.base import StorageBackend
+from utils.beijing_time import beijing_now_text, utc_now_iso
 from utils.helper import anonymize_token
 
 ACCOUNT_REFRESH_MAX_WORKERS = 6
@@ -89,7 +90,9 @@ class AccountService:
 
     @staticmethod
     def _now() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        # 账号的 created_at 参与 token 刷新退避计算（见 _parse_time），
+        # 必须保留明确时区，因此这里写带偏移的 UTC，展示层再换算成北京时间。
+        return utc_now_iso()
 
     @staticmethod
     def _decode_jwt_payload(token: str) -> dict:
@@ -1113,7 +1116,7 @@ class AccountService:
             if current is None:
                 return
             next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = beijing_now_text()
             account = self._normalize_account(next_item)
             if account is None:
                 return
@@ -1462,7 +1465,7 @@ class AccountService:
             if current is None:
                 return None
             next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = beijing_now_text()
             image_quota_unknown = bool(next_item.get("image_quota_unknown"))
             if success:
                 next_item["success"] = self._nonnegative_int(next_item.get("success")) + 1

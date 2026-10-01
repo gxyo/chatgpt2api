@@ -40,6 +40,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { formatBeijingClock } from "@/lib/beijing-time";
 import {
   createSub2APIServer,
   deleteSub2APIServer,
@@ -497,7 +498,7 @@ export function Sub2APIConnections() {
                                     状态 {importJob.status}，已处理 {importJob.completed}/{importJob.total}
                                   </div>
                                   <div className="truncate text-xs text-stone-400">
-                                    任务 {importJob.job_id.slice(0, 8)} · {importJob.created_at}
+                                    任务 {importJob.job_id.slice(0, 8)} · {formatBeijingClock(importJob.created_at)}
                                   </div>
                                 </div>
                                 <Badge
