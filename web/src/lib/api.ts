@@ -714,6 +714,49 @@ export async function fetchSystemLogs(filters: { type?: string; start_date?: str
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
+export type ImageStatsPoint = {
+  key: string;
+  label: string;
+  full_label: string;
+  requests: number;
+  success: number;
+  failed: number;
+};
+
+export type ImageStatsBreakdown = {
+  mode: string;
+  label: string;
+  requests: number;
+  success: number;
+  failed: number;
+};
+
+export type ImageStatsResponse = {
+  range: {
+    start_date: string;
+    end_date: string;
+    granularity: "hour" | "day";
+    days: number;
+  };
+  totals: {
+    requests: number;
+    success: number;
+    failed: number;
+    success_rate: number;
+    avg_duration_ms: number;
+  };
+  by_mode: ImageStatsBreakdown[];
+  series: ImageStatsPoint[];
+  peak: ImageStatsPoint | null;
+};
+
+export async function fetchImageStats(filters: { start_date?: string; end_date?: string }) {
+  const params = new URLSearchParams();
+  if (filters.start_date) params.set("start_date", filters.start_date);
+  if (filters.end_date) params.set("end_date", filters.end_date);
+  return httpRequest<ImageStatsResponse>(`/api/stats/images${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
 export async function deleteSystemLogs(ids: string[]) {
   return httpRequest<{ removed: number }>("/api/logs/delete", {
     method: "POST",

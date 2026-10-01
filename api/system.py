@@ -25,6 +25,7 @@ from services.image_storage_service import ImageStorageError, image_storage_serv
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import proxy_settings, test_clearance, test_proxy
+from services.stats_service import build_image_stats
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -131,6 +132,14 @@ def create_router(app_version: str) -> APIRouter:
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return log_service.delete(body.ids)
+
+    @router.get("/api/stats/images")
+    async def get_image_stats(start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return await run_in_threadpool(build_image_stats, start_date.strip(), end_date.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):
