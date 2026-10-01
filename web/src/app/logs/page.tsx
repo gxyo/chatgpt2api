@@ -24,6 +24,12 @@ const LogType = {
   Account: "account",
 } as const;
 
+const LogStatus = {
+  All: "all",
+  Success: "success",
+  Failed: "failed",
+} as const;
+
 const typeLabels: Record<string, string> = {
   [LogType.Call]: "调用日志",
   [LogType.Account]: "账号管理日志",
@@ -63,6 +69,24 @@ function getUrls(item: SystemLog | null) {
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
 }
 
+type UpstreamErrorFrame = {
+  type?: string;
+  message?: string;
+  context?: string;
+  status_code?: number;
+  retry_after?: number;
+  body?: string;
+};
+
+/** 上游报错链：第一条是抛给用户的异常，越往后越接近上游原始响应。 */
+function getUpstreamError(item: SystemLog | null): UpstreamErrorFrame[] {
+  const frames = item?.detail?.upstream_error;
+  if (!Array.isArray(frames)) {
+    return [];
+  }
+  return frames.filter((frame): frame is UpstreamErrorFrame => typeof frame === "object" && frame !== null);
+}
+
 function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
@@ -73,6 +97,7 @@ function getStatus(item: SystemLog) {
 function LogsContent() {
   const [items, setItems] = useState<SystemLog[]>([]);
   const [type, setType] = useState<string>(LogType.Call);
+  const [status, setStatus] = useState<string>(LogStatus.All);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
@@ -91,6 +116,7 @@ function LogsContent() {
   const [isCleaning, setIsCleaning] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const detailUrls = getUrls(detailLog);
+  const detailUpstreamError = getUpstreamError(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
   const pageSize = 10;
@@ -104,7 +130,12 @@ function LogsContent() {
   const loadLogs = async () => {
     setIsLoading(true);
     try {
-      const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate });
+      const data = await fetchSystemLogs({
+        type,
+        status: status === LogStatus.All ? "" : status,
+        start_date: startDate,
+        end_date: endDate,
+      });
       setItems(data.items);
       setSelectedIds((current) => current.filter((id) => data.items.some((item) => item.id === id)));
       setPage(1);
@@ -167,8 +198,17 @@ function LogsContent() {
   };
 
   const clearFilters = () => {
+    setStatus(LogStatus.All);
     setStartDate("");
     setEndDate("");
+  };
+
+  const changeType = (value: string) => {
+    setType(value);
+    // 成功/失败只对调用日志有意义，账号日志的 status 记的是账号状态（正常/限流/禁用）。
+    if (value !== LogType.Call) {
+      setStatus(LogStatus.All);
+    }
   };
 
   const openDetail = (item: SystemLog) => {
@@ -209,7 +249,7 @@ function LogsContent() {
 
   useEffect(() => {
     void loadLogs();
-  }, [type, startDate, endDate]);
+  }, [type, status, startDate, endDate]);
 
   useEffect(() => {
     void loadRetention();
@@ -223,13 +263,23 @@ function LogsContent() {
           <h1 className="text-2xl font-semibold tracking-tight">日志管理</h1>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Select value={type} onValueChange={setType}>
+          <Select value={type} onValueChange={changeType}>
             <SelectTrigger className="h-10 w-[150px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value={LogType.Call}>调用日志</SelectItem>
               <SelectItem value={LogType.Account}>账号管理日志</SelectItem>
             </SelectContent>
           </Select>
+          {isCallLog ? (
+            <Select value={status} onValueChange={setStatus}>
+              <SelectTrigger className="h-10 w-[130px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value={LogStatus.All}>全部状态</SelectItem>
+                <SelectItem value={LogStatus.Success}>成功</SelectItem>
+                <SelectItem value={LogStatus.Failed}>失败</SelectItem>
+              </SelectContent>
+            </Select>
+          ) : null}
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
@@ -420,6 +470,24 @@ function LogsContent() {
                     </div>
                   ))}
               </div>
+              {detailUpstreamError.length ? (
+                <div className="space-y-2">
+                  <div className="text-sm font-medium text-stone-700">上游报错</div>
+                  {detailUpstreamError.map((frame, index) => (
+                    <div key={index} className="space-y-2 rounded-xl border border-rose-100 bg-rose-50/60 p-3">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500">
+                        <Badge variant="danger" className="rounded-md">{frame.type || "异常"}</Badge>
+                        {typeof frame.status_code === "number" ? <span>status={frame.status_code}</span> : null}
+                        {frame.context ? <span>{frame.context}</span> : null}
+                        {typeof frame.retry_after === "number" ? <span>retry_after={frame.retry_after}</span> : null}
+                      </div>
+                      <pre className="overflow-x-auto text-xs leading-6 whitespace-pre-wrap break-all text-stone-700">
+                        {frame.body || frame.message || "-"}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               {detailUrls.length ? (
                 <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
                   {detailUrls.map((url, index) => (
