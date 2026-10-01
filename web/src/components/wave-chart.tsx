@@ -5,9 +5,28 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ImageStatsPoint } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-type ImageStatsChartProps = {
+// 主线条画哪个字段。生图统计把它对准 requests（请求总数），注册统计对准 success（成功数）。
+type WaveChartPrimary = "requests" | "success";
+
+type WaveChartLabels = {
+  /** 主线的名字，图例与悬浮提示首行都用它。 */
+  primary: string;
+  /** 稀疏副线的名字。 */
+  secondary: string;
+  ariaLabel: string;
+};
+
+type WaveChartProps = {
   series: ImageStatsPoint[];
   granularity: "hour" | "day";
+  primary?: WaveChartPrimary;
+  labels?: WaveChartLabels;
+};
+
+const DEFAULT_LABELS: WaveChartLabels = {
+  primary: "请求数",
+  secondary: "失败数",
+  ariaLabel: "请求量波形图，按{axis}展示请求数与失败数",
 };
 
 const CHART_HEIGHT = 288;
@@ -43,7 +62,12 @@ function formatRate(value: number) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
+export function WaveChart({
+  series,
+  granularity,
+  primary = "requests",
+  labels = DEFAULT_LABELS,
+}: WaveChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(0);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -65,7 +89,12 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
   const innerWidth = Math.max(0, width - PADDING.left - PADDING.right);
   const innerHeight = CHART_HEIGHT - PADDING.top - PADDING.bottom;
 
-  const scale = useMemo(() => niceScale(Math.max(0, ...series.map((item) => item.requests))), [series]);
+  const primaryValue = (point: ImageStatsPoint) => point[primary];
+
+  const scale = useMemo(
+    () => niceScale(Math.max(0, ...series.map((item) => item[primary]))),
+    [series, primary],
+  );
 
   const pointCount = series.length;
   const xAt = (index: number) => {
@@ -105,22 +134,22 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
     return subpaths.join(" ");
   };
 
-  const requestsLine = toLine((point) => point.requests);
+  const primaryLine = toLine(primaryValue);
   const failedLine = toSparseLine((point) => point.failed);
   const baseline = yAt(0);
-  const requestsArea = pointCount
-    ? `${requestsLine} L ${xAt(pointCount - 1).toFixed(2)} ${baseline.toFixed(2)} L ${xAt(0).toFixed(2)} ${baseline.toFixed(2)} Z`
+  const primaryArea = pointCount
+    ? `${primaryLine} L ${xAt(pointCount - 1).toFixed(2)} ${baseline.toFixed(2)} L ${xAt(0).toFixed(2)} ${baseline.toFixed(2)} Z`
     : "";
 
   const peakIndex = useMemo(() => {
     let best = -1;
     series.forEach((point, index) => {
-      if (point.requests > 0 && (best === -1 || point.requests > series[best].requests)) {
+      if (point[primary] > 0 && (best === -1 || point[primary] > series[best][primary])) {
         best = index;
       }
     });
     return best;
-  }, [series]);
+  }, [series, primary]);
 
   const labelStep = Math.max(1, Math.ceil(pointCount / MAX_X_LABELS));
   const active = activeIndex === null ? null : series[activeIndex];
@@ -133,11 +162,11 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
       <div className="mb-2 flex flex-wrap items-center justify-end gap-4 text-xs text-neutral-500 dark:text-neutral-400">
         <span className="inline-flex items-center gap-1.5">
           <span className={cn("size-2.5 rounded-full", REQUESTS_DOT)} />
-          请求数
+          {labels.primary}
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className={cn("size-2.5 rounded-full", FAILED_DOT)} />
-          失败数
+          {labels.secondary}
         </span>
       </div>
 
@@ -146,7 +175,7 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
         height={CHART_HEIGHT}
         viewBox={`0 0 ${Math.max(width, 1)} ${CHART_HEIGHT}`}
         role="img"
-        aria-label={`请求量波形图，按${axisLabel}展示请求数与失败数`}
+        aria-label={labels.ariaLabel.replace("{axis}", axisLabel)}
         onMouseLeave={() => setActiveIndex(null)}
       >
         {scale.ticks.map((tick) => (
@@ -184,10 +213,10 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
           ) : null,
         )}
 
-        {requestsArea ? <path d={requestsArea} className={cn(REQUESTS_FILL, "opacity-[0.14] dark:opacity-[0.18]")} /> : null}
+        {primaryArea ? <path d={primaryArea} className={cn(REQUESTS_FILL, "opacity-[0.14] dark:opacity-[0.18]")} /> : null}
         {pointCount > 1 ? (
           <path
-            d={requestsLine}
+            d={primaryLine}
             fill="none"
             strokeWidth={2}
             strokeLinejoin="round"
@@ -210,18 +239,18 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
           <g>
             <circle
               cx={xAt(peakIndex)}
-              cy={yAt(series[peakIndex].requests)}
+              cy={yAt(series[peakIndex][primary])}
               r={4.5}
               strokeWidth={2}
               className={cn(REQUESTS_FILL, "stroke-white dark:stroke-neutral-900")}
             />
             <text
               x={Math.min(Math.max(xAt(peakIndex), 26), Math.max(26, width - 26))}
-              y={Math.max(14, yAt(series[peakIndex].requests) - 14)}
+              y={Math.max(14, yAt(series[peakIndex][primary]) - 14)}
               textAnchor="middle"
               className="fill-neutral-500 text-[11px] font-medium tabular-nums dark:fill-neutral-300"
             >
-              峰值 {series[peakIndex].requests}
+              峰值 {series[peakIndex][primary]}
             </text>
           </g>
         ) : null}
@@ -238,7 +267,7 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
             />
             <circle
               cx={activeX}
-              cy={yAt(active.requests)}
+              cy={yAt(active[primary])}
               r={4.5}
               strokeWidth={2}
               className={cn(REQUESTS_FILL, "stroke-white dark:stroke-neutral-900")}
@@ -283,21 +312,32 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
             <div className="flex items-center justify-between gap-4">
               <span className="inline-flex items-center gap-1.5">
                 <span className={cn("size-2 rounded-full", REQUESTS_DOT)} />
-                请求数
+                {labels.primary}
               </span>
-              <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">{active.requests}</span>
+              <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">{active[primary]}</span>
             </div>
-            <div className="flex items-center justify-between gap-4">
-              <span className="inline-flex items-center gap-1.5">
-                <span className={cn("size-2 rounded-full", REQUESTS_DOT, "opacity-50")} />
-                成功
-              </span>
-              <span className="tabular-nums">{active.success}</span>
-            </div>
+            {/* 主线已经是成功数时不再重复列一行「成功」，改为给出总数。 */}
+            {primary === "requests" ? (
+              <div className="flex items-center justify-between gap-4">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className={cn("size-2 rounded-full", REQUESTS_DOT, "opacity-50")} />
+                  成功
+                </span>
+                <span className="tabular-nums">{active.success}</span>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-4">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className={cn("size-2 rounded-full", REQUESTS_DOT, "opacity-50")} />
+                  总数
+                </span>
+                <span className="tabular-nums">{active.requests}</span>
+              </div>
+            )}
             <div className="flex items-center justify-between gap-4">
               <span className="inline-flex items-center gap-1.5">
                 <span className={cn("size-2 rounded-full", FAILED_DOT)} />
-                失败
+                {labels.secondary}
               </span>
               <span className="tabular-nums">{active.failed}</span>
             </div>

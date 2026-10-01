@@ -3,11 +3,21 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.stats_range import (
+    GRANULARITY_DAY,
+    GRANULARITY_HOUR,
+    MAX_SERIES_POINTS,
+    SCOPE_ALL,
+    SCOPE_RANGE,
+    beijing_today,
+    iter_days,
+    normalize_range,
+    parse_day,
+)
 from utils.beijing_time import beijing_now
 
 # 直接调用 /v1/images/* 的请求，成功与失败都会写入日志。
@@ -24,14 +34,7 @@ IMAGE_TASK_ENDPOINT_MODES = {
 }
 MODE_LABELS = {"generate": "文生图", "edit": "图生图"}
 
-GRANULARITY_HOUR = "hour"
-GRANULARITY_DAY = "day"
-# 单次查询最多返回的每日数据点，超出时只统计最近的这一段。
-MAX_SERIES_POINTS = 1000
 _STATUS_SUCCESS = "success"
-# scope=all：不从入参取日期，改为从聚合里已知的最早一天算到今天。
-SCOPE_ALL = "all"
-SCOPE_RANGE = "range"
 
 # 聚合快照的落盘格式版本。格式变了就换版本号，旧快照会被忽略并重建。
 SNAPSHOT_VERSION = 1
@@ -40,21 +43,11 @@ SNAPSHOT_VERSION = 1
 SNAPSHOT_INTERVAL_SECONDS = 30
 
 
-def beijing_today() -> str:
-    return beijing_now().strftime("%Y-%m-%d")
-
-
-def _parse_day(value: str):
-    # strptime 接受 "2026-9-28" 这类未补零的写法，但它匹配不上日志里补零后的小时键，
-    # 会静默统计成 0，所以这里额外要求严格的 YYYY-MM-DD 形状。
-    if not isinstance(value, str) or len(value) != 10 or value[4] != "-" or value[7] != "-":
-        return None
-    if not (value[:4].isdigit() and value[5:7].isdigit() and value[8:10].isdigit()):
-        return None
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except (TypeError, ValueError):
-        return None
+# 区间解析/展开已抽到 services/stats_range.py（注册统计也要用同一套口径）。
+# 这里保留私有别名，本模块其余代码与既有测试无需改动。
+_parse_day = parse_day
+_normalize_range = normalize_range
+_iter_days = iter_days
 
 
 def _empty_mode_bucket() -> dict[str, int]:
@@ -139,40 +132,6 @@ def _parse_image_event(raw_line: str) -> tuple[str, str, str, int] | None:
     if not hour_text.isdigit() or int(hour_text) > 23:
         return None
     return f"{time_text[:10]}T{hour_text}", mode, status, _parse_duration(detail)
-
-
-def _normalize_range(start_date: str, end_date: str) -> tuple[str, str]:
-    start = (start_date or "").strip()
-    end = (end_date or "").strip()
-    if not start and not end:
-        start = end = beijing_today()
-    elif not start:
-        start = end
-    elif not end:
-        end = start
-
-    for value in (start, end):
-        if _parse_day(value) is None:
-            raise ValueError("日期格式不正确，应为 YYYY-MM-DD")
-    if end < start:
-        start, end = end, start
-    return start, end
-
-
-def _iter_days(start: str, end: str) -> list[str]:
-    first = _parse_day(start)
-    last = _parse_day(end)
-    if first is None or last is None:
-        return []
-    # 区间过长时只保留最近的一段，保证返回的 range 与实际统计口径一致。
-    if (last - first).days + 1 > MAX_SERIES_POINTS:
-        first = last - timedelta(days=MAX_SERIES_POINTS - 1)
-    days: list[str] = []
-    current = first
-    while current <= last:
-        days.append(current.strftime("%Y-%m-%d"))
-        current += timedelta(days=1)
-    return days
 
 
 def _merge_day(hours: dict[str, dict[str, Any]], day: str) -> dict[str, Any]:

@@ -6,8 +6,8 @@ import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageModeChart } from "@/components/image-mode-chart";
-import { ImageStatsChart } from "@/components/image-stats-chart";
 import { StatTile } from "@/components/stat-tile";
+import { WaveChart } from "@/components/wave-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -197,7 +197,7 @@ function StatsContent() {
               加载中
             </div>
           ) : data && data.totals.requests > 0 ? (
-            <ImageStatsChart series={data.series} granularity={granularity} />
+            <WaveChart series={data.series} granularity={granularity} />
           ) : (
             <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-neutral-400">
               <span>该时间段没有生图请求</span>

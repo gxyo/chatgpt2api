@@ -575,6 +575,41 @@ export async function fetchImageStats(filters: { start_date?: string; end_date?:
   return httpRequest<ImageStatsResponse>(`/api/stats/images${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
+/** 注册结果的波形点，字段形状与 ImageStatsPoint 一致，波形图组件直接复用。 */
+export type RegisterStatsPoint = ImageStatsPoint;
+
+export type RegisterStatsResponse = {
+  range: {
+    start_date: string;
+    end_date: string;
+    granularity: "hour" | "day";
+    days: number;
+    /** "all" 表示「全部」查询，此时区间由后端按账本里最早的一天算出。 */
+    scope: "all" | "range";
+  };
+  totals: {
+    requests: number;
+    success: number;
+    failed: number;
+    success_rate: number;
+  };
+  series: RegisterStatsPoint[];
+  /** 成功数最大的桶；全部为 0 时为 null。 */
+  peak: RegisterStatsPoint | null;
+};
+
+export async function fetchRegisterStats(filters: {
+  start_date?: string;
+  end_date?: string;
+  scope?: "all";
+}) {
+  const params = new URLSearchParams();
+  if (filters.start_date) params.set("start_date", filters.start_date);
+  if (filters.end_date) params.set("end_date", filters.end_date);
+  if (filters.scope) params.set("scope", filters.scope);
+  return httpRequest<RegisterStatsResponse>(`/api/register/stats${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
 export async function deleteSystemLogs(ids: string[]) {
   return httpRequest<{ removed: number }>("/api/logs/delete", {
     method: "POST",

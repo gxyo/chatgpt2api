@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -34,6 +34,19 @@ def create_router() -> APIRouter:
     async def get_register_config(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"register": register_service.get()}
+
+    @router.get("/api/register/stats")
+    async def get_register_stats(
+        start_date: str = "",
+        end_date: str = "",
+        scope: str = "",
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            return register_service.history(start_date.strip(), end_date.strip(), scope.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     @router.post("/api/register")
     async def update_register_config(body: RegisterConfigRequest, authorization: str | None = Header(default=None)):

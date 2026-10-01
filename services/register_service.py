@@ -11,6 +11,7 @@ from pathlib import Path
 from services.account_service import account_service
 from services.config import DATA_DIR
 from services.register import mail_provider, openai_register
+from services.register_stats_service import RegisterStatsStore
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
@@ -109,6 +110,9 @@ class RegisterService:
         self._lock = threading.RLock()
         self._runner: threading.Thread | None = None
         self._logs: list[dict] = []
+        # 注册结果的按小时账本，只增不减，刻意放在 _config 之外（见 RegisterStatsStore 的模块注释）：
+        # 它不该进 get() 的快照，否则会被 SSE 每 0.5 秒全量广播一遍。
+        self._stats_store = RegisterStatsStore(store_file.parent / "register_stats.json")
         openai_register.register_log_sink = self._append_log
         mail_provider.mailbox_result_sink = self._record_mailbox_result
         self._config = self._load()
@@ -208,6 +212,12 @@ class RegisterService:
             row["updated_at"] = _now()
             self._config["cloudflare_domain_stats"] = rows
             self._save()
+        # 放在两次 early return 之后，波形图计的就是累计口径计的这些结果。
+        self._stats_store.record(success=success)
+
+    def history(self, start_date: str = "", end_date: str = "", scope: str = "") -> dict:
+        """注册统计页波形图的数据源：按小时/按天的成功与失败序列。"""
+        return self._stats_store.history(start_date, end_date, scope)
 
     @staticmethod
     def _mask_email(email: str) -> str:
