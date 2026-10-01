@@ -12,6 +12,7 @@ from services.register.playwright_register import (
     _fill_birthdate,
     _replace_pkce_params,
     _return_to_otp_signup,
+    _secret_fingerprint,
     _run_signup_state_machine,
     _should_block_browser_oauth_request,
     _submit_password,
@@ -90,10 +91,11 @@ class FakeRoute:
 class FakeResponse:
     """What ``page.on("response")`` hands over for a redirect hop."""
 
-    def __init__(self, status: int, url: str, location: str = "") -> None:
+    def __init__(self, status: int, url: str, location: str = "", request=None) -> None:
         self.status = status
         self.url = url
         self.headers = {"location": location} if location else {}
+        self.request = request if request is not None else FakeRequest(url)
 
 
 class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
@@ -226,37 +228,57 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(captured, ["first"])
 
-    async def test_on_capture_fires_the_instant_the_code_lands(self) -> None:
-        # 拿到 code 的同一刻就把兑换交出去，不再等状态机跑完 —— 抢的就是那几百毫秒。
+    async def test_code_issuer_challenge_is_recorded_with_the_capture(self) -> None:
+        # 签发 code 的那次请求带了谁的 challenge，决定了这个 code 我们换不换得动。
         page = FakePage()
-        captured: list[str] = []
-        handed_over: list[str] = []
-        await _install_oauth_routes(
-            page, 1, "our-challenge", captured, [], handed_over.append
-        )
+        events: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", [], events)
 
         page.listeners["response"](
-            FakeResponse(302, "https://auth.openai.com/api/oauth/oauth2/auth", "/auth/callback?code=abc")
+            FakeResponse(
+                302,
+                "https://auth.openai.com/api/oauth/oauth2/auth",
+                "/auth/callback?code=abc",
+                request=FakeRequest(
+                    "https://auth.openai.com/api/oauth/oauth2/auth"
+                    "?code_challenge=someone-elses&code_challenge_method=S256"
+                ),
+            )
         )
 
-        self.assertEqual(handed_over, ["abc"])
+        issuer = [e for e in events if "签发" in e]
+        self.assertEqual(len(issuer), 1)
+        self.assertIn(_secret_fingerprint("someone-elses"), issuer[0])
+        self.assertIn("/api/oauth/oauth2/auth", issuer[0])
 
-    async def test_on_capture_failure_never_breaks_the_route(self) -> None:
+    async def test_unroutable_challenge_requests_are_still_recorded(self) -> None:
+        # 路由不到的跳转目标也一样会走 request 事件，所以别人发的 challenge 也能看见。
         page = FakePage()
-        captured: list[str] = []
         events: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", [], events)
+        on_request = page.listeners["request"]
 
-        def explode(_code: str) -> None:
-            raise RuntimeError("no loop")
+        on_request(FakeRequest("https://auth.openai.com/about-you"))
+        on_request(
+            FakeRequest(
+                "https://auth.openai.com/api/oauth/oauth2/auth?code_challenge=theirs&code_challenge_method=S256"
+            )
+        )
+        on_request(
+            FakeRequest(
+                "https://auth.openai.com/api/oauth/oauth2/auth?code_challenge=theirs&code_challenge_method=S256"
+            )
+        )
+        on_request(
+            FakeRequest(
+                "https://auth.openai.com/oauth/authorize?code_challenge=other&code_challenge_method=S256"
+            )
+        )
 
-        await _install_oauth_routes(page, 1, "our-challenge", captured, events, explode)
-
-        route = FakeRoute("https://platform.openai.com/auth/callback?code=direct")
-        await page.routes["**/*"](route)
-
-        self.assertEqual(captured, ["direct"])
-        self.assertIsNotNone(route.fulfilled)
-        self.assertTrue(any("提前兑换未启动" in event for event in events))
+        challenges = [e for e in events if "带 challenge 的请求" in e]
+        self.assertEqual(len(challenges), 2)
+        self.assertTrue(any("/api/oauth/oauth2/auth" in e for e in challenges))
+        self.assertTrue(any("/oauth/authorize" in e for e in challenges))
 
     async def test_callback_request_moment_is_recorded_once(self) -> None:
         page = FakePage()
