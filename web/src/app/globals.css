@@ -71,7 +71,8 @@
   /* 强调色沿用统计图里已经在用的 #2a78d6，全站图表与交互是同一套色 */
   --brand: oklch(0.585 0.169 254.5);
   --brand-foreground: oklch(1 0 0);
-  --brand-soft: oklch(0.585 0.169 254.5 / 10%);
+  /* 选中态底色：用实色而不是 alpha，免得底下透出什么就跟着变 */
+  --brand-soft: oklch(0.945 0.042 254.5);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -108,7 +109,7 @@
   --ring: oklch(0.62 0.17 254.5);
   --brand: oklch(0.62 0.17 254.5);
   --brand-foreground: oklch(0.145 0 0);
-  --brand-soft: oklch(0.62 0.17 254.5 / 16%);
+  --brand-soft: oklch(0.32 0.06 254.5);
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);

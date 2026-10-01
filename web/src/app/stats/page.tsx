@@ -9,7 +9,7 @@ import { ImageModeChart } from "@/components/image-mode-chart";
 import { ImageStatsChart } from "@/components/image-stats-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, statCardClass } from "@/components/ui/card";
 import { fetchImageStats, type ImageStatsResponse } from "@/lib/api";
 import { getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -53,7 +53,7 @@ function StatTile({
   tone: string;
 }) {
   return (
-    <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+    <Card className={statCardClass}>
       <CardContent className="p-5">
         <div className="flex items-center gap-2 text-xs font-medium text-neutral-500 dark:text-neutral-400">
           <span className={cn("size-2 rounded-full", tone)} />
