@@ -72,16 +72,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # 真实链路：authorize 自己 302 到 callback，Location 里带 code。
             self._send(302, location="/auth/callback?code=from-authorize&state=s3")
             return
-        if route == "/authorize-nav":
-            self._send(200, "<html><body>nav<script>setTimeout(() => "
+        if route == "/about-you-auth":
+            # 资料页上发起 authorize：这才是通往 callback 的那一跳。
+            self._send(200, "<html><body>profile<script>setTimeout(() => "
                             "location.href='/authorize?code_challenge=browser-challenge&code_challenge_method=S256', 600)"
                             "</script></body></html>")
             return
-        if route == "/authorize-xhr":
-            self._send(200, "<html><body>xhr<script>setTimeout(() => "
+        if route == "/about-you-auth-xhr":
+            self._send(200, "<html><body>profile<script>setTimeout(() => "
                             "fetch('/authorize?code_challenge=browser-challenge&code_challenge_method=S256')"
                             ".then(r => r.text()).then(t => document.title = 'xhr:' + t.length), 600)"
                             "</script></body></html>")
+            return
+        if route == "/authorize-signup":
+            # 注册页自己那次 authorize：普通页面加载，必须由浏览器自己跟这个 302。
+            self._send(302, location="/signup-real")
+            return
+        if route == "/signup-real":
+            self._send(200, "<html><body>real signup page<input id=email></body></html>")
+            return
+        if route == "/signup-start":
+            self._send(200, "<html><body>signup<script>setTimeout(() => location.href="
+                            "'/authorize-signup?screen_hint=signup&code_challenge=browser-challenge"
+                            "&code_challenge_method=S256', 600)</script></body></html>")
             return
         if route == "/auth/callback":
             self._send(200, "<html><body>REAL CALLBACK PAGE</body></html>")
@@ -137,7 +150,11 @@ async def main() -> None:
                 except Exception as error:
                     print(f"[{label}] goto failed: {type(error).__name__}: {str(error).splitlines()[0][:100]}")
                 await page.wait_for_timeout(2500)
-                print(f"[{label}] captured={captured} url={page.url[len(base):]}")
+                try:
+                    body = (await page.inner_text("body")).strip()[:60]
+                except Exception:
+                    body = "<no body>"
+                print(f"[{label}] captured={captured} url={page.url[len(base):]} body={body!r}")
                 print(f"[{label}] server hits={HITS}")
                 print(f"[{label}] callback page fetched by server: {any('/auth/callback' in h for h in HITS)}")
                 print(f"[{label}] requests={log}")
@@ -150,10 +167,12 @@ async def main() -> None:
             await run_case("js", f"{base}/about-you")
             # 用例 2：form POST -> 302 -> callback
             await run_case("post", f"{base}/about-you-post")
-            # 用例 3：真实形状 —— authorize 自己 302 到 callback（文档导航）
-            await run_case("auth-nav", f"{base}/authorize-nav")
-            # 用例 4：真实形状的 XHR 版 —— JS fetch(authorize)，响应是 302
-            await run_case("auth-xhr", f"{base}/authorize-xhr")
+            # 用例 3：资料页上的 authorize 302 到 callback（文档导航）
+            await run_case("auth-nav", f"{base}/about-you-auth")
+            # 用例 4：同上但走 XHR
+            await run_case("auth-xhr", f"{base}/about-you-auth-xhr")
+            # 用例 5：注册页那次 authorize 是普通页面加载，必须原样交给浏览器跟 302
+            await run_case("signup", f"{base}/signup-start")
 
             cookies = {c["name"]: c["value"] for c in await context.cookies()}
             print(f"[cookies] {cookies}")

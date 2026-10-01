@@ -198,6 +198,22 @@ def _should_inspect_navigation(request) -> bool:
     return _page_at_profile(frame)
 
 
+def _should_peek_redirect_chain(request) -> bool:
+    """True only for hops taken while the page sits on the profile step.
+
+    The callback can only be imminent after the profile is submitted. Peeking anywhere else
+    corrupts unrelated navigations: the signup page load itself goes through
+    ``auth.openai.com/oauth/authorize?screen_hint=signup&code_challenge=...``, and replacing
+    that redirect with a fetched response leaves the platform SPA on an unroutable page
+    ("no result found for routeId LEGACY_LOGIN_WEB_PAGE_SPLAT") with no email input.
+    """
+    try:
+        frame = request.frame
+    except Exception:
+        return False
+    return _page_at_profile(frame)
+
+
 def _should_block_frameless_request(request, callback_seen: bool) -> str:
     """Block Worker / Service Worker requests aimed at OpenAI once the callback is in play.
 
@@ -256,9 +272,13 @@ async def _install_oauth_routes(
         浏览器会跟着 302 走进 callback 页，而跳转目标拦不住；自己走一遍就能在
         ``Location`` 上拿到 code，并且永远不把 callback 请求发出去。
         """
-        next_url = _replace_pkce_params(url, code_challenge) if "code_challenge=" in url else url
+        next_url = url
         response = None
         for _ in range(OAUTH_REDIRECT_HOPS):
+            # 每一跳都要换成我们的 challenge：链中间那跳（authorize）才是真正签发 code 的，
+            # 用浏览器原来的 challenge 去签，code 就和我们的 verifier 对不上。
+            if "code_challenge=" in next_url:
+                next_url = _replace_pkce_params(next_url, code_challenge)
             try:
                 response = await route.fetch(url=next_url, max_redirects=0)
             except Exception as error:
@@ -320,11 +340,13 @@ async def _install_oauth_routes(
                         f"original_fp={_secret_fingerprint(original)}, "
                         f"replacement_fp={_secret_fingerprint(code_challenge)}",
                     )
-                # authorize 自己就是那条通往 callback 的链的起点：它的 302 目标拦不住，
+                # 资料页上的 authorize 就是那条通往 callback 的链的起点：它的 302 目标拦不住，
                 # 所以不交回浏览器，由我们走完这条链。命中 callback 就地收码并结束导航，
                 # 平台的 callback 请求从头到尾不会发出去。
-                if not state["callback_seen"] and await _inspect_navigation(route, url):
-                    return
+                # 只在资料页这么做：注册页自己那次 authorize 是普通页面加载，预取会把它弄坏。
+                if not state["callback_seen"] and _should_peek_redirect_chain(request):
+                    if await _inspect_navigation(route, url):
+                        return
                 await route.continue_(url=_replace_pkce_params(url, code_challenge))
                 return
             reason = _should_block_browser_oauth_request(request)
