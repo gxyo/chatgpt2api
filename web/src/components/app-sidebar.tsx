@@ -29,17 +29,20 @@ import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 type NavItem = { href: string; label: string; icon: LucideIcon };
 
 const adminNavItems: NavItem[] = [
+  { href: "/stats", label: "统计", icon: BarChart3 },
   { href: "/image", label: "生图", icon: ImageIcon },
   { href: "/accounts", label: "号池管理", icon: Users },
   { href: "/register", label: "注册机", icon: UserPlus },
   { href: "/register-stats", label: "注册统计", icon: UserCheck },
   { href: "/image-manager", label: "图片管理", icon: Images },
-  { href: "/stats", label: "统计", icon: BarChart3 },
   { href: "/logs", label: "日志管理", icon: ScrollText },
   { href: "/settings", label: "设置", icon: Settings },
 ];
 
 const userNavItems: NavItem[] = [{ href: "/image", label: "画图", icon: ImageIcon }];
+
+/** 品牌 logo 的落点：固定指向生图，不跟着导航项顺序跑。 */
+const BRAND_HREF = "/image";
 
 const brandLinkClass =
   "group inline-flex items-center gap-2.5 text-[15px] font-bold tracking-tight text-neutral-950 transition hover:opacity-80 dark:text-neutral-50";
@@ -200,7 +203,7 @@ export function AppSidebar() {
   return (
     <aside className="fixed inset-y-0 left-0 z-40 hidden w-60 flex-col border-r border-neutral-200 bg-white lg:flex dark:border-white/10 dark:bg-neutral-900">
       <div className="flex h-14 shrink-0 items-center px-5">
-        <Link href={navItems[0].href} className={brandLinkClass}>
+        <Link href={BRAND_HREF} className={brandLinkClass}>
           <BrandMark />
           chatgpt2api
         </Link>
@@ -243,7 +246,7 @@ export function MobileNavBar() {
         </SheetTrigger>
         <SheetContent side="left" className="w-72 gap-0 p-0">
           <div className="flex h-14 shrink-0 items-center px-5">
-            <Link href={navItems[0].href} className={brandLinkClass} onClick={() => setOpen(false)}>
+            <Link href={BRAND_HREF} className={brandLinkClass} onClick={() => setOpen(false)}>
               <BrandMark />
               chatgpt2api
             </Link>
@@ -263,7 +266,7 @@ export function MobileNavBar() {
           </div>
         </SheetContent>
       </Sheet>
-      <Link href={navItems[0].href} className={brandLinkClass}>
+      <Link href={BRAND_HREF} className={brandLinkClass}>
         <BrandMark />
         chatgpt2api
       </Link>
