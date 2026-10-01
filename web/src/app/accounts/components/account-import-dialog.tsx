@@ -136,16 +136,16 @@ function MethodCard({
     <button
       type="button"
       onClick={onClick}
-      className="w-full rounded-2xl border border-stone-200 bg-white p-0 text-left transition hover:border-stone-300 hover:bg-stone-50"
+      className="w-full rounded-2xl border border-neutral-200 bg-white p-0 text-left transition hover:border-neutral-300 hover:bg-neutral-50"
     >
       <Card className="rounded-2xl border-0 bg-transparent shadow-none">
         <CardContent className="flex items-start gap-4 p-4">
-          <div className="rounded-xl bg-stone-100 p-3 text-stone-700">
+          <div className="rounded-xl bg-neutral-100 p-3 text-neutral-700">
             <Icon className="size-5" />
           </div>
           <div className="space-y-1">
-            <div className="text-sm font-semibold text-stone-900">{title}</div>
-            <div className="text-sm leading-6 text-stone-500">{description}</div>
+            <div className="text-sm font-semibold text-neutral-900">{title}</div>
+            <div className="text-sm leading-6 text-neutral-500">{description}</div>
           </div>
         </CardContent>
       </Card>
@@ -425,32 +425,32 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             <button
               type="button"
               onClick={() => setMethod("menu")}
-              className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
+              className="inline-flex items-center gap-1 text-sm text-neutral-500 transition hover:text-neutral-800"
             >
               <ArrowLeft className="size-4" />
               返回导入方式
             </button>
-            <span className="text-xs text-stone-400">当前识别 {tokenCount} 个 Token</span>
+            <span className="text-xs text-neutral-400">当前识别 {tokenCount} 个 Token</span>
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">Access Token 列表</label>
+            <label className="text-sm font-medium text-neutral-700">Access Token 列表</label>
             <Textarea
               placeholder="每行一个 Access Token..."
               value={tokenInput}
               onChange={(event) => setTokenInput(event.target.value)}
-              className="min-h-56 resize-none rounded-xl border-stone-200"
+              className="min-h-56 resize-none rounded-xl border-neutral-200"
             />
           </div>
-          <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50 p-4">
+          <div className="rounded-2xl border border-dashed border-neutral-200 bg-neutral-50 p-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1">
-                <div className="text-sm font-medium text-stone-800">从 TXT 文件导入</div>
-                <div className="text-sm leading-6 text-stone-500">支持 `.txt`，文件内容也是一行一个 Token。</div>
+                <div className="text-sm font-medium text-neutral-800">从 TXT 文件导入</div>
+                <div className="text-sm leading-6 text-neutral-500">支持 `.txt`，文件内容也是一行一个 Token。</div>
               </div>
               <Button
                 type="button"
                 variant="outline"
-                className="rounded-xl border-stone-200 bg-white"
+                className="rounded-xl border-neutral-200 bg-white"
                 onClick={() => txtInputRef.current?.click()}
                 disabled={isSubmitting}
               >
@@ -476,19 +476,19 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           <button
             type="button"
             onClick={() => setMethod("menu")}
-            className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
+            className="inline-flex items-center gap-1 text-sm text-neutral-500 transition hover:text-neutral-800"
           >
             <ArrowLeft className="size-4" />
             返回导入方式
           </button>
-          <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600">
+          <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 text-sm leading-6 text-neutral-600">
             打开
             {" "}
             <a
               href={sessionUrl}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center gap-1 font-medium text-stone-900 underline underline-offset-4"
+              className="inline-flex items-center gap-1 font-medium text-neutral-900 underline underline-offset-4"
             >
               {sessionUrl}
               <ExternalLink className="size-3.5" />
@@ -502,12 +502,12 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             </div>
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">Session JSON</label>
+            <label className="text-sm font-medium text-neutral-700">Session JSON</label>
             <Textarea
               placeholder='粘贴完整 JSON，例如包含 "accessToken" 的对象...'
               value={sessionInput}
               onChange={(event) => setSessionInput(event.target.value)}
-              className="min-h-56 resize-none rounded-xl border-stone-200 font-mono text-xs"
+              className="min-h-56 resize-none rounded-xl border-neutral-200 font-mono text-xs"
             />
           </div>
         </div>
@@ -520,35 +520,35 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           <button
             type="button"
             onClick={() => setMethod("menu")}
-            className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
+            className="inline-flex items-center gap-1 text-sm text-neutral-500 transition hover:text-neutral-800"
           >
             <ArrowLeft className="size-4" />
             返回导入方式
           </button>
-          <div className="rounded-2xl border border-stone-200 bg-stone-50 p-4 text-sm leading-6 text-stone-600 space-y-2">
-            <div className="font-medium text-stone-800">操作步骤</div>
+          <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4 text-sm leading-6 text-neutral-600 space-y-2">
+            <div className="font-medium text-neutral-800">操作步骤</div>
             <ol className="list-decimal pl-5 space-y-1">
               <li>（可选）填写你 ChatGPT 账号的邮箱，登录页会预填。</li>
               <li>点击下方"打开授权页面"，在新标签里登录自己的 ChatGPT 账号。</li>
-              <li>登录完成后浏览器会跳到 <code className="rounded bg-stone-200 px-1">platform.openai.com/auth/callback?code=...</code>。立刻从地址栏复制整段 URL（或开 F12 在 Network 里抓到 callback 那一行，右键 Copy → Copy URL）。</li>
+              <li>登录完成后浏览器会跳到 <code className="rounded bg-neutral-200 px-1">platform.openai.com/auth/callback?code=...</code>。立刻从地址栏复制整段 URL（或开 F12 在 Network 里抓到 callback 那一行，右键 Copy → Copy URL）。</li>
               <li>把 callback URL 粘到下面输入框，点"完成导入"。</li>
             </ol>
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">邮箱（可选预填）</label>
+            <label className="text-sm font-medium text-neutral-700">邮箱（可选预填）</label>
             <input
               type="email"
               placeholder="you@example.com"
               value={oauthEmailHint}
               onChange={(event) => setOauthEmailHint(event.target.value)}
               disabled={Boolean(oauthSession) || oauthStarting}
-              className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm outline-none focus:border-stone-400"
+              className="w-full rounded-xl border border-neutral-200 bg-white px-3 py-2 text-sm outline-none focus:border-neutral-400"
             />
           </div>
           {!oauthSession ? (
             <Button
               type="button"
-              className="h-10 rounded-xl bg-stone-950 text-white hover:bg-stone-800"
+              className="h-10 rounded-xl bg-neutral-950 text-white hover:bg-neutral-800"
               onClick={() => void handleStartOAuth()}
               disabled={oauthStarting}
             >
@@ -557,14 +557,14 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             </Button>
           ) : (
             <div className="space-y-3">
-              <div className="rounded-2xl border border-stone-200 bg-white p-3 text-xs leading-6 text-stone-600 break-all font-mono">
+              <div className="rounded-2xl border border-neutral-200 bg-white p-3 text-xs leading-6 text-neutral-600 break-all font-mono">
                 {oauthSession.authorize_url}
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
                   variant="outline"
-                  className="rounded-xl border-stone-200 bg-white"
+                  className="rounded-xl border-neutral-200 bg-white"
                   onClick={() => void handleCopyAuthorizeUrl()}
                 >
                   <Copy className="size-4" />
@@ -573,7 +573,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 <Button
                   type="button"
                   variant="outline"
-                  className="rounded-xl border-stone-200 bg-white"
+                  className="rounded-xl border-neutral-200 bg-white"
                   onClick={() => window.open(oauthSession.authorize_url, "_blank", "noopener,noreferrer")}
                 >
                   <ExternalLink className="size-4" />
@@ -582,7 +582,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 <Button
                   type="button"
                   variant="outline"
-                  className="rounded-xl border-stone-200 bg-white"
+                  className="rounded-xl border-neutral-200 bg-white"
                   onClick={() => {
                     setOauthSession(null);
                     setOauthCallbackInput("");
@@ -592,12 +592,12 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
                 </Button>
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium text-stone-700">粘贴 callback URL（或仅 code）</label>
+                <label className="text-sm font-medium text-neutral-700">粘贴 callback URL（或仅 code）</label>
                 <Textarea
                   placeholder={"https://platform.openai.com/auth/callback?code=...&state=..."}
                   value={oauthCallbackInput}
                   onChange={(event) => setOauthCallbackInput(event.target.value)}
-                  className="min-h-24 resize-none rounded-xl border-stone-200 font-mono text-xs"
+                  className="min-h-24 resize-none rounded-xl border-neutral-200 font-mono text-xs"
                 />
               </div>
             </div>
@@ -619,21 +619,21 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           <button
             type="button"
             onClick={() => setMethod("menu")}
-            className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
+            className="inline-flex items-center gap-1 text-sm text-neutral-500 transition hover:text-neutral-800"
           >
             <ArrowLeft className="size-4" />
             返回导入方式
           </button>
-          <div className="rounded-2xl border border-dashed border-stone-200 bg-stone-50 p-5">
+          <div className="rounded-2xl border border-dashed border-neutral-200 bg-neutral-50 p-5">
             <div className="space-y-2">
-              <div className="text-sm font-medium text-stone-800">多选本地 CPA JSON 文件</div>
-              <div className="text-sm leading-6 text-stone-500">
+              <div className="text-sm font-medium text-neutral-800">多选本地 CPA JSON 文件</div>
+              <div className="text-sm leading-6 text-neutral-500">
                 每个文件应为一个 JSON 对象。系统会从对象中自动提取 `access_token` 或 `accessToken`，
               </div>
             </div>
             <Button
               type="button"
-              className="mt-4 rounded-xl bg-stone-950 text-white hover:bg-stone-800"
+              className="mt-4 rounded-xl bg-neutral-950 text-white hover:bg-neutral-800"
               onClick={() => cpaInputRef.current?.click()}
               disabled={isSubmitting}
             >
@@ -650,7 +650,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             onChange={(event) => void handleCpaSelected(event)}
           />
           {pendingCpaImport ? (
-            <div className="rounded-2xl border border-stone-200 bg-white p-4 text-sm leading-6 text-stone-600">
+            <div className="rounded-2xl border border-neutral-200 bg-white p-4 text-sm leading-6 text-neutral-600">
               最近一次读取到 {pendingCpaImport.parsedFileCount} 个 Token
               {pendingCpaImport.errorCount > 0 ? `，另有 ${pendingCpaImport.errorCount} 个文件未提取成功` : ""}。
             </div>
@@ -665,18 +665,18 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           <button
             type="button"
             onClick={() => setMethod("menu")}
-            className="inline-flex items-center gap-1 text-sm text-stone-500 transition hover:text-stone-800"
+            className="inline-flex items-center gap-1 text-sm text-neutral-500 transition hover:text-neutral-800"
           >
             <ArrowLeft className="size-4" />
             返回导入方式
           </button>
           <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">Codex 认证 JSON</label>
+            <label className="text-sm font-medium text-neutral-700">Codex 认证 JSON</label>
             <Textarea
               placeholder='粘贴包含 "access_token"、"refresh_token"、"id_token" 的 Codex 认证 JSON...'
               value={codexAuthInput}
               onChange={(event) => setCodexAuthInput(event.target.value)}
-              className="min-h-64 resize-none rounded-xl border-stone-200 font-mono text-xs"
+              className="min-h-64 resize-none rounded-xl border-neutral-200 font-mono text-xs"
             />
           </div>
         </div>
@@ -725,7 +725,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     <>
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <Button
-          className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+          className="h-10 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800"
           onClick={() => setOpen(true)}
           disabled={disabled}
         >
@@ -767,7 +767,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           <DialogFooter className="pt-2">
             <Button
               variant="secondary"
-              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              className="h-10 rounded-xl bg-neutral-100 px-5 text-neutral-700 hover:bg-neutral-200"
               onClick={() => setOpen(false)}
               disabled={footerDisabled}
             >
@@ -775,7 +775,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             </Button>
             {method === "token" ? (
               <Button
-                className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+                className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
                 onClick={() => void handleImportTokenText()}
                 disabled={footerDisabled}
               >
@@ -785,7 +785,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             ) : null}
             {method === "session" ? (
               <Button
-                className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+                className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
                 onClick={() => void handleImportSessionJson()}
                 disabled={footerDisabled}
               >
@@ -795,7 +795,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             ) : null}
             {method === "codex-auth" ? (
               <Button
-                className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+                className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
                 onClick={() => void handleImportCodexAuthJson()}
                 disabled={footerDisabled}
               >
@@ -806,7 +806,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             {method === "oauth" ? (
               <Button
                 className={cn(
-                  "h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800",
+                  "h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800",
                   !oauthSession ? "hidden" : "",
                 )}
                 onClick={() => void handleFinishOAuth()}
@@ -819,7 +819,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             {method === "cpa" ? (
               <Button
                 className={cn(
-                  "h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800",
+                  "h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800",
                   !pendingCpaImport ? "hidden" : "",
                 )}
                 onClick={() => setConfirmOpen(true)}
@@ -848,14 +848,14 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           <DialogFooter className="pt-2">
             <Button
               variant="secondary"
-              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              className="h-10 rounded-xl bg-neutral-100 px-5 text-neutral-700 hover:bg-neutral-200"
               onClick={() => setConfirmOpen(false)}
               disabled={isSubmitting}
             >
               返回
             </Button>
             <Button
-              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+              className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
               onClick={() =>
                 void submitTokens(
                   pendingCpaImport?.tokens ?? [],

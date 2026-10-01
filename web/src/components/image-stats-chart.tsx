@@ -125,7 +125,7 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
 
   return (
     <div ref={containerRef} className="relative w-full">
-      <div className="mb-2 flex flex-wrap items-center justify-end gap-4 text-xs text-stone-500 dark:text-stone-400">
+      <div className="mb-2 flex flex-wrap items-center justify-end gap-4 text-xs text-neutral-500 dark:text-neutral-400">
         <span className="inline-flex items-center gap-1.5">
           <span className={cn("size-2.5 rounded-full", REQUESTS_FILL)} />
           请求数
@@ -151,14 +151,14 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
               x2={PADDING.left + innerWidth}
               y1={yAt(tick)}
               y2={yAt(tick)}
-              className={cn("stroke-[1px]", tick === 0 ? "stroke-stone-300 dark:stroke-white/25" : "stroke-stone-200/80 dark:stroke-white/10")}
+              className={cn("stroke-[1px]", tick === 0 ? "stroke-neutral-300 dark:stroke-white/25" : "stroke-neutral-200/80 dark:stroke-white/10")}
             />
             <text
               x={PADDING.left - 10}
               y={yAt(tick)}
               textAnchor="end"
               dominantBaseline="middle"
-              className="fill-stone-400 text-[11px] tabular-nums dark:fill-stone-500"
+              className="fill-neutral-400 text-[11px] tabular-nums dark:fill-neutral-500"
             >
               {tick}
             </text>
@@ -172,7 +172,7 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
               x={xAt(index)}
               y={CHART_HEIGHT - 10}
               textAnchor={index === 0 ? "start" : index === pointCount - 1 ? "end" : "middle"}
-              className="fill-stone-400 text-[11px] tabular-nums dark:fill-stone-500"
+              className="fill-neutral-400 text-[11px] tabular-nums dark:fill-neutral-500"
             >
               {point.label}
             </text>
@@ -208,13 +208,13 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
               cy={yAt(series[peakIndex].requests)}
               r={4.5}
               strokeWidth={2}
-              className={cn(REQUESTS_FILL, "stroke-white dark:stroke-stone-900")}
+              className={cn(REQUESTS_FILL, "stroke-white dark:stroke-neutral-900")}
             />
             <text
               x={Math.min(Math.max(xAt(peakIndex), 26), Math.max(26, width - 26))}
               y={Math.max(14, yAt(series[peakIndex].requests) - 14)}
               textAnchor="middle"
-              className="fill-stone-500 text-[11px] font-medium tabular-nums dark:fill-stone-300"
+              className="fill-neutral-500 text-[11px] font-medium tabular-nums dark:fill-neutral-300"
             >
               峰值 {series[peakIndex].requests}
             </text>
@@ -228,7 +228,7 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
               x2={activeX}
               y1={PADDING.top}
               y2={PADDING.top + innerHeight}
-              className="stroke-stone-300 dark:stroke-white/25"
+              className="stroke-neutral-300 dark:stroke-white/25"
               strokeWidth={1}
             />
             <circle
@@ -236,7 +236,7 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
               cy={yAt(active.requests)}
               r={4.5}
               strokeWidth={2}
-              className={cn(REQUESTS_FILL, "stroke-white dark:stroke-stone-900")}
+              className={cn(REQUESTS_FILL, "stroke-white dark:stroke-neutral-900")}
             />
             {active.requests > 0 ? (
               <circle
@@ -244,7 +244,7 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
                 cy={yAt(active.failed)}
                 r={4.5}
                 strokeWidth={2}
-                className={cn(FAILED_FILL, "stroke-white dark:stroke-stone-900")}
+                className={cn(FAILED_FILL, "stroke-white dark:stroke-neutral-900")}
               />
             ) : null}
           </g>
@@ -270,17 +270,17 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
 
       {active && activeIndex !== null ? (
         <div
-          className="pointer-events-none absolute top-6 z-10 w-max -translate-x-1/2 rounded-xl border border-stone-200 bg-white/95 px-3 py-2 text-xs shadow-sm backdrop-blur dark:border-white/10 dark:bg-stone-900/95"
+          className="pointer-events-none absolute top-6 z-10 w-max -translate-x-1/2 rounded-xl border border-neutral-200 bg-white/95 px-3 py-2 text-xs shadow-sm backdrop-blur dark:border-white/10 dark:bg-neutral-900/95"
           style={{ left: tooltipLeft }}
         >
-          <div className="mb-1.5 font-medium text-stone-500 dark:text-stone-400">{active.full_label}</div>
-          <div className="space-y-1 text-stone-600 dark:text-stone-300">
+          <div className="mb-1.5 font-medium text-neutral-500 dark:text-neutral-400">{active.full_label}</div>
+          <div className="space-y-1 text-neutral-600 dark:text-neutral-300">
             <div className="flex items-center justify-between gap-4">
               <span className="inline-flex items-center gap-1.5">
                 <span className={cn("size-2 rounded-full", REQUESTS_FILL)} />
                 请求数
               </span>
-              <span className="font-semibold tabular-nums text-stone-900 dark:text-stone-100">{active.requests}</span>
+              <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">{active.requests}</span>
             </div>
             <div className="flex items-center justify-between gap-4">
               <span className="inline-flex items-center gap-1.5">
@@ -296,7 +296,7 @@ export function ImageStatsChart({ series, granularity }: ImageStatsChartProps) {
               </span>
               <span className="tabular-nums">{active.failed}</span>
             </div>
-            <div className="flex items-center justify-between gap-4 border-t border-stone-100 pt-1 dark:border-white/10">
+            <div className="flex items-center justify-between gap-4 border-t border-neutral-100 pt-1 dark:border-white/10">
               <span>成功率</span>
               <span className="tabular-nums">{active.requests ? formatRate(active.success / active.requests) : "-"}</span>
             </div>

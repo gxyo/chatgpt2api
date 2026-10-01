@@ -172,15 +172,15 @@ export function UserKeysCard() {
         <CardContent className="space-y-6 p-6">
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-center gap-3">
-              <div className="flex size-10 items-center justify-center rounded-xl bg-stone-100">
-                <KeyRound className="size-5 text-stone-600" />
+              <div className="flex size-10 items-center justify-center rounded-xl bg-neutral-100">
+                <KeyRound className="size-5 text-neutral-600" />
               </div>
               <div>
                 <h2 className="text-lg font-semibold tracking-tight">用户密钥管理</h2>
-                <p className="text-sm text-stone-500">为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置和号池。</p>
+                <p className="text-sm text-neutral-500">为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置和号池。</p>
               </div>
             </div>
-            <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={() => setIsDialogOpen(true)}>
+            <Button className="h-9 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800" onClick={() => setIsDialogOpen(true)}>
               <Plus className="size-4" />
               创建用户密钥
             </Button>
@@ -206,10 +206,10 @@ export function UserKeysCard() {
 
           {isLoading ? (
             <div className="flex items-center justify-center py-10">
-              <LoaderCircle className="size-5 animate-spin text-stone-400" />
+              <LoaderCircle className="size-5 animate-spin text-neutral-400" />
             </div>
           ) : items.length === 0 ? (
-            <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">
+            <div className="rounded-xl bg-neutral-50 px-6 py-10 text-center text-sm text-neutral-500">
               暂无普通用户密钥。点击右上角按钮后即可创建并分发给其他人。
             </div>
           ) : (
@@ -217,15 +217,15 @@ export function UserKeysCard() {
               {items.map((item) => {
                 const isPending = pendingIds.has(item.id);
                 return (
-                  <div key={item.id} className="flex flex-col gap-3 rounded-xl border border-stone-200 bg-white px-4 py-4 md:flex-row md:items-center md:justify-between">
+                  <div key={item.id} className="flex flex-col gap-3 rounded-xl border border-neutral-200 bg-white px-4 py-4 md:flex-row md:items-center md:justify-between">
                     <div className="min-w-0 space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        <div className="truncate text-sm font-medium text-stone-800">{item.name}</div>
+                        <div className="truncate text-sm font-medium text-neutral-800">{item.name}</div>
                         <Badge variant={item.enabled ? "success" : "secondary"} className="rounded-md">
                           {item.enabled ? "已启用" : "已禁用"}
                         </Badge>
                       </div>
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-stone-500">
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-neutral-500">
                         <span>创建时间 {formatDateTime(item.created_at)}</span>
                         <span>最近使用 {formatDateTime(item.last_used_at)}</span>
                       </div>
@@ -235,7 +235,7 @@ export function UserKeysCard() {
                       <Button
                         type="button"
                         variant="outline"
-                        className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                        className="h-9 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700"
                         onClick={() => openEditDialog(item)}
                         disabled={isPending}
                       >
@@ -245,7 +245,7 @@ export function UserKeysCard() {
                       <Button
                         type="button"
                         variant="outline"
-                        className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                        className="h-9 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700"
                         onClick={() => void handleToggle(item)}
                         disabled={isPending}
                       >
@@ -286,19 +286,19 @@ export function UserKeysCard() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <label className="text-sm font-medium text-stone-700">名称（可选）</label>
+            <label className="text-sm font-medium text-neutral-700">名称（可选）</label>
             <Input
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder="例如：设计同学 A、运营临时账号"
-              className="h-11 rounded-xl border-stone-200 bg-white"
+              className="h-11 rounded-xl border-neutral-200 bg-white"
             />
           </div>
           <DialogFooter>
             <Button
               type="button"
               variant="secondary"
-              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              className="h-10 rounded-xl bg-neutral-100 px-5 text-neutral-700 hover:bg-neutral-200"
               onClick={() => setIsDialogOpen(false)}
               disabled={isCreating}
             >
@@ -306,7 +306,7 @@ export function UserKeysCard() {
             </Button>
             <Button
               type="button"
-              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+              className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
               onClick={() => void handleCreate()}
               disabled={isCreating}
             >
@@ -329,7 +329,7 @@ export function UserKeysCard() {
             <Button
               type="button"
               variant="secondary"
-              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              className="h-10 rounded-xl bg-neutral-100 px-5 text-neutral-700 hover:bg-neutral-200"
               onClick={() => setDeletingItem(null)}
               disabled={deletingItem ? pendingIds.has(deletingItem.id) : false}
             >
@@ -366,23 +366,23 @@ export function UserKeysCard() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">名称</label>
+              <label className="text-sm font-medium text-neutral-700">名称</label>
               <Input
                 value={editName}
                 onChange={(event) => setEditName(event.target.value)}
                 placeholder="例如：设计同学 A、运营临时账号"
-                className="h-11 rounded-xl border-stone-200 bg-white"
+                className="h-11 rounded-xl border-neutral-200 bg-white"
               />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium text-stone-700">新的专用密钥（可选）</label>
+              <label className="text-sm font-medium text-neutral-700">新的专用密钥（可选）</label>
               <Input
                 value={editKey}
                 onChange={(event) => setEditKey(event.target.value)}
                 placeholder="例如：sk-your-custom-user-key"
-                className="h-11 rounded-xl border-stone-200 bg-white font-mono"
+                className="h-11 rounded-xl border-neutral-200 bg-white font-mono"
               />
-              <p className="text-xs leading-5 text-stone-500">
+              <p className="text-xs leading-5 text-neutral-500">
                 保存后旧密钥会立即失效，新密钥生效。系统仍只保存哈希，不会回显当前密钥。
               </p>
             </div>
@@ -391,7 +391,7 @@ export function UserKeysCard() {
             <Button
               type="button"
               variant="secondary"
-              className="h-10 rounded-xl bg-stone-100 px-5 text-stone-700 hover:bg-stone-200"
+              className="h-10 rounded-xl bg-neutral-100 px-5 text-neutral-700 hover:bg-neutral-200"
               onClick={() => {
                 setEditingItem(null);
                 setEditKey("");
@@ -402,7 +402,7 @@ export function UserKeysCard() {
             </Button>
             <Button
               type="button"
-              className="h-10 rounded-xl bg-stone-950 px-5 text-white hover:bg-stone-800"
+              className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
               onClick={() => void handleEdit()}
               disabled={editingItem ? pendingIds.has(editingItem.id) : false}
             >

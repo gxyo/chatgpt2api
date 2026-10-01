@@ -1,8 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Toaster } from "sonner";
 import "./globals.css";
+import { AppSidebar, MobileNavBar } from "@/components/app-sidebar";
 import { ThemeScript } from "@/components/theme-script";
-import { TopNav } from "@/components/top-nav";
 
 export const metadata: Metadata = {
   title: "ChatGPT 号池管理",
@@ -15,8 +15,8 @@ export const viewport: Viewport = {
   maximumScale: 1,
   userScalable: false,
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f0ebe3" },
-    { media: "(prefers-color-scheme: dark)", color: "#12110f" },
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
   ],
 };
 
@@ -38,12 +38,18 @@ export default function RootLayout({
         }}
       >
         <Toaster position="top-center" richColors offset={48} />
-        <main className="min-h-screen overflow-x-hidden bg-[radial-gradient(circle_at_top_left,_rgba(255,255,255,0.92),_rgba(245,239,231,0.96)_42%,_rgba(240,235,227,0.99)_100%)] px-4 pt-0 pb-2 text-stone-900 transition-colors duration-300 dark:bg-[radial-gradient(circle_at_top_left,_rgba(55,48,43,0.72),_rgba(28,25,23,0.98)_40%,_rgba(12,10,9,1)_100%)] dark:text-stone-100 sm:px-6 sm:pt-2 lg:px-8">
-          <div className="mx-auto box-border flex min-h-screen max-w-[1440px] flex-col gap-2 pt-[env(safe-area-inset-top)] sm:gap-5 sm:pt-0">
-            <TopNav />
-            {children}
-          </div>
-        </main>
+        <div className="flex min-h-screen flex-col bg-background text-foreground transition-colors duration-300">
+          <AppSidebar />
+          <MobileNavBar />
+          {/* 外层 min-h-screen + flex-1 传递高度：main 与内容列都铺满剩余视口，
+              页面里需要整屏的区块（生图 / 注册机）直接 flex-1 即可，无需各自算 dvh。
+              gap 保留页面内多段内容（标题区 + 卡片区）之间的原有间距。 */}
+          <main className="flex min-w-0 flex-1 flex-col lg:pl-60">
+            <div className="mx-auto box-border flex w-full max-w-[1440px] flex-1 flex-col gap-2 px-4 py-4 sm:gap-5 sm:px-6 sm:py-5 lg:px-8 lg:py-6">
+              {children}
+            </div>
+          </main>
+        </div>
       </body>
     </html>
   );

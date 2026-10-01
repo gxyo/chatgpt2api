@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 const REQUESTS_DOT = "bg-[#2a78d6] dark:bg-[#3987e5]";
 const SUCCESS_DOT = "bg-[#2a78d6]/50 dark:bg-[#3987e5]/50";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
-const NEUTRAL_DOT = "bg-stone-300 dark:bg-stone-600";
+const NEUTRAL_DOT = "bg-neutral-300 dark:bg-neutral-600";
 
 // days=0 表示不按天数取区间，交给后端按已有记录算「全部」。
 const PRESETS = [
@@ -55,14 +55,14 @@ function StatTile({
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
       <CardContent className="p-5">
-        <div className="flex items-center gap-2 text-xs font-medium text-stone-500 dark:text-stone-400">
+        <div className="flex items-center gap-2 text-xs font-medium text-neutral-500 dark:text-neutral-400">
           <span className={cn("size-2 rounded-full", tone)} />
           {label}
         </div>
-        <div className="mt-3 text-3xl leading-none font-semibold tracking-tight text-stone-900 dark:text-stone-50">
+        <div className="mt-3 text-3xl leading-none font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
           {value}
         </div>
-        <div className="mt-2 min-h-4 text-xs text-stone-400 dark:text-stone-500">{caption}</div>
+        <div className="mt-2 min-h-4 text-xs text-neutral-400 dark:text-neutral-500">{caption}</div>
       </CardContent>
     </Card>
   );
@@ -119,14 +119,14 @@ function StatsContent() {
     <section className="space-y-5">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Statistics</div>
+          <div className="text-xs font-semibold tracking-[0.18em] text-neutral-500 uppercase">Statistics</div>
           <h1 className="text-2xl font-semibold tracking-tight">请求统计</h1>
-          <p className="text-sm text-stone-500 dark:text-stone-400">
+          <p className="text-sm text-neutral-500 dark:text-neutral-400">
             按北京时间统计生图请求量，默认展示今天（{today}）。
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <div className="flex items-center gap-1 rounded-xl border border-stone-200 bg-white p-1 dark:border-white/10 dark:bg-white/5">
+          <div className="flex items-center gap-1 rounded-xl border border-neutral-200 bg-white p-1 dark:border-white/10 dark:bg-white/5">
             {PRESETS.map((item) => (
               <button
                 key={item.key}
@@ -135,8 +135,8 @@ function StatsContent() {
                 className={cn(
                   "rounded-lg px-3 py-1.5 text-[13px] font-medium transition",
                   preset === item.key
-                    ? "bg-stone-900 text-white shadow-sm dark:bg-white dark:text-stone-900"
-                    : "text-stone-600 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-white/10 dark:hover:text-white",
+                    ? "bg-neutral-900 text-white shadow-sm dark:bg-white dark:text-neutral-900"
+                    : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-300 dark:hover:bg-white/10 dark:hover:text-white",
                 )}
                 onClick={() => applyPreset(item.key, item.days)}
               >
@@ -156,7 +156,7 @@ function StatsContent() {
           />
           <Button
             variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+            className="h-10 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700"
             onClick={() => {
               setStartDate(today);
               setEndDate(today);
@@ -166,7 +166,7 @@ function StatsContent() {
             重置
           </Button>
           <Button
-            className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+            className="h-10 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800"
             onClick={() => void loadStats()}
             disabled={isLoading}
           >
@@ -207,8 +207,8 @@ function StatsContent() {
         <CardContent className="space-y-4 p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="font-semibold text-stone-900 dark:text-stone-50">请求量波形</div>
-              <div className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">{rangeLabel}</div>
+              <div className="font-semibold text-neutral-900 dark:text-neutral-50">请求量波形</div>
+              <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">{rangeLabel}</div>
             </div>
             {data?.peak ? (
               <Badge variant="info" className="rounded-md px-2.5 py-1 tabular-nums">
@@ -218,16 +218,16 @@ function StatsContent() {
           </div>
 
           {isLoading && !data ? (
-            <div className="flex h-[288px] items-center justify-center text-sm text-stone-400">
+            <div className="flex h-[288px] items-center justify-center text-sm text-neutral-400">
               <LoaderCircle className="mr-2 size-4 animate-spin" />
               加载中
             </div>
           ) : data && data.totals.requests > 0 ? (
             <ImageStatsChart series={data.series} granularity={granularity} />
           ) : (
-            <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-stone-400">
+            <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-neutral-400">
               <span>该时间段没有生图请求</span>
-              <span className="text-xs text-stone-400/80">换一个日期范围试试</span>
+              <span className="text-xs text-neutral-400/80">换一个日期范围试试</span>
             </div>
           )}
         </CardContent>
@@ -236,8 +236,8 @@ function StatsContent() {
       <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="space-y-4 p-5">
           <div>
-            <div className="font-semibold text-stone-900 dark:text-stone-50">按调用方式</div>
-            <div className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">
+            <div className="font-semibold text-neutral-900 dark:text-neutral-50">按调用方式</div>
+            <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
               条形长度 = 各方式占总请求的比重；成功率条满格为 100%
             </div>
           </div>
@@ -248,7 +248,7 @@ function StatsContent() {
       <div className="flex justify-end">
         <Button
           variant="ghost"
-          className="h-8 rounded-lg px-3 text-stone-500"
+          className="h-8 rounded-lg px-3 text-neutral-500"
           onClick={() => void loadStats()}
           disabled={isLoading}
         >
@@ -265,7 +265,7 @@ export default function StatsPage() {
   if (isCheckingAuth || !session || session.role !== "admin") {
     return (
       <div className="flex min-h-[40vh] items-center justify-center">
-        <LoaderCircle className="size-5 animate-spin text-stone-400" />
+        <LoaderCircle className="size-5 animate-spin text-neutral-400" />
       </div>
     );
   }

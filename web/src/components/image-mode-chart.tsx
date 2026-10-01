@@ -18,7 +18,7 @@ const MODE_BAR: Record<string, string> = {
   edit: "bg-[#e87ba4] dark:bg-[#d55181]",
 };
 // 认不出的方式走中性灰：不占分类槽位（后端目前只会给出这两种），也不会伪装成一个序列。
-const MODE_FALLBACK_BAR = "bg-stone-400 dark:bg-stone-500";
+const MODE_FALLBACK_BAR = "bg-neutral-400 dark:bg-neutral-500";
 
 // 成功率是「一个比值对一个上限」，画成 meter：填充是蓝，轨道是同一色阶更浅的一档，
 // 这样整条都在讲同一件事，不是两个独立序列。
@@ -50,12 +50,12 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
   const segments = modes.filter((item) => item.requests > 0);
 
   if (total === 0) {
-    return <div className="py-10 text-center text-sm text-stone-400">该时间段没有生图请求</div>;
+    return <div className="py-10 text-center text-sm text-neutral-400">该时间段没有生图请求</div>;
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex h-3 w-full overflow-hidden rounded-full bg-stone-100">
+      <div className="flex h-3 w-full overflow-hidden rounded-full bg-neutral-100">
         {segments.map((item, index) => (
           <Fragment key={item.mode}>
             {/* 2px 的表面色缝隙分开两段，不额外描边。 */}
@@ -71,11 +71,11 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
       </div>
 
       {/* 这条既是图例也是直标：身份不靠颜色单独承担。 */}
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-stone-500 dark:text-stone-400">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-neutral-500 dark:text-neutral-400">
         {segments.map((item) => (
           <span key={item.mode} className="inline-flex items-center gap-1.5">
             <span className={cn("size-2.5 rounded-full", barClass(item.mode))} />
-            <span className="text-stone-600 dark:text-stone-300">{item.label}</span>
+            <span className="text-neutral-600 dark:text-neutral-300">{item.label}</span>
             <span className="tabular-nums">{formatRate(item.requests / total)}</span>
           </span>
         ))}
@@ -85,7 +85,7 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
       <div className="overflow-x-auto">
         <table className="w-full min-w-[440px] text-sm">
           <thead>
-            <tr className="border-b border-stone-100 text-xs text-stone-500 dark:border-white/10 dark:text-stone-400">
+            <tr className="border-b border-neutral-100 text-xs text-neutral-500 dark:border-white/10 dark:text-neutral-400">
               <th scope="col" className="py-2 pr-3 text-left font-medium">
                 调用方式
               </th>
@@ -106,18 +106,18 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
               return (
                 <tr
                   key={item.mode}
-                  className="border-b border-stone-100 transition-colors last:border-0 hover:bg-stone-50/70 dark:border-white/10 dark:hover:bg-white/5"
+                  className="border-b border-neutral-100 transition-colors last:border-0 hover:bg-neutral-50/70 dark:border-white/10 dark:hover:bg-white/5"
                 >
                   <td className="py-3 pr-3">
-                    <span className="inline-flex items-center gap-2 font-medium text-stone-700 dark:text-stone-200">
+                    <span className="inline-flex items-center gap-2 font-medium text-neutral-700 dark:text-neutral-200">
                       <span className={cn("size-2.5 rounded-full", barClass(item.mode))} />
                       {item.label}
                     </span>
                   </td>
-                  <td className="px-3 py-3 text-right font-semibold tabular-nums text-stone-900 dark:text-stone-50">
+                  <td className="px-3 py-3 text-right font-semibold tabular-nums text-neutral-900 dark:text-neutral-50">
                     {formatCount(item.requests)}
                   </td>
-                  <td className="px-3 py-3 text-right tabular-nums text-stone-500 dark:text-stone-400">
+                  <td className="px-3 py-3 text-right tabular-nums text-neutral-500 dark:text-neutral-400">
                     {formatRate(item.requests / total)}
                   </td>
                   <td className="px-3 py-3">
@@ -128,7 +128,7 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
                           style={{ width: `${rate * 100}%` }}
                         />
                       </span>
-                      <span className="w-12 shrink-0 tabular-nums text-stone-700 dark:text-stone-200">
+                      <span className="w-12 shrink-0 tabular-nums text-neutral-700 dark:text-neutral-200">
                         {item.requests > 0 ? formatRate(rate) : "-"}
                       </span>
                     </div>
