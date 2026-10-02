@@ -200,6 +200,28 @@ class ImageMainlineRecoveryTests(unittest.TestCase):
                 self.assertEqual(len(accounts.image_results), 3)
                 self.assertEqual(accounts.removed_invalid_tokens, [])
 
+    def test_mainline_failure_carries_diagnostics_onto_the_escaping_error(self):
+        """失败诊断要挂在抛给上层的异常上：日志页（和一键导出）才能看到这些数。"""
+        accounts = FakeAccountService(["token-a"])
+        with mock.patch.object(conversation, "account_service", accounts), \
+             mock.patch.object(
+                 conversation, "stream_image_outputs",
+                 side_effect=UpstreamHTTPError("conversation", 400, {"skipped_mainline": True}),
+             ), \
+             mock.patch.object(conversation, "TRANSIENT_IMAGE_RESCUE_WINDOW_SECS", 0):
+            with self.assertRaises(ImageGenerationError) as raised:
+                list(conversation.stream_image_outputs_with_pool(ConversationRequest(model="gpt-image-2", prompt="draw")))
+
+        diagnostics = raised.exception.image_diagnostics
+        self.assertEqual(diagnostics["trace_id"], raised.exception.image_trace)
+        self.assertEqual(diagnostics["index"], 1)
+        self.assertEqual(diagnostics["image_inflight"], 0)
+        self.assertEqual(diagnostics["image_peers"], 0)
+        self.assertTrue(diagnostics["mainline_rejected"])
+        self.assertIn("rescue", diagnostics)
+        # 诊断里不能出现完整 access_token
+        self.assertNotIn("token-a", diagnostics["request_token"])
+
     def test_single_account_can_recover_with_a_new_backend_session(self):
         accounts = FakeAccountService(["token-a"])
         backends = []

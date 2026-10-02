@@ -47,6 +47,8 @@ def create_app() -> FastAPI:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+        # 日志导出的下载文件名和条数靠这两个响应头回传；跨域跑前端（开发时）也要能读到。
+        expose_headers=["Content-Disposition", "X-Exported-Count"],
     )
     app.include_router(ai.create_router())
     app.include_router(accounts.create_router())

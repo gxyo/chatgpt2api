@@ -391,6 +391,9 @@ class ImageTaskService:
             image_trace = _clean(getattr(exc, "image_trace", ""))
             if image_trace:
                 detail["image_trace"] = image_trace
+            image_diagnostics = getattr(exc, "image_diagnostics", None)
+            if isinstance(image_diagnostics, dict) and image_diagnostics:
+                detail["image_diagnostics"] = image_diagnostics
         if account_email:
             detail["account_email"] = account_email
         if urls:

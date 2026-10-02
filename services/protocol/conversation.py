@@ -1344,14 +1344,19 @@ def _generate_single_image(
     该函数在独立线程中运行，每个线程使用不同的账号，
     实现并行生图，避免串行超时阻塞。
 
-    抛出的异常都会带上 image_trace（本次请求的关联 id），日志详情据此和容器日志对上。
+    抛出的异常都会带上 image_trace（本次请求的关联 id）和最后一份失败诊断
+    image_diagnostics，日志详情/一键导出据此就能直接看到现场，不用去翻容器日志。
     """
     trace_id = f"{request.trace_id}-{index}" if request.trace_id else new_trace_id()
+    # 诊断在里层现算现写进这个 dict；不管最后从哪一行抛出，都在这里统一挂到异常上。
+    diagnostics: dict[str, Any] = {}
     try:
-        return _generate_single_image_attempts(request, index, total, trace_id)
+        return _generate_single_image_attempts(request, index, total, trace_id, diagnostics)
     except BaseException as exc:
         if not getattr(exc, "image_trace", ""):
             setattr(exc, "image_trace", trace_id)
+        if diagnostics and not getattr(exc, "image_diagnostics", None):
+            setattr(exc, "image_diagnostics", dict(diagnostics))
         raise
 
 
@@ -1360,6 +1365,7 @@ def _generate_single_image_attempts(
         index: int,
         total: int,
         trace_id: str,
+        diagnostics: dict[str, Any],
 ) -> list[ImageOutput]:
     # 模型返回文本而非图片的最大重试次数
     MAX_TEXT_REPLY_RETRIES = 3
@@ -1633,12 +1639,12 @@ def _generate_single_image_attempts(
                 # 短时间内的新请求优先换个账号，别在同一个号上反复撞。
                 account_service.mark_image_mainline_rejected(token)
             inflight = account_service.image_inflight_count(token)
-            logger.warning({
-                "event": "image_stream_fail",
+            # 这批诊断既进容器日志，也写进调用方传入的 diagnostics —— 最后抛出的异常
+            # 会带着它一起出去，日志页（和一键导出）里就能看到 image_peers、握手排队这些数。
+            diagnostics.update({
                 "trace_id": trace_id,
                 "request_token": anonymize_token(token),
                 "account_email": account_email,
-                "error": str(exc),
                 # 这个账号上还有几条生图请求在跑（含自己）：>0 表示同账号并发，
                 # 是 skipped_mainline 最需要确认的一个数。
                 "image_inflight": inflight,
@@ -1650,6 +1656,7 @@ def _generate_single_image_attempts(
                 "rescue": in_rescue,
                 **account_service.image_handshake_diagnostics(token),
             })
+            logger.warning({"event": "image_stream_fail", "error": str(exc), **diagnostics})
             if not emitted_for_token and is_token_auth_error(exc, last_error):
                 try:
                     refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")

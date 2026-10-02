@@ -21,6 +21,10 @@ from utils.helper import anthropic_sse_stream, describe_exception, public_error_
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
 INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id"}
+# 一键导出：默认最近 10 条，条数上界防止一次导出把浏览器拖死。
+LOG_EXPORT_DEFAULT_LIMIT = 10
+LOG_EXPORT_MAX_LIMIT = 500
+_LOG_EXPORT_SEPARATOR = "=" * 78
 
 
 class LogService:
@@ -96,6 +100,67 @@ class LogService:
     def _log_day(item: dict[str, Any]) -> str:
         day = str(item.get("time") or "")[:10]
         return day if len(day) == 10 else ""
+
+    def build_export(self, type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+                     limit: int = LOG_EXPORT_DEFAULT_LIMIT) -> tuple[str, int]:
+        """把最近 N 条日志排版成一份可以直接复制粘贴的纯文本，返回 (文本, 条数)。
+
+        「完整报文」就是落盘的那条记录本身，只排版不裁剪：上游状态码、原始响应体、
+        请求摘要、trace id 全在 detail 里，日志页详情弹窗显示不下的内容这里一个不落。
+        顺序按时间由旧到新，方便顺着时间线看一次重试/抢救的完整过程。
+        """
+        count = self._normalize_export_limit(limit)
+        items = self.list(type=type, status=status, start_date=start_date, end_date=end_date, limit=count)
+        items.reverse()
+        lines = [
+            "ChatGPT2API 日志导出",
+            f"导出时间：{beijing_now_text()}",
+            f"筛选条件：类型={type or '全部'}，状态={status or '全部'}，"
+            f"日期={f'{start_date} ~ {end_date}' if (start_date or end_date) else '不限'}",
+            f"条数：{len(items)} 条（最多 {count} 条，按时间由旧到新排列）",
+        ]
+        if not items:
+            lines.append("没有符合条件的日志。")
+            return "\n".join(lines) + "\n", 0
+        for index, item in enumerate(items, start=1):
+            lines.extend([
+                "",
+                _LOG_EXPORT_SEPARATOR,
+                f"[{index}/{len(items)}] {self._export_headline(item)}",
+                _LOG_EXPORT_SEPARATOR,
+                json.dumps(item, ensure_ascii=False, indent=2),
+            ])
+        return "\n".join(lines) + "\n", len(items)
+
+    @staticmethod
+    def _normalize_export_limit(limit: object) -> int:
+        try:
+            count = int(limit)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return LOG_EXPORT_DEFAULT_LIMIT
+        return max(1, min(count, LOG_EXPORT_MAX_LIMIT))
+
+    @staticmethod
+    def _export_headline(item: dict[str, Any]) -> str:
+        """每条日志顶部的一行摘要，方便在文件里快速翻到出问题的那条。"""
+        detail = item.get("detail")
+        detail = detail if isinstance(detail, dict) else {}
+        parts = [str(item.get("time") or "").strip()]
+        summary = str(item.get("summary") or "").strip()
+        if summary:
+            parts.append(summary)
+        parts.append(f"type={item.get('type') or ''}")
+        status = str(detail.get("status") or "").strip()
+        if status:
+            parts.append(f"status={status}")
+        duration = detail.get("duration_ms")
+        if isinstance(duration, int):
+            parts.append(f"耗时={duration}ms")
+        for key in ("account_email", "image_trace", "conversation_id", "endpoint"):
+            value = str(detail.get(key) or "").strip()
+            if value:
+                parts.append(f"{key}={value}")
+        return " | ".join(part for part in parts if part)
 
     def cleanup_before(self, cutoff_day: str) -> dict[str, int]:
         """删除 cutoff_day 之前（不含当天）的日志。
@@ -372,6 +437,11 @@ class LoggedCall:
             image_trace = str(getattr(exc, "image_trace", "") or "").strip()
             if image_trace:
                 detail["image_trace"] = image_trace
+            # 生图失败时的现场诊断（同账号并发数、握手排队情况等），
+            # 直接从日志页导出就能看到，不必再去翻容器日志。
+            image_diagnostics = getattr(exc, "image_diagnostics", None)
+            if isinstance(image_diagnostics, dict) and image_diagnostics:
+                detail["image_diagnostics"] = image_diagnostics
         email = str(account_email or "").strip()
         if not email:
             emails = _collect_account_emails(result)

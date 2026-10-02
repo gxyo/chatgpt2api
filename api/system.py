@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
@@ -18,9 +18,10 @@ from services.image_service import (
 )
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_cleanup_service import cleanup_logs, log_storage_info
-from services.log_service import log_service
+from services.log_service import LOG_EXPORT_DEFAULT_LIMIT, log_service
 from services.proxy_service import test_proxy
 from services.stats_service import build_image_stats
+from utils.beijing_time import beijing_now_text
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -124,6 +125,26 @@ def create_router(app_version: str) -> APIRouter:
             start_date=start_date.strip(),
             end_date=end_date.strip(),
         )}
+
+    @router.get("/api/logs/export")
+    async def export_logs(type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+                          limit: int = LOG_EXPORT_DEFAULT_LIMIT,
+                          authorization: str | None = Header(default=None)):
+        """导出最近 N 条日志为 txt，报文完整，方便直接复制出来排查。"""
+        require_admin(authorization)
+        text, count = await run_in_threadpool(
+            log_service.build_export, type.strip(), status.strip(), start_date.strip(), end_date.strip(), limit,
+        )
+        stamp = beijing_now_text().replace(" ", "-").replace(":", "")
+        return Response(
+            content=text,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="logs-{stamp}.txt"',
+                # 前端用来提示导出了几条；拿不到也不影响下载。
+                "X-Exported-Count": str(count),
+            },
+        )
 
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):

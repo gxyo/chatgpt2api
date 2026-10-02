@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, HardDrive, ImageIcon, LoaderCircle, RefreshCw, Save, Search, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, LoaderCircle, RefreshCw, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
@@ -16,7 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { cleanupSystemLogs, deleteSystemLogs, fetchLogRetention, fetchSystemLogs, saveLogRetention, type LogRetentionInfo, type SystemLog } from "@/lib/api";
+import { cleanupSystemLogs, deleteSystemLogs, exportSystemLogs, fetchLogRetention, fetchSystemLogs, saveLogRetention, type LogRetentionInfo, type SystemLog } from "@/lib/api";
 import { formatBeijingClock, getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
@@ -117,6 +117,8 @@ function LogsContent() {
   const [isSavingRetention, setIsSavingRetention] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [exportLimit, setExportLimit] = useState("10");
+  const [isExporting, setIsExporting] = useState(false);
   const detailUrls = getUrls(detailLog);
   const detailUpstreamError = getUpstreamError(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
@@ -206,6 +208,38 @@ function LogsContent() {
       toast.error(error instanceof Error ? error.message : "清理日志失败");
     } finally {
       setIsCleaning(false);
+    }
+  };
+
+  const parsedExportLimit = Number.parseInt(exportLimit, 10);
+  const exportLimitValid = Number.isFinite(parsedExportLimit) && parsedExportLimit >= 1 && parsedExportLimit <= 500;
+
+  const exportLogs = async () => {
+    if (!exportLimitValid) {
+      toast.error("导出条数需在 1 - 500 之间");
+      return;
+    }
+    setIsExporting(true);
+    try {
+      // 跟着当前筛选走：只想导失败日志时，导出的就是失败的那几条。
+      const count = await exportSystemLogs({
+        type,
+        status: status === LogStatus.All ? "" : status,
+        start_date: startDate,
+        end_date: endDate,
+        limit: parsedExportLimit,
+      });
+      if (count === null) {
+        toast.success("已导出日志文件");
+      } else if (count > 0) {
+        toast.success(`已导出 ${count} 条日志`);
+      } else {
+        toast.success("已导出日志文件（没有符合条件的记录）");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导出日志失败");
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -299,6 +333,29 @@ function LogsContent() {
           <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
+          </Button>
+          {/* 一键导出：把最近 N 条日志的完整报文存成 txt，
+              遇到问题时直接把这个文件发出来，不用一条条截图。 */}
+          <label className="flex h-10 items-center gap-2 rounded-xl border border-neutral-200 bg-white px-3 text-sm text-neutral-600">
+            导出最近
+            <Input
+              value={exportLimit}
+              onChange={(event) => setExportLimit(event.target.value)}
+              inputMode="numeric"
+              aria-label="导出条数"
+              className="h-8 w-14 rounded-lg border-neutral-200 bg-white px-1 text-center"
+            />
+            条
+          </label>
+          <Button
+            variant="outline"
+            onClick={() => void exportLogs()}
+            disabled={isExporting || !exportLimitValid}
+            title="导出最近 N 条日志的完整报文（txt），按时间由旧到新排列"
+            className="h-10 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700"
+          >
+            {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+            导出日志
           </Button>
         </div>
       </div>

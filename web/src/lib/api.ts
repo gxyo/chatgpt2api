@@ -519,6 +519,45 @@ export async function fetchSystemLogs(filters: { type?: string; status?: string;
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
+function filenameFromDisposition(disposition: string | undefined, fallback: string) {
+  const match = /filename="?([^";]+)"?/i.exec(disposition || "");
+  return match ? match[1].trim() : fallback;
+}
+
+/** 导出最近 N 条日志为 txt（报文完整），返回实际导出的条数；拿不到条数时返回 null。 */
+export async function exportSystemLogs(filters: {
+  type?: string;
+  status?: string;
+  start_date?: string;
+  end_date?: string;
+  limit?: number;
+}) {
+  const params = new URLSearchParams();
+  if (filters.type) params.set("type", filters.type);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.start_date) params.set("start_date", filters.start_date);
+  if (filters.end_date) params.set("end_date", filters.end_date);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  const response = await request.get(`/api/logs/export${params.toString() ? `?${params.toString()}` : ""}`, {
+    responseType: "blob",
+  });
+  const blob = response.data as Blob;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filenameFromDisposition(
+    response.headers?.["content-disposition"] as string | undefined,
+    "logs.txt",
+  );
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  const rawCount = response.headers?.["x-exported-count"];
+  const exported = Number(rawCount ?? "");
+  return rawCount === undefined || rawCount === "" || !Number.isFinite(exported) ? null : exported;
+}
+
 export type ImageStatsPoint = {
   key: string;
   label: string;
