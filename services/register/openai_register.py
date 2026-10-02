@@ -271,8 +271,11 @@ def _record_register_failure(
             "duration_ms": int(max(0.0, cost) * 1000),
             "engine": str(config.get("engine") or ""),
             "threads": int(config.get("threads") or 0),
-            "proxy": _mask_proxy(str(config.get("proxy") or "")),
+            # 走没走代理是排查的关键一列，直连就写「直连」，别留个空值让人猜。
+            "proxy": _mask_proxy(str(config.get("proxy") or "")) or "直连",
         })
+        # 空字符串只会让详情里多出一行「key 后面什么都没有」，一律不留。
+        record = {key: value for key, value in record.items() if value != ""}
         steps = record.get("steps") if isinstance(record.get("steps"), list) else []
         for key, value in _facts_from_steps([str(item) for item in steps]).items():
             record.setdefault(key, value)

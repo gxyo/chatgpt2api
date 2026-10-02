@@ -178,6 +178,16 @@ class RecordRegisterFailureTests(TaskContextTestCase):
         self.assertNotIn("stage", record)
         self.assertTrue(record["fatal"])
 
+    def test_proxy_column_is_readable_and_never_carries_credentials(self) -> None:
+        with mock.patch.dict(openai_register.config, {"proxy": "socks5://user:secret@1.2.3.4:1080"}):
+            openai_register._record_register_failure(4, {"error": "boom"}, {}, 1.0)
+        self.assertEqual(self.records()[0]["detail"]["proxy"], "socks5://1.2.3.4:1080")
+
+    def test_direct_connection_says_so(self) -> None:
+        with mock.patch.dict(openai_register.config, {"proxy": ""}):
+            openai_register._record_register_failure(4, {"error": "boom"}, {}, 1.0)
+        self.assertEqual(self.records()[0]["detail"]["proxy"], "直连")
+
     def test_email_is_recovered_from_the_steps_when_the_child_could_not_report_it(self) -> None:
         """超时被强杀时只剩父进程攒的输出尾部：邮箱要从过程记录里回捞。"""
         openai_register._record_register_failure(
