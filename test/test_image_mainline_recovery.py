@@ -25,6 +25,7 @@ from utils.helper import (
     ensure_ok,
     is_retriable_upstream_error,
     sanitize_image_error_text,
+    strip_plumbing_status_prefix,
 )
 
 
@@ -244,8 +245,24 @@ class ImageErrorSanitizerTests(unittest.TestCase):
         ]
         for text in cases:
             with self.subTest(text=text):
-                self.assertEqual(sanitize_image_error_text(text), "status_code=400, 本次生图失败，请重试。")
-                self.assertEqual(sanitize_image_error_text(text), IMAGE_MAINLINE_REJECT_MESSAGE)
+                message = sanitize_image_error_text(text)
+                self.assertEqual(message, "本次生图失败，请重试。")
+                self.assertEqual(message, IMAGE_MAINLINE_REJECT_MESSAGE)
+                # 日志卡片已经单独展示 status=400，文案里不能再带一遍状态码前缀。
+                self.assertNotIn("status", message)
+
+    def test_status_prefix_is_stripped_from_the_message(self):
+        cases = {
+            "status_code=400, 请稍后再试": "请稍后再试",
+            "status=500, 请稍后再试": "请稍后再试",
+            "status_code=400，请稍后再试": "请稍后再试",
+            "status_code=400 请稍后再试": "请稍后再试",
+            "status_code=400, status=400, 请稍后再试": "请稍后再试",
+            "请稍后再试": "请稍后再试",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(strip_plumbing_status_prefix(text), expected)
 
     def test_upstream_plumbing_text_falls_back_to_the_generic_retry_message(self):
         cases = [
@@ -274,21 +291,28 @@ class ImageErrorSanitizerTests(unittest.TestCase):
 
 class ImageHandshakeLockTests(unittest.TestCase):
     class RecordingAccountService:
-        def __init__(self, events: list[tuple[str, str]]):
+        def __init__(self, events: list[tuple[str, str]], acquire_result: bool = True):
             self.events = events
+            self.acquire_result = acquire_result
 
         def get_account(self, access_token: str):
             return {"email": "a@example.test"}
 
         def acquire_image_handshake(self, access_token: str, timeout=None) -> bool:
             self.events.append(("acquire", access_token))
-            return True
+            return self.acquire_result
 
         def release_image_handshake(self, access_token: str) -> None:
             self.events.append(("release", access_token))
 
         def image_inflight_count(self, access_token: str) -> int:
             return 2
+
+        def image_handshake_diagnostics(self, access_token: str) -> dict:
+            return {}
+
+        def mark_image_mainline_rejected(self, access_token: str) -> None:
+            return None
 
     def test_picture_stream_holds_the_handshake_lock_only_until_the_stream_opens(self):
         events: list[tuple[str, str]] = []
@@ -317,6 +341,65 @@ class ImageHandshakeLockTests(unittest.TestCase):
                 list(api._stream_picture_conversation("draw", "gpt-image-2", []))
 
         self.assertEqual(events, [("acquire", "token-a"), ("release", "token-a")])
+
+
+class ConduitWindowTests(unittest.TestCase):
+    """搜索/可编辑文件与生图共用同一个账号 conduit 窗口。
+
+    三者都是 prepare → mainline 两步，同账号并发时先到的 conduit 会被上游丢掉并回
+    {"skipped_mainline": true}，所以窗口必须一起排队。
+    """
+
+    def _service(self, events, acquire_result: bool = True):
+        return ImageHandshakeLockTests.RecordingAccountService(events, acquire_result=acquire_result)
+
+    def test_search_holds_the_window_until_the_mainline_is_accepted(self):
+        events: list[tuple[str, str]] = []
+        api = OpenAIBackendAPI("token-a")
+
+        def fake_prepare(prompt, model):
+            events.append(("prepare", model))
+            return "conduit"
+
+        def fake_run(prompt, conduit_token, model, on_started=None):
+            events.append(("mainline", conduit_token))
+            if on_started is not None:
+                on_started()
+            events.append(("stream", model))
+            return "conv-1"
+
+        with mock.patch("services.openai_backend_api.account_service", self._service(events)), \
+             mock.patch.object(api, "_bootstrap"), \
+             mock.patch.object(api, "_prepare_search_conversation", side_effect=fake_prepare), \
+             mock.patch.object(api, "_run_search_conversation", side_effect=fake_run), \
+             mock.patch.object(api, "_wait_search_result", return_value={"answer": "ok"}):
+            result = api.search("hi")
+
+        self.assertEqual(result, {"answer": "ok"})
+        names = [name for name, _ in events]
+        # 窗口覆盖 prepare 和 mainline；mainline 被上游接收后立刻放锁，读流不占窗口
+        self.assertEqual(names, ["acquire", "prepare", "mainline", "release", "stream"])
+
+    def test_search_releases_the_window_when_prepare_fails(self):
+        events: list[tuple[str, str]] = []
+        api = OpenAIBackendAPI("token-a")
+        with mock.patch("services.openai_backend_api.account_service", self._service(events)), \
+             mock.patch.object(api, "_bootstrap"), \
+             mock.patch.object(api, "_prepare_search_conversation", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                api.search("hi")
+
+        self.assertEqual([name for name, _ in events], ["acquire", "release"])
+
+    def test_window_timeout_proceeds_without_the_lock(self):
+        events: list[tuple[str, str]] = []
+        api = OpenAIBackendAPI("token-a")
+        with mock.patch("services.openai_backend_api.account_service", self._service(events, acquire_result=False)):
+            self.assertFalse(api._acquire_conduit_window())
+            # 没拿到锁就不该放锁（否则会放掉别的线程持有的锁）
+            api._release_conduit_window()
+
+        self.assertEqual([name for name, _ in events], ["acquire"])
 
 
 if __name__ == "__main__":

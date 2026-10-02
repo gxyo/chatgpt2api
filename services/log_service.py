@@ -368,6 +368,10 @@ class LoggedCall:
             except Exception:
                 # 记日志本身永远不能影响请求处理。
                 pass
+            # 图片链路的关联 id：容器日志里同样的 trace_id 能直接对上这一条记录。
+            image_trace = str(getattr(exc, "image_trace", "") or "").strip()
+            if image_trace:
+                detail["image_trace"] = image_trace
         email = str(account_email or "").strip()
         if not email:
             emails = _collect_account_emails(result)

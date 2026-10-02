@@ -9,7 +9,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Condition, Lock, Thread
+from threading import Condition, Lock, Thread, local as threading_local
 from typing import Any
 from urllib.parse import urlencode
 
@@ -21,9 +21,17 @@ from services.log_service import (
 from services.storage.base import StorageBackend
 from utils.beijing_time import beijing_now_text, utc_now_iso
 from utils.helper import anonymize_token
+from utils.log import logger
 
 ACCOUNT_REFRESH_MAX_WORKERS = 6
 FORCE_REFRESH_REMOVE_STATUS_CODES = {401, 402, 403, 502, 503, 504}
+# 账号刚拒绝过 conduit（skipped_mainline）后的「冷落」时长：这段时间里的新请求
+# 优先用别的账号。只是排序偏好，不会让请求失败。
+MAINLINE_REJECT_COOLDOWN_SECS = 8.0
+# 握手窗口的正常耗时只有 1-2 秒（prepare→mainline 定长超时 30s）。超过这个租约还
+# 没释放，只可能是持有线程死了或生成器被别处回收导致的泄漏——此时强制拆锁，
+# 否则那个账号以后每次请求都要白等一次窗口超时。
+IMAGE_HANDSHAKE_LEASE_SECS = 90.0
 
 
 class AccountService:
@@ -65,8 +73,21 @@ class AccountService:
         # 丢弃先前的 conduit 状态并返回 400 {"skipped_mainline":true}；这里只锁住
         # 短握手窗口，长耗时的生图阶段仍然按 image_account_concurrency 并行。
         # 注意 guard 必须独立于 self._lock，否则会持 _lock 阻塞在握手锁上。
+        #
+        # 锁按「账号身份」而不是 token 字符串索引：access_token 会随 refresh 轮换，
+        # 原来按 token 索引时，轮换前拿到的锁和轮换后新请求用的锁是两个不同的对象，
+        # 同账号照样并发握手（正是 skipped_mainline 的触发条件）。
         self._image_handshake_locks: dict[str, Lock] = {}
         self._image_handshake_locks_guard = Lock()
+        # 最近拒绝过 conduit 的账号（token -> monotonic 时间戳），只影响选号排序。
+        self._image_mainline_rejects: dict[str, float] = {}
+        # 当前线程持有哪些握手锁。release 必须放掉「自己拿到的那把锁」，
+        # 不能按 token 重新查一遍——轮换/别名解析后查到的可能是别人的锁。
+        self._image_handshake_held = threading_local()
+        # 握手锁当前被谁占着、从什么时候开始（key -> monotonic 起始时间），用于识别泄漏。
+        self._image_handshake_holder: dict[str, float] = {}
+        # 每个账号最近几次握手的排队情况，只给日志用。
+        self._image_handshake_recent: dict[str, list[dict[str, Any]]] = {}
         self._cumulative_total = self._load_cumulative_total()
 
     def _get_cumulative_file(self) -> Path:
@@ -915,6 +936,17 @@ class AccountService:
         with self._lock:
             return list(self._accounts)
 
+    def _resolve_excluded_tokens_locked(self, excluded_tokens: set[str] | None) -> set[str]:
+        """排除项也要跟着 token 轮换走。
+
+        调用方记的是「用过的那个 access_token」，账号刷新后池子里挂的是新 token，
+        不解析别名的话刚失败的账号会被原样再选一遍。
+        """
+        resolved: set[str] = set()
+        for token in excluded_tokens or ():
+            resolved.add(self._resolve_access_token_locked(token) or token)
+        return resolved
+
     def _list_ready_candidate_tokens(
             self,
             excluded_tokens: set[str] | None = None,
@@ -922,7 +954,7 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
     ) -> list[str]:
-        excluded = set(excluded_tokens or set())
+        excluded = self._resolve_excluded_tokens_locked(excluded_tokens)
         return [
             token
             for item in self._accounts.values()
@@ -934,6 +966,20 @@ class AccountService:
                and token not in excluded
         ]
 
+    def _prune_mainline_rejects_locked(self, now: float) -> None:
+        for token in list(self._image_mainline_rejects):
+            if now - self._image_mainline_rejects[token] >= MAINLINE_REJECT_COOLDOWN_SECS:
+                del self._image_mainline_rejects[token]
+
+    def _image_candidate_sort_key_locked(self, token: str, now: float) -> tuple[int, int]:
+        """选号排序：刚被上游拒过 conduit 的账号排最后，其次比在途数。
+
+        只是排序偏好，不是排除——号池里全是被拒过的账号时，排序退化成按在途数排。
+        """
+        rejected_at = self._image_mainline_rejects.get(token)
+        recently_rejected = 1 if rejected_at is not None and now - rejected_at < MAINLINE_REJECT_COOLDOWN_SECS else 0
+        return (recently_rejected, len(self._image_inflight.get(token, [])))
+
     def _list_available_candidate_tokens(
             self,
             excluded_tokens: set[str] | None = None,
@@ -942,6 +988,8 @@ class AccountService:
             plan_types: set[str] | tuple[str, ...] | None = None,
     ) -> list[str]:
         self._prune_expired_image_slots_locked()
+        now = time.monotonic()
+        self._prune_mainline_rejects_locked(now)
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         candidates = [
             token
@@ -951,8 +999,18 @@ class AccountService:
         # 优先挑当前零在途的账号，只有号池全忙时才复用已在跑图的号。同一账号上并发
         # 跑多条 prepare→mainline 是 skipped_mainline 的直接诱因，能避开就避开。
         # 稳定排序：并列时保留 _list_ready_candidate_tokens 的原始顺序。
-        candidates.sort(key=lambda token: len(self._image_inflight.get(token, [])))
+        candidates.sort(key=lambda token: self._image_candidate_sort_key_locked(token, now))
         return candidates
+
+    def mark_image_mainline_rejected(self, access_token: str) -> None:
+        """记一下「这个账号刚才拒绝了 conduit」，短时间内的新请求会优先换号。"""
+        if not access_token:
+            return
+        with self._image_slot_condition:
+            now = time.monotonic()
+            self._prune_mainline_rejects_locked(now)
+            token = self._resolve_access_token_locked(access_token) or access_token
+            self._image_mainline_rejects[token] = now
 
     def _image_slot_lease_timeout_secs(self) -> float:
         return max(30.0, float(config.image_poll_timeout_secs) * 1.2)
@@ -990,13 +1048,13 @@ class AccountService:
                     )
                 tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
                 if tokens:
-                    # tokens 已按在途数升序排列。只在「最空闲那一档」里轮询，而不是在整个
-                    # 列表上按全局 _index 取模 —— 否则 _index 会把请求推到已经在跑图的
-                    # 账号上，白白制造同账号并发。
-                    least_inflight = len(self._image_inflight.get(tokens[0], []))
+                    # tokens 已按（是否刚被拒过、在途数）升序排列。只在「最优那一档」里轮询，
+                    # 而不是在整个列表上按全局 _index 取模 —— 否则 _index 会把请求推到已经在
+                    # 跑图、或者刚刚拒绝过 conduit 的账号上，白白制造同账号并发。
+                    best_key = self._image_candidate_sort_key_locked(tokens[0], time.monotonic())
                     idle_group = [
                         token for token in tokens
-                        if len(self._image_inflight.get(token, [])) == least_inflight
+                        if self._image_candidate_sort_key_locked(token, time.monotonic()) == best_key
                     ]
                     access_token = idle_group[self._index % len(idle_group)]
                     self._index += 1
@@ -1030,8 +1088,39 @@ class AccountService:
                 self._image_inflight[access_token] = slots[1:]
             self._image_slot_condition.notify_all()
 
-    def _get_image_handshake_lock(self, access_token: str) -> Lock:
-        key = self.resolve_access_token(access_token) or access_token
+    @staticmethod
+    def _image_handshake_key_for(token: str, account: dict | None) -> tuple[str, str]:
+        """返回 (锁索引, 身份类型)。身份在 token 轮换前后保持不变。"""
+        account = account or {}
+        user_id = str(account.get("user_id") or "").strip()
+        if user_id:
+            return f"user:{user_id}", "user_id"
+        email = str(account.get("email") or "").strip().lower()
+        if email:
+            return f"email:{email}", "email"
+        return f"token:{token}", "token"
+
+    def _image_handshake_key_locked(self, access_token: str) -> tuple[str, str]:
+        token = self._resolve_access_token_locked(access_token)
+        return self._image_handshake_key_for(token or access_token, self._accounts.get(token))
+
+    def _drop_image_handshake(self, token: str, account: dict | None) -> None:
+        """账号被删掉时一并清掉它的握手锁与排队记录，避免字典无上限增长。"""
+        key, _ = self._image_handshake_key_for(token, account)
+        if not key:
+            return
+        with self._image_handshake_locks_guard:
+            self._image_handshake_locks.pop(key, None)
+            self._image_handshake_recent.pop(key, None)
+            self._image_handshake_holder.pop(key, None)
+
+    def _image_handshake_key(self, access_token: str) -> tuple[str, str]:
+        if not access_token:
+            return "", "none"
+        with self._lock:
+            return self._image_handshake_key_locked(access_token)
+
+    def _get_image_handshake_lock(self, key: str) -> Lock:
         with self._image_handshake_locks_guard:
             lock = self._image_handshake_locks.get(key)
             if lock is None:
@@ -1039,27 +1128,100 @@ class AccountService:
                 self._image_handshake_locks[key] = lock
             return lock
 
-    def acquire_image_handshake(self, access_token: str, timeout: float | None = None) -> bool:
-        """占用某账号的图片握手窗口，避免同一账号并发握手触发 skipped_mainline。
+    def _remember_image_handshake_event(self, key: str, event: dict[str, Any]) -> None:
+        with self._image_handshake_locks_guard:
+            events = self._image_handshake_recent.setdefault(key, [])
+            events.append(event)
+            if len(events) > 8:
+                del events[:-8]
 
-        超时返回 False，调用方应按原行为继续，不能让用户卡死在这里。
+    def _held_image_handshakes(self) -> dict[str, Lock]:
+        held = getattr(self._image_handshake_held, "locks", None)
+        if held is None:
+            held = {}
+            self._image_handshake_held.locks = held
+        return held
+
+    def _break_stale_image_handshake_locked(self, key: str, lock: Lock, now: float) -> bool:
+        """拆掉被泄漏的握手锁（持有它的线程已经没了 / 生成器被别处回收）。
+
+        正常窗口只有 1-2 秒，超过租约还没释放一定是泄漏；不拆的话这个账号会永远
+        等不到锁，每条请求都得白等一次超时。
+        """
+        holder = self._image_handshake_holder.get(key)
+        if holder is None or now - holder < IMAGE_HANDSHAKE_LEASE_SECS:
+            return False
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
+        self._image_handshake_holder.pop(key, None)
+        return True
+
+    def acquire_image_handshake(self, access_token: str, timeout: float | None = None) -> bool:
+        """占用某账号的 conduit 握手窗口，避免同一账号并发握手触发 skipped_mainline。
+
+        生图、搜索、可编辑文件导出共用这个窗口。超时返回 False，调用方应按原行为继续，
+        不能让用户卡死在这里。
         """
         if not access_token:
             return False
+        key, key_kind = self._image_handshake_key(access_token)
+        if not key:
+            return False
         try:
-            return bool(self._get_image_handshake_lock(access_token).acquire(timeout=timeout))
-        except Exception:
+            lock = self._get_image_handshake_lock(key)
+            started = time.monotonic()
+            with self._image_handshake_locks_guard:
+                broke_stale_lock = self._break_stale_image_handshake_locked(key, lock, started)
+            if broke_stale_lock:
+                logger.warning({
+                    "event": "image_handshake_stale_lock_broken",
+                    "handshake_key_kind": key_kind,
+                    "account_token": anonymize_token(access_token),
+                })
+            acquired = bool(lock.acquire(timeout=timeout))
+            if acquired:
+                # 只认「本线程拿到的这把锁」，release 时原样放掉。
+                with self._image_handshake_locks_guard:
+                    self._image_handshake_holder[key] = started
+                self._held_image_handshakes()[key] = lock
+            self._remember_image_handshake_event(key, {
+                "at": round(started, 3),
+                "wait_ms": int((time.monotonic() - started) * 1000),
+                "acquired": acquired,
+                "kind": key_kind,
+                "inflight": self.image_inflight_count(access_token),
+            })
+            return acquired
+        except Exception as error:
+            # 这里不能把异常抛给生图链路（握手只是优化，失败就按原行为继续），
+            # 但要留下痕迹：否则一个笔误会让窗口静默失效，又变回 skipped_mainline。
+            logger.warning({
+                "event": "image_handshake_acquire_failed",
+                "handshake_key_kind": key_kind,
+                "account_token": anonymize_token(access_token),
+                "error": f"{type(error).__name__}: {error}",
+            })
             return False
 
     def release_image_handshake(self, access_token: str) -> None:
         if not access_token:
             return
+        key, _ = self._image_handshake_key(access_token)
+        if not key:
+            return
+        held = self._held_image_handshakes()
+        lock = held.pop(key, None)
+        if lock is None:
+            # 不是本线程拿到的锁：宁可不放，也不能误放别的线程正在持有的锁。
+            return
         try:
-            lock = self._get_image_handshake_lock(access_token)
-            if lock.locked():
-                lock.release()
-        except Exception:
+            lock.release()
+        except RuntimeError:
             pass
+        with self._image_handshake_locks_guard:
+            self._image_handshake_holder.pop(key, None)
 
     def image_inflight_count(self, access_token: str) -> int:
         """返回某账号当前在途的图片请求数（仅用于日志/诊断）。"""
@@ -1068,6 +1230,24 @@ class AccountService:
         with self._image_slot_condition:
             token = self._resolve_access_token_locked(access_token)
             return len(self._image_inflight.get(token, []))
+
+    def image_handshake_diagnostics(self, access_token: str) -> dict[str, Any]:
+        """某账号最近的握手排队情况，仅用于日志排错。"""
+        if not access_token:
+            return {}
+        key, key_kind = self._image_handshake_key(access_token)
+        if not key:
+            return {}
+        with self._image_handshake_locks_guard:
+            lock = self._image_handshake_locks.get(key)
+            recent = list(self._image_handshake_recent.get(key, []))[-5:]
+        result: dict[str, Any] = {
+            "handshake_key_kind": key_kind,
+            "handshake_lock_held": bool(lock is not None and lock.locked()),
+        }
+        if recent:
+            result["handshake_recent"] = recent
+        return result
 
     def get_available_access_token(
             self,
@@ -1090,6 +1270,23 @@ class AccountService:
             plan_types=plan_types,
             deadline=deadline,
         )
+
+    def has_available_image_account(
+            self,
+            excluded_tokens: set[str] | None = None,
+            plan_type: str | None = None,
+            source_type: str | None = None,
+            plan_types: set[str] | tuple[str, ...] | None = None,
+    ) -> bool:
+        """除被排除的账号外，号池里还有没有能立刻接单的账号（只读，不占槽位）。
+
+        重试时用来判断「能不能换个账号」：还有别的号就避开刚失败的那些，
+        确实没有（号池全忙/全被排除）才回退到原来的行为。
+        """
+        with self._image_slot_condition:
+            return bool(self._list_available_candidate_tokens(
+                excluded_tokens, plan_type, source_type, plan_types,
+            ))
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
         excluded = set(excluded_tokens or set())
@@ -1289,10 +1486,16 @@ class AccountService:
             return {"removed": 0, "items": self.list_accounts()}
         with self._lock:
             target_set = {self._resolve_access_token_locked(token) for token in target_set if token}
-            removed = sum(self._accounts.pop(token, None) is not None for token in target_set)
+            removed_accounts = {
+                token: account
+                for token in target_set
+                if (account := self._accounts.pop(token, None)) is not None
+            }
+            removed = len(removed_accounts)
             for token in target_set:
                 self._image_inflight.pop(token, None)
                 self._image_expired_slots.pop(token, None)
+                self._drop_image_handshake(token, removed_accounts.get(token))
             self._token_aliases = {
                 old: new
                 for old, new in self._token_aliases.items()
@@ -1318,6 +1521,7 @@ class AccountService:
                 return False
             self._image_inflight.pop(access_token, None)
             self._image_expired_slots.pop(access_token, None)
+            self._drop_image_handshake(access_token, current)
             self._token_aliases = {
                 old: new
                 for old, new in self._token_aliases.items()

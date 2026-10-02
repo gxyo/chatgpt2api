@@ -98,6 +98,19 @@ class FakeAccountService:
                 return token
         raise RuntimeError("no available image quota")
 
+    def has_available_image_account(self, excluded_tokens=None, **kwargs):
+        excluded = set(excluded_tokens or set())
+        return any(token not in excluded for token in self.tokens)
+
+    def image_inflight_count(self, access_token: str) -> int:
+        return 0
+
+    def image_handshake_diagnostics(self, access_token: str) -> dict:
+        return {}
+
+    def mark_image_mainline_rejected(self, access_token: str) -> None:
+        return None
+
     def get_account(self, access_token: str):
         return {"email": f"{access_token}@example.test"}
 

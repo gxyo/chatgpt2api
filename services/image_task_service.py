@@ -388,6 +388,9 @@ class ImageTaskService:
                 detail["upstream_error"] = describe_exception(exc)
             except Exception:
                 pass
+            image_trace = _clean(getattr(exc, "image_trace", ""))
+            if image_trace:
+                detail["image_trace"] = image_trace
         if account_email:
             detail["account_email"] = account_email
         if urls:

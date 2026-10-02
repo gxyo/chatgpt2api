@@ -5,11 +5,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from threading import Thread
 from unittest.mock import patch
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
-from services.account_service import AccountService
+from services.account_service import IMAGE_HANDSHAKE_LEASE_SECS, AccountService
 from services.auth_service import AuthService
 from services.config import config
 from services.openai_backend_api import InvalidAccessTokenError
@@ -171,6 +172,140 @@ class AccountCapabilityTests(unittest.TestCase):
             # 释放后立刻可以重新拿到
             self.assertTrue(service.acquire_image_handshake("token-1", timeout=0.05))
             service.release_image_handshake("token-1")
+
+    def test_image_handshake_lock_survives_token_rotation(self) -> None:
+        """access_token 轮换后，同一账号的握手仍然串行。
+
+        之前锁按 token 字符串索引，轮换前拿到的锁和轮换后的请求用的锁是两个对象，
+        同账号照样并发握手——这正是 skipped_mainline 的触发条件。
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-old", "user_id": "user-1", "status": "正常", "quota": 5},
+            ])
+
+            self.assertTrue(service.acquire_image_handshake("token-old", timeout=1.0))
+            try:
+                rotated = service._apply_refreshed_tokens(
+                    "token-old", {"access_token": "token-new", "refresh_token": "refresh-1"}, "test",
+                )
+                self.assertEqual(rotated, "token-new")
+                # 轮换后的 token、以及轮换前的旧 token，都必须落到同一把锁上
+                self.assertFalse(service.acquire_image_handshake("token-new", timeout=0.05))
+                self.assertFalse(service.acquire_image_handshake("token-old", timeout=0.05))
+            finally:
+                service.release_image_handshake("token-old")
+
+            self.assertTrue(service.acquire_image_handshake("token-new", timeout=0.05))
+            service.release_image_handshake("token-new")
+
+    def test_release_from_another_thread_does_not_free_someone_elses_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+
+            self.assertTrue(service.acquire_image_handshake("token-1", timeout=1.0))
+            try:
+                worker = Thread(target=service.release_image_handshake, args=("token-1",))
+                worker.start()
+                worker.join()
+                # 别的线程调 release 不能把本线程持有的锁放掉
+                self.assertFalse(service.acquire_image_handshake("token-1", timeout=0.05))
+            finally:
+                service.release_image_handshake("token-1")
+
+            self.assertTrue(service.acquire_image_handshake("token-1", timeout=0.05))
+            service.release_image_handshake("token-1")
+
+    def test_handshake_diagnostics_report_recent_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+
+            self.assertTrue(service.acquire_image_handshake("token-1", timeout=1.0))
+            diagnostics = service.image_handshake_diagnostics("token-1")
+            service.release_image_handshake("token-1")
+
+            self.assertEqual(diagnostics["handshake_key_kind"], "token")
+            self.assertTrue(diagnostics["handshake_lock_held"])
+            self.assertTrue(diagnostics["handshake_recent"][-1]["acquired"])
+            self.assertIsInstance(diagnostics["handshake_recent"][-1]["wait_ms"], int)
+
+    def test_stale_handshake_lock_is_broken_after_lease(self) -> None:
+        """持有线程消失导致的泄漏锁会被租约强行拆掉。
+
+        这类泄漏如果不拆，账号以后每条请求都要白等一次窗口超时。正常窗口只有 1-2 秒，
+        所以超出租约（远大于 30s 的窗口超时）一定是泄漏。
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+
+            self.assertTrue(service.acquire_image_handshake("token-1", timeout=1.0))
+            # 模拟持有线程消失：本线程的持有记录没了，锁还在
+            service._image_handshake_held.locks = {}
+            key, _ = service._image_handshake_key("token-1")
+            service._image_handshake_holder[key] = time.monotonic() - (IMAGE_HANDSHAKE_LEASE_SECS + 60)
+
+            def _try_acquire() -> None:
+                acquired.append(service.acquire_image_handshake("token-1", timeout=0.5))
+                service.release_image_handshake("token-1")
+
+            acquired: list[bool] = []
+            worker = Thread(target=_try_acquire)
+            worker.start()
+            worker.join()
+
+            self.assertEqual(acquired, [True])
+            # 拆锁后恢复正常：可以正常排队
+            self.assertTrue(service.acquire_image_handshake("token-1", timeout=0.5))
+            service.release_image_handshake("token-1")
+
+    def test_recently_rejected_account_is_deprioritized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-a", "token-b"])
+            for token in ("token-a", "token-b"):
+                service.update_account(token, {"status": "正常", "quota": 5})
+
+            service.mark_image_mainline_rejected("token-a")
+            self.assertEqual(service.get_available_access_token(), "token-b")
+
+            # 号池里全被拒过时依然能选出账号：这是排序偏好，不是排除
+            service.mark_image_mainline_rejected("token-b")
+            self.assertEqual(service.get_available_access_token(), "token-a")
+            service.release_image_slot("token-a")
+            service.release_image_slot("token-b")
+
+    def test_excluded_token_follows_rotation(self) -> None:
+        """排除项按账号算，不按 token 字符串：轮换后刚失败的账号不会再被选中。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-a", "user_id": "user-a", "status": "正常", "quota": 5},
+            ])
+            service._apply_refreshed_tokens("token-a", {"access_token": "token-a2"}, "test")
+
+            # 池子里只有这一个账号：排除轮换前的旧 token 就等于排除这个账号
+            self.assertFalse(service.has_available_image_account({"token-a"}))
+            with self.assertRaises(RuntimeError):
+                service.get_available_access_token({"token-a"})
+            # 不排除时仍然可用（挂的是轮换后的新 token）
+            self.assertEqual(service.get_available_access_token(), "token-a2")
+            service.release_image_slot("token-a2")
+
+    def test_has_available_image_account_excludes_without_taking_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1", "token-2"])
+            for token in ("token-1", "token-2"):
+                service.update_account(token, {"status": "正常", "quota": 5})
+
+            self.assertTrue(service.has_available_image_account({"token-1"}))
+            self.assertFalse(service.has_available_image_account({"token-1", "token-2"}))
+            # 只是查询，不能占掉槽位
+            self.assertEqual(service._image_inflight, {})
 
     def test_split_image_model_supports_plan_type_prefix(self) -> None:
         self.assertEqual(split_image_model("gpt-image-2"), (None, "gpt-image-2"))

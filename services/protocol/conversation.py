@@ -23,10 +23,12 @@ from services.openai_backend_api import (
 from utils.helper import (
     CHANNEL_BUSY_MESSAGE,
     IMAGE_MODELS,
+    anonymize_token,
     extract_image_from_message_content,
     is_codex_image_model,
     is_retriable_upstream_error,
     is_supported_image_model,
+    new_trace_id,
     public_error_message,
     sanitize_image_error_text,
     split_image_model,
@@ -376,6 +378,9 @@ class ConversationRequest:
     message_as_error: bool = False
     deadline: float | None = None
     progress_callback: Any = None  # Callable[[str], None] | None
+    # 单次请求的关联 id（多图时形如 "<base>-<index>"）。日志详情和容器日志都用它，
+    # 拿到用户贴的日志能直接定位这一条请求全链路的记录。
+    trace_id: str = ""
 
 
 @dataclass
@@ -806,7 +811,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                 transient_attempts += 1
                 logger.warning({
                     "event": "text_stream_transient_fail",
-                    "request_token": token,
+                    "request_token": anonymize_token(token),
                     "emitted": emitted,
                     "transient_attempts": transient_attempts,
                     "rescue": in_rescue,
@@ -1338,7 +1343,24 @@ def _generate_single_image(
 
     该函数在独立线程中运行，每个线程使用不同的账号，
     实现并行生图，避免串行超时阻塞。
+
+    抛出的异常都会带上 image_trace（本次请求的关联 id），日志详情据此和容器日志对上。
     """
+    trace_id = f"{request.trace_id}-{index}" if request.trace_id else new_trace_id()
+    try:
+        return _generate_single_image_attempts(request, index, total, trace_id)
+    except BaseException as exc:
+        if not getattr(exc, "image_trace", ""):
+            setattr(exc, "image_trace", trace_id)
+        raise
+
+
+def _generate_single_image_attempts(
+        request: ConversationRequest,
+        index: int,
+        total: int,
+        trace_id: str,
+) -> list[ImageOutput]:
     # 模型返回文本而非图片的最大重试次数
     MAX_TEXT_REPLY_RETRIES = 3
     # TLS 连接错误最大重试次数
@@ -1372,12 +1394,22 @@ def _generate_single_image(
                 request.progress_callback("getting_account")
             plan_type, _ = split_image_model(request.model)
             codex_model = is_codex_image_model(request.model)
+            select_kwargs = {
+                "plan_type": plan_type,
+                "source_type": "codex" if codex_model else None,
+                "plan_types": ("plus", "team", "pro") if codex_model and not plan_type else None,
+            }
+            # 抢救窗口里优先避开已经失败过的账号；只有当别的账号一个都接不了
+            # （号池全忙/全被排除）才放开排除，退化成原来的行为。
+            excluded = attempted_tokens
+            if in_rescue and attempted_tokens and not account_service.has_available_image_account(
+                attempted_tokens, **select_kwargs,
+            ):
+                excluded = set()
             token = account_service.get_available_access_token(
-                set() if in_rescue else attempted_tokens,
+                excluded,
                 deadline=request.deadline,
-                plan_type=plan_type,
-                source_type="codex" if codex_model else None,
-                plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                **select_kwargs,
             )
             if not in_rescue:
                 attempted_tokens.add(token)
@@ -1406,6 +1438,7 @@ def _generate_single_image(
         account_email = str(account.get("email") or "").strip()
         logger.debug({
             "event": "image_account_lookup",
+            "trace_id": trace_id,
             "token_prefix": token[:12] + "..." if len(token) > 12 else token,
             "account_email": account_email,
             "account_found": bool(account),
@@ -1414,6 +1447,7 @@ def _generate_single_image(
         try:
             ensure_image_deadline(request.deadline)
             backend = OpenAIBackendAPI(access_token=token, deadline=request.deadline)
+            backend.trace_id = trace_id
             if request.progress_callback:
                 backend.progress_callback = request.progress_callback
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
@@ -1464,7 +1498,8 @@ def _generate_single_image(
                 if poll_timeout_retry_count <= MAX_POLL_TIMEOUT_RETRIES:
                     logger.warning({
                         "event": "image_poll_timeout_retry",
-                        "request_token": token,
+                        "trace_id": trace_id,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "retry_count": poll_timeout_retry_count,
                         "index": index,
@@ -1473,7 +1508,8 @@ def _generate_single_image(
                     continue
                 logger.warning({
                     "event": "image_poll_timeout_exhausted_retries",
-                    "request_token": token,
+                    "trace_id": trace_id,
+                    "request_token": anonymize_token(token),
                     "account_email": account_email,
                     "retry_count": poll_timeout_retry_count,
                     "index": index,
@@ -1488,7 +1524,8 @@ def _generate_single_image(
             account_service.mark_image_result(token, False)
             logger.warning({
                 "event": "image_stream_content_policy_error",
-                "request_token": token,
+                "trace_id": trace_id,
+                "request_token": anonymize_token(token),
                 "account_email": account_email,
                 "error": str(exc),
                 "index": index,
@@ -1506,6 +1543,8 @@ def _generate_single_image(
             if account_email and not getattr(exc, "account_email", ""):
                 exc.account_email = account_email
             error_text = str(exc)
+            if is_skipped_mainline_error(exc):
+                account_service.mark_image_mainline_rejected(token)
             if not emitted_for_token and is_token_auth_error(exc, error_text):
                 try:
                     refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
@@ -1513,7 +1552,8 @@ def _generate_single_image(
                     refreshed_token = ""
                     logger.warning({
                         "event": "image_stream_token_refresh_failed",
-                        "request_token": token,
+                        "trace_id": trace_id,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "index": index,
                         "error": str(refresh_exc)[:200],
@@ -1521,7 +1561,8 @@ def _generate_single_image(
                 if refreshed_token and refreshed_token != token:
                     logger.warning({
                         "event": "image_stream_token_refreshed_retry",
-                        "request_token": token,
+                        "trace_id": trace_id,
+                        "request_token": anonymize_token(token),
                         "refreshed_token": refreshed_token,
                         "account_email": account_email,
                         "index": index,
@@ -1530,7 +1571,8 @@ def _generate_single_image(
                 account_service.remove_invalid_token(token, "image_stream")
                 logger.warning({
                     "event": "image_stream_invalid_token_switch_account",
-                    "request_token": token,
+                    "trace_id": trace_id,
+                    "request_token": anonymize_token(token),
                     "account_email": account_email,
                     "index": index,
                     "error": error_text[:200],
@@ -1542,7 +1584,8 @@ def _generate_single_image(
                 if text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES:
                     logger.warning({
                         "event": "image_model_text_reply_retry",
-                        "request_token": token,
+                        "trace_id": trace_id,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "retry_count": text_reply_retry_count,
                         "index": index,
@@ -1551,7 +1594,8 @@ def _generate_single_image(
                     continue
                 logger.warning({
                     "event": "image_model_text_reply_exhausted_retries",
-                    "request_token": token,
+                    "trace_id": trace_id,
+                    "request_token": anonymize_token(token),
                     "account_email": account_email,
                     "retry_count": text_reply_retry_count,
                     "index": index,
@@ -1567,7 +1611,8 @@ def _generate_single_image(
                 ) from exc
             logger.warning({
                 "event": "image_stream_generation_error",
-                "request_token": token,
+                "trace_id": trace_id,
+                "request_token": anonymize_token(token),
                 "account_email": account_email,
                 "error": error_text,
                 "index": index,
@@ -1584,16 +1629,26 @@ def _generate_single_image(
             last_transient_error = last_transient_error or transient
             if transient:
                 transient_attempts += 1
+            if mainline_rejected:
+                # 短时间内的新请求优先换个账号，别在同一个号上反复撞。
+                account_service.mark_image_mainline_rejected(token)
+            inflight = account_service.image_inflight_count(token)
             logger.warning({
                 "event": "image_stream_fail",
-                "request_token": token,
+                "trace_id": trace_id,
+                "request_token": anonymize_token(token),
                 "account_email": account_email,
                 "error": str(exc),
+                # 这个账号上还有几条生图请求在跑（含自己）：>0 表示同账号并发，
+                # 是 skipped_mainline 最需要确认的一个数。
+                "image_inflight": inflight,
+                "image_peers": max(0, inflight - 1),
                 "index": index,
                 "transient": transient,
                 "mainline_rejected": mainline_rejected,
                 "transient_attempts": transient_attempts,
                 "rescue": in_rescue,
+                **account_service.image_handshake_diagnostics(token),
             })
             if not emitted_for_token and is_token_auth_error(exc, last_error):
                 try:
@@ -1602,7 +1657,8 @@ def _generate_single_image(
                     refreshed_token = ""
                     logger.warning({
                         "event": "image_stream_token_refresh_failed",
-                        "request_token": token,
+                        "trace_id": trace_id,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "index": index,
                         "error": str(refresh_exc)[:200],
@@ -1610,7 +1666,8 @@ def _generate_single_image(
                 if refreshed_token and refreshed_token != token:
                     logger.warning({
                         "event": "image_stream_token_refreshed_retry",
-                        "request_token": token,
+                        "trace_id": trace_id,
+                        "request_token": anonymize_token(token),
                         "refreshed_token": refreshed_token,
                         "account_email": account_email,
                         "index": index,
@@ -1619,7 +1676,8 @@ def _generate_single_image(
                 account_service.remove_invalid_token(token, "image_stream")
                 logger.warning({
                     "event": "image_stream_invalid_token_switch_account",
-                    "request_token": token,
+                    "trace_id": trace_id,
+                    "request_token": anonymize_token(token),
                     "account_email": account_email,
                     "index": index,
                     "error": last_error[:200],
@@ -1638,7 +1696,8 @@ def _generate_single_image(
                 if tls_retry_count <= MAX_TLS_RETRIES:
                     logger.warning({
                         "event": "image_stream_tls_retry",
-                        "request_token": token,
+                        "trace_id": trace_id,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "retry_count": tls_retry_count,
                         "index": index,
@@ -1653,7 +1712,8 @@ def _generate_single_image(
                     wait_secs = min(3.0 * conn_timeout_retry_count, 9.0)
                     logger.warning({
                         "event": "image_stream_conn_timeout_retry",
-                        "request_token": token,
+                        "trace_id": trace_id,
+                        "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "retry_count": conn_timeout_retry_count,
                         "index": index,
@@ -1671,6 +1731,8 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     """并行生成多张图片，每张图片使用独立线程和账号，互不阻塞。"""
     if not is_supported_image_model(request.model):
         raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(IMAGE_MODELS)))
+    # 整个请求一个 base trace，多图时每张再拼上序号（<base>-1、<base>-2 …）。
+    request.trace_id = request.trace_id or new_trace_id()
 
     if request.n <= 1:
         # 单张图片，直接执行（无需线程池开销）

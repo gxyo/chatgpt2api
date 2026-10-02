@@ -22,7 +22,15 @@ from PIL import Image
 from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
-from utils.helper import UpstreamHTTPError, ensure_ok, is_retriable_upstream_error, iter_sse_payloads, new_uuid, split_image_model
+from utils.helper import (
+    UpstreamHTTPError,
+    anonymize_token,
+    ensure_ok,
+    is_retriable_upstream_error,
+    iter_sse_payloads,
+    new_uuid,
+    split_image_model,
+)
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 from utils.turnstile import solve_turnstile_token
@@ -113,6 +121,9 @@ ACCOUNT_INFO_TIMEOUT_SECS = 8.0
 ACCOUNT_INFO_RETRY_ATTEMPTS = 2
 CONVERSATION_CONNECT_TIMEOUT_SECS = 30.0
 POLL_CONVERSATION_TIMEOUT_SECS = 8.0
+# 等「同账号 conduit 窗口」的上限。窗口本身只覆盖 prepare→mainline（1-2 秒），
+# 正常永远等不满；等超时就按原行为继续，不能让请求卡死。
+CONDUIT_WINDOW_TIMEOUT_SECS = 30.0
 CODEX_RESPONSES_MODEL = "gpt-5.5"
 SEARCH_MODEL = "gpt-5-5"
 SEARCH_TIMEOUT_SECS = 300.0
@@ -229,6 +240,12 @@ class OpenAIBackendAPI:
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
         self.progress_callback: Callable[[str], None] | None = None
+        # 一次用户可见的图片请求关联 id：容器日志里的每条记录都带上它，
+        # 和 web 日志详情里的同名字段对上，方便按单次请求排查。
+        self.trace_id = ""
+        # 本实例是否持有该账号的 conduit 窗口（prepare→mainline），以及等锁耗时。
+        self.conduit_window_held = False
+        self.conduit_wait_ms = 0
         self.session = requests.Session(**proxy_settings.build_session_kwargs(
             account=self.account,
             impersonate=self.fp["impersonate"],
@@ -1424,8 +1441,14 @@ class OpenAIBackendAPI:
         output_path = Path(output_dir).expanduser().resolve()
         output_path.mkdir(parents=True, exist_ok=True)
         uploaded = [self._upload_editable_base64_image(item, index) for index, item in enumerate(base64_images, start=1)]
-        conduit_token = self._prepare_editable_conversation(prompt, [item["mime_type"] for item in uploaded])
-        conversation_id = self._run_editable_conversation(prompt, uploaded, conduit_token)
+        # 与生图/搜索共用同一个账号 conduit 窗口，避免把并发生图的 conduit 挤掉。
+        release_window = self._conduit_window_releaser()
+        self._acquire_conduit_window()
+        try:
+            conduit_token = self._prepare_editable_conversation(prompt, [item["mime_type"] for item in uploaded])
+            conversation_id = self._run_editable_conversation(prompt, uploaded, conduit_token, on_started=release_window)
+        finally:
+            release_window()
         artifacts = self._wait_editable_output_artifacts(
             conversation_id,
             primary_label,
@@ -1557,7 +1580,8 @@ class OpenAIBackendAPI:
             raise RuntimeError(f"missing conduit_token: {response.text}")
         return conduit_token
 
-    def _run_editable_conversation(self, prompt: str, uploaded: list[Dict[str, Any]], conduit_token: str) -> str:
+    def _run_editable_conversation(self, prompt: str, uploaded: list[Dict[str, Any]], conduit_token: str,
+                                   on_started: Callable[[], None] | None = None) -> str:
         self._bootstrap()
         requirements = self._get_chat_requirements()
         message: Dict[str, Any] = {"id": new_uuid(), "author": {"role": "user"}, "create_time": time.time()}
@@ -1626,6 +1650,9 @@ class OpenAIBackendAPI:
             stream=True,
         )
         ensure_ok(response, path)
+        if on_started is not None:
+            # mainline 已经被上游接收，conduit 窗口可以放掉了。
+            on_started()
         conversation_id = ""
         try:
             for payload in iter_sse_payloads(response):
@@ -2015,9 +2042,16 @@ class OpenAIBackendAPI:
                poll_interval_secs: float = SEARCH_POLL_INTERVAL_SECS) -> Dict[str, Any]:
         if not self.access_token:
             raise RuntimeError("access_token is required for search")
-        conduit_token = self._prepare_search_conversation(prompt, model)
-        self._bootstrap()
-        conversation_id = self._run_search_conversation(prompt, conduit_token, model)
+        # 搜索和生图共用号池，也共用「prepare→mainline」这个 conduit 窗口：
+        # 不占窗口的话，本账号上正在生图的那条请求会被这条 prepare 挤掉 conduit。
+        release_window = self._conduit_window_releaser()
+        self._acquire_conduit_window()
+        try:
+            conduit_token = self._prepare_search_conversation(prompt, model)
+            self._bootstrap()
+            conversation_id = self._run_search_conversation(prompt, conduit_token, model, on_started=release_window)
+        finally:
+            release_window()
         return self._wait_search_result(conversation_id, timeout_secs, poll_interval_secs)
 
     def _prepare_search_conversation(self, prompt: str, model: str) -> str:
@@ -2048,7 +2082,8 @@ class OpenAIBackendAPI:
             raise RuntimeError("missing conduit_token")
         return token
 
-    def _run_search_conversation(self, prompt: str, conduit_token: str, model: str) -> str:
+    def _run_search_conversation(self, prompt: str, conduit_token: str, model: str,
+                                 on_started: Callable[[], None] | None = None) -> str:
         requirements = self._get_chat_requirements()
         path = "/backend-api/f/conversation"
         response = self.session.post(
@@ -2089,6 +2124,9 @@ class OpenAIBackendAPI:
             stream=True,
         )
         ensure_ok(response, path)
+        if on_started is not None:
+            # mainline 已经被上游接收，conduit 窗口可以放掉了。
+            on_started()
         conversation_id = ""
         try:
             for payload in iter_sse_payloads(response):
@@ -2796,6 +2834,50 @@ class OpenAIBackendAPI:
             except Exception:
                 pass
 
+    def _acquire_conduit_window(self) -> bool:
+        """占用本账号的 conduit 握手窗口（prepare → mainline）。
+
+        所有会 POST /backend-api/f/conversation/prepare 的链路（生图、搜索、可编辑文件）
+        共用同一个窗口：同一账号同一时刻只允许一条请求待在 prepare 和 mainline 之间，
+        否则先到的那条 conduit 状态会被上游丢掉并回 {"skipped_mainline": true}。
+        拿不到锁（超时）就按原行为继续，不能让用户卡死在这里。
+        """
+        if not self.access_token:
+            return False
+        remaining = self._remaining_deadline_secs()
+        timeout = CONDUIT_WINDOW_TIMEOUT_SECS if remaining is None else max(1.0, min(remaining, CONDUIT_WINDOW_TIMEOUT_SECS))
+        started = time.monotonic()
+        held = account_service.acquire_image_handshake(self.access_token, timeout)
+        self.conduit_wait_ms = int((time.monotonic() - started) * 1000)
+        self.conduit_window_held = bool(held)
+        if not held:
+            logger.warning({
+                "event": "conduit_window_timeout",
+                "trace_id": self.trace_id,
+                "account_email": str(self.account.get("email") or ""),
+                "account_token": anonymize_token(self.access_token),
+                "wait_ms": self.conduit_wait_ms,
+                "timeout_secs": timeout,
+                "note": "未拿到同账号 conduit 窗口，已按原行为继续，可能被上游 marked skipped_mainline",
+            })
+        return self.conduit_window_held
+
+    def _release_conduit_window(self) -> None:
+        if getattr(self, "conduit_window_held", False):
+            self.conduit_window_held = False
+            account_service.release_image_handshake(self.access_token)
+
+    def _conduit_window_releaser(self) -> Callable[[], None]:
+        """返回一个幂等的释放回调，供 mainline 被上游接收后立刻放锁。"""
+        state = {"released": False}
+
+        def release() -> None:
+            if not state["released"]:
+                state["released"] = True
+                self._release_conduit_window()
+
+        return release
+
     def _stream_picture_conversation(
             self,
             prompt: str,
@@ -2810,13 +2892,11 @@ class OpenAIBackendAPI:
         self._bootstrap()
         response = None
         max_mainline_retries = 2
-        # 同一账号同时跑多条 prepare→mainline 时，上游会丢掉先到的 conduit 状态并回
-        # {"skipped_mainline": true}。这里只把「握手窗口」（get_chat_requirements →
-        # prepare → mainline，约 1-2 秒）按账号串行化，拿不到锁就按原行为继续，
-        # 生图阶段（几十秒）仍然是 image_account_concurrency 路并行。
-        remaining = self._remaining_deadline_secs()
-        handshake_timeout = 30.0 if remaining is None else max(1.0, min(remaining, 30.0))
-        handshake_held = account_service.acquire_image_handshake(self.access_token, handshake_timeout)
+        # 这里只把「conduit 握手窗口」（get_chat_requirements → prepare → mainline，
+        # 约 1-2 秒）按账号串行化，生图阶段（几十秒）仍然是
+        # image_account_concurrency 路并行。
+        handshake_held = self._acquire_conduit_window()
+        handshake_wait_ms = self.conduit_wait_ms
         try:
             for attempt in range(1, max_mainline_retries + 1):
                 self._remaining_deadline_secs()
@@ -2851,13 +2931,21 @@ class OpenAIBackendAPI:
                     if not recoverable or attempt >= max_mainline_retries:
                         raise
                     upstream_model, thinking_effort = self._image_model_settings(model)
+                    inflight = account_service.image_inflight_count(self.access_token)
                     logger.warning({
                         "event": "image_mainline_state_retry",
+                        "trace_id": self.trace_id,
                         "attempt": attempt,
                         "max_attempts": max_mainline_retries,
                         "account_email": str(self.account.get("email") or ""),
-                        "image_inflight": account_service.image_inflight_count(self.access_token),
+                        "account_token": anonymize_token(self.access_token),
+                        "image_inflight": inflight,
+                        # 同账号上还有几条请求在跑（含自己）。>0 说明这个账号是并发用的，
+                        # 是排查 skipped_mainline 时最关键的一个数。
+                        "image_peers": max(0, inflight - 1),
                         "handshake_locked": handshake_held,
+                        "handshake_wait_ms": handshake_wait_ms,
+                        **account_service.image_handshake_diagnostics(self.access_token),
                         "upstream_model": upstream_model,
                         "thinking_effort": thinking_effort or "auto",
                         "error": str(exc)[:300],
@@ -2869,7 +2957,7 @@ class OpenAIBackendAPI:
                 break
         finally:
             if handshake_held:
-                account_service.release_image_handshake(self.access_token)
+                self._release_conduit_window()
         if response is None:
             raise ImageMainlineStateError("image generation did not start")
         self._report_progress("generating")

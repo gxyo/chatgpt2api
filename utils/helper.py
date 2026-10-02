@@ -28,7 +28,9 @@ CHANNEL_BUSY_MESSAGE = "当前渠道拥堵，请稍后再试"
 # 上游图片链路失败时给用户看的兜底文案。上游原始报错（backend-api 路径、status=/status_code=、
 # body=、"skipped_mainline":true 等）对用户没有任何意义，一律替换掉。
 IMAGE_RETRY_MESSAGE = "本次生图失败，请重试。"
-IMAGE_MAINLINE_REJECT_MESSAGE = "status_code=400, 本次生图失败，请重试。"
+# 日志卡片的「上游报错」里状态码已经单独用 status=400 展示，文案里再拼一遍就成了
+# 「status_code=400, status_code=400, 本次生图失败，请重试。」，所以这里不带前缀。
+IMAGE_MAINLINE_REJECT_MESSAGE = "本次生图失败，请重试。"
 # 号池里没有可用生图额度：上游原文是 no available image quota，指定能力（plus/team/pro）时
 # 会变成 no available plus image quota，所以按片段匹配而不是整串相等。
 DEFAULT_IMAGE_QUOTA_ERROR_MESSAGE = "no available image quota"
@@ -36,6 +38,12 @@ IMAGE_NO_QUOTA_RE = re.compile(r"no available[^\n]{0,40}?image quota", re.IGNORE
 SKIPPED_MAINLINE_RE = re.compile(r'"skipped_mainline"\s*:\s*true', re.IGNORECASE)
 UPSTREAM_PLUMBING_RE = re.compile(
     r"backend[-_]api/|sentinel/|status_code\s*[=:]|status\s*[=:]|\bbody\s*[=:]|chatgpt\.com|upstreamhttperror",
+    re.IGNORECASE,
+)
+# 上游报错文本开头的 "status_code=400, " / "status=400, " 前缀。日志卡片已经单独展示状态码，
+# 返回给用户的文案里再带一遍就会重复，sanitize 时统一抹掉。
+PLUMBING_STATUS_PREFIX_RE = re.compile(
+    r"^\s*(?:status(?:_code)?\s*[=:]\s*\d{3}\s*[,，:：;；]?\s*)+",
     re.IGNORECASE,
 )
 RETRYABLE_UPSTREAM_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -123,6 +131,11 @@ def normalize_json_edit_images(image: object = None, images: object = None) -> l
 
 def new_uuid() -> str:
     return str(uuid.uuid4())
+
+
+def new_trace_id() -> str:
+    """一次用户可见请求的短关联 id，用来把容器日志和 web 日志详情对上。"""
+    return uuid.uuid4().hex[:12]
 
 
 def split_image_model(model: object) -> tuple[str | None, str | None]:
@@ -336,6 +349,14 @@ def image_quota_error_text() -> str:
     return config.image_quota_error_message or DEFAULT_IMAGE_QUOTA_ERROR_MESSAGE
 
 
+def strip_plumbing_status_prefix(message: object) -> str:
+    """去掉文案开头的 status/status_code 前缀，保留后面的正文。
+
+    "status_code=400, 本次生图失败，请重试。" -> "本次生图失败，请重试。"
+    """
+    return PLUMBING_STATUS_PREFIX_RE.sub("", str(message or "").strip()).strip()
+
+
 def sanitize_image_error_text(message: object) -> str:
     """把上游图片链路的原始报错替换成用户看得懂的中文。
 
@@ -349,12 +370,13 @@ def sanitize_image_error_text(message: object) -> str:
     # "status_code=429 no available image quota"），按管道信息兜底会把可操作的
     # 提示换成「请重试」。
     if is_image_quota_error(text):
-        return image_quota_error_text()
+        return strip_plumbing_status_prefix(image_quota_error_text())
     if SKIPPED_MAINLINE_RE.search(text):
         return IMAGE_MAINLINE_REJECT_MESSAGE
     if UPSTREAM_PLUMBING_RE.search(text):
         return IMAGE_RETRY_MESSAGE
-    return text
+    # 走到这里的都是正常文案，只可能还带着一层状态码前缀，抹掉即可。
+    return strip_plumbing_status_prefix(text)
 
 
 def sse_json_stream(items) -> Iterator[str]:
