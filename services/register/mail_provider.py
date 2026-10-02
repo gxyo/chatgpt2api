@@ -31,6 +31,13 @@ DDG_ALIASES_FILE = DATA_DIR / "ddg_aliases.json"
 DDG_ALIASES_LOCK_FILE = DATA_DIR / "ddg_aliases.lock"
 _ddg_aliases_lock = Lock()
 
+# 轮询游标（域名、邮箱提供商）必须跨进程共享。注册任务子进程化之后，进程内的计数器
+# 每个任务都从 0 重新开始，轮询会退化成"永远用第一个"——所有号都压在同一个域名上，
+# 正好撞上游的按域名限流。
+ROTATION_STATE_FILE = DATA_DIR / "rotation_state.json"
+ROTATION_STATE_LOCK_FILE = DATA_DIR / "rotation_state.lock"
+_rotation_state_lock = Lock()
+
 OUTLOOK_TOKEN_USED_FILE = DATA_DIR / "outlook_token_used.json"
 OUTLOOK_TOKEN_USED_LOCK_FILE = DATA_DIR / "outlook_token_used.lock"
 _outlook_token_state_lock = Lock()
@@ -101,6 +108,37 @@ def _atomic_write_text(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def _load_rotation_state() -> dict[str, int]:
+    try:
+        data = json.loads(ROTATION_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): int(value) for key, value in data.items() if isinstance(value, (int, float))}
+
+
+def _next_rotation_index(key: str) -> int:
+    """取本次该用的轮询位置，并把游标推进一格。
+
+    游标落在文件里而不是模块全局：每个注册任务都是独立子进程，进程内的计数器
+    看不到别的任务推到哪了。状态文件的读-改-写由 _state_file_lock 跨进程串行。
+    """
+    with _state_file_lock(_rotation_state_lock, ROTATION_STATE_LOCK_FILE):
+        state = _load_rotation_state()
+        index = int(state.get(key) or 0)
+        state[key] = index + 1
+        try:
+            _atomic_write_text(
+                ROTATION_STATE_FILE,
+                json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            )
+        except OSError:
+            # 写不进去就退化成"这次仍用第一个"，不该让注册直接失败。
+            pass
+    return index
 
 
 def _save_ddg_aliases(aliases: set[str]) -> None:
@@ -264,10 +302,6 @@ def outlook_token_pool_stats(pool: list[dict[str, str]] | None = None) -> dict[s
 
 
 ResultT = TypeVar("ResultT")
-domain_lock = Lock()
-provider_lock = Lock()
-domain_index = 0
-provider_index = 0
 cloudmail_token_lock = Lock()
 cloudmail_token_cache: dict[str, tuple[str, float]] = {}
 
@@ -291,16 +325,12 @@ def _random_subdomain_label() -> str:
 
 
 def _next_domain(domains: list[str]) -> str:
-    global domain_index
     domains = [str(item).strip() for item in domains if str(item).strip()]
     if not domains:
         raise RuntimeError("mail.domain 不能为空")
     if len(domains) == 1:
         return domains[0]
-    with domain_lock:
-        value = domains[domain_index % len(domains)]
-        domain_index = (domain_index + 1) % len(domains)
-        return value
+    return domains[_next_rotation_index("domain") % len(domains)]
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -1446,14 +1476,10 @@ def _enabled_entries(mail_config: dict) -> list[dict]:
 
 
 def _next_entry(mail_config: dict) -> dict:
-    global provider_index
     items = _enabled_entries(mail_config)
     if len(items) == 1:
         return dict(items[0])
-    with provider_lock:
-        value = dict(items[provider_index % len(items)])
-        provider_index = (provider_index + 1) % len(items)
-        return value
+    return dict(items[_next_rotation_index("provider") % len(items)])
 
 
 def _create_provider(mail_config: dict, provider: str = "", provider_ref: str = "") -> BaseMailProvider:
