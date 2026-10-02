@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import secrets
 import string
+import sys
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +24,7 @@ from urllib3.util.retry import Retry
 from services.account_service import account_service
 from services.register import mail_provider
 from utils.beijing_time import beijing_now
+from utils.helper import describe_exception
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 base_dir = Path(__file__).resolve().parent
@@ -110,6 +114,44 @@ navigate_headers = {
 }
 
 
+# 每个注册任务的过程记录与现场信息。失败日志要回答的是「失败前走到哪一步、
+# 用的哪个邮箱域名」，光有一句错误文案排查不了线上问题。step() 是流程唯一的
+# 步骤出口，在那里顺手记一份，不用改注册流程本身。
+#
+# 注意作用域：引擎跑在一次性子进程里，所以这份记录也是子进程的，必须在子进程
+# 收尾时随结果回传（见 task_process.main）；父进程那份只覆盖 worker 自己的步骤。
+MAX_TASK_TRACE_LINES = 200
+MAX_TASK_TRACE_LINE_CHARS = 500
+_task_context: dict[int, dict[str, Any]] = {}
+_EMAIL_IN_TEXT = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _task_slot(index: int) -> dict[str, Any]:
+    return _task_context.setdefault(index, {"facts": {}, "steps": []})
+
+
+def note_task_facts(index: int, **facts: Any) -> None:
+    """记下本任务的现场信息（邮箱、域名、邮箱提供商…），失败日志里要用。"""
+    with print_lock:
+        _task_slot(index)["facts"].update({key: value for key, value in facts.items() if value not in (None, "")})
+
+
+def task_facts(index: int) -> dict[str, Any]:
+    with print_lock:
+        return dict(_task_slot(index)["facts"])
+
+
+def task_trace(index: int) -> list[str]:
+    with print_lock:
+        return list(_task_slot(index)["steps"])
+
+
+def drop_task_context(index: int) -> None:
+    """任务收尾时丢掉过程记录：补号模式下任务号会一直涨，不清就是稳定的内存泄漏。"""
+    with print_lock:
+        _task_context.pop(index, None)
+
+
 def log(text: str, color: str = "") -> None:
     colors = {"red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m"}
     if register_log_sink:
@@ -124,7 +166,123 @@ def log(text: str, color: str = "") -> None:
 
 
 def step(index: int, text: str, color: str = "") -> None:
+    line = f"{beijing_now().strftime('%H:%M:%S')} {text}"[:MAX_TASK_TRACE_LINE_CHARS]
+    with print_lock:
+        steps = _task_slot(index)["steps"]
+        steps.append(line)
+        if len(steps) > MAX_TASK_TRACE_LINES:
+            del steps[:-MAX_TASK_TRACE_LINES]
     log(f"[任务{index}] {text}", color)
+
+
+def _mask_proxy(proxy: str) -> str:
+    """代理只留协议和主机端口：失败日志要能看出走的哪个代理，但不能带上账密。"""
+    value = str(proxy or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = urlparse(value if "://" in value else f"http://{value}")
+        host = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:  # 端口不是数字之类
+        return "(无法解析)"
+    # 认不出来时宁可写「无法解析」，也不能把原文回吐——原文里可能正带着密码。
+    if not host or "@" in host or any(char.isspace() for char in host):
+        return "(无法解析)"
+    if ":" in host:  # IPv6 裸地址要补回方括号，否则和端口分不开
+        host = f"[{host}]"
+    return f"{parsed.scheme}://{host}{f':{port}' if port else ''}"
+
+
+def _mailbox_domain(email: str) -> str:
+    _, separator, domain = str(email or "").rpartition("@")
+    return domain.strip().lower().rstrip(".") if separator else ""
+
+
+def _step_label(index: int) -> str:
+    """最后一步的可读短标签：去掉时间戳和「[任务N] 」前缀。"""
+    steps = task_trace(index)
+    if not steps:
+        return ""
+    last = steps[-1].partition(" ")[2] or steps[-1]
+    return (last.partition("] ")[2] or last)[:160]
+
+
+def failure_detail(index: int, error: BaseException | None = None) -> dict[str, Any]:
+    """一次注册失败的全部现场，随结果回传主进程，写进注册机失败日志。
+
+    只有子进程里才拿得到过程记录（引擎在子进程跑，`_task_context` 自然也在那边），
+    所以这个方法由 task_process 在子进程收尾时调用。
+    """
+    steps = task_trace(index)
+    detail: dict[str, Any] = {
+        "engine": str(config.get("engine") or ""),
+        "threads": int(config.get("threads") or 0),
+        "proxy": _mask_proxy(str(config.get("proxy") or "")),
+        **task_facts(index),
+        "stage": _step_label(index),
+        "step_count": len(steps),
+        "steps": steps,
+    }
+    if error is not None:
+        detail["error_type"] = type(error).__name__
+        # 异常链摊平，字段名跟调用日志保持一致（日志页的详情弹窗按 upstream_error 渲染）：
+        # 注册失败常常是「RuntimeError('提交密码后页面未继续') ← 上游拒绝」这种带
+        # __cause__ 的包装，只记最外层文案会把真正的上游响应丢掉。
+        detail["upstream_error"] = describe_exception(error)
+        detail["traceback"] = "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        ).splitlines()[-40:]
+    return detail
+
+
+def _facts_from_steps(steps: list[str]) -> dict[str, Any]:
+    """超时/子进程崩溃时没有显式的邮箱记录，从过程记录里回捞一个（尽力而为）。"""
+    for line in reversed(steps):
+        found = _EMAIL_IN_TEXT.search(str(line))
+        if found:
+            email = found.group(0)
+            return {"email": email, "mail_domain": _mailbox_domain(email)}
+    return {}
+
+
+REGISTER_FAILURE_SUMMARY_LIMIT = 200
+
+
+def _record_register_failure(
+    index: int,
+    failure: dict[str, Any],
+    detail: dict[str, Any],
+    cost: float,
+) -> None:
+    """把一次注册失败写进注册机失败日志（独立的注册日志页面）。
+
+    只记失败：成功的注册没有排查价值，写进去只会把失败记录挤掉。
+    """
+    try:
+        from services.log_service import LOG_TYPE_REGISTER, log_service
+
+        record: dict[str, Any] = {key: value for key, value in (detail or {}).items() if value not in (None, "", [], {})}
+        record.update({
+            "status": "failed",
+            "task_index": index,
+            "error": str(failure.get("error") or "注册失败"),
+            "fatal": bool(failure.get("fatal")),
+            "duration_ms": int(max(0.0, cost) * 1000),
+            "engine": str(config.get("engine") or ""),
+            "threads": int(config.get("threads") or 0),
+            "proxy": _mask_proxy(str(config.get("proxy") or "")),
+        })
+        steps = record.get("steps") if isinstance(record.get("steps"), list) else []
+        for key, value in _facts_from_steps([str(item) for item in steps]).items():
+            record.setdefault(key, value)
+        email = str(record.get("email") or "").strip()
+        stage = str(record.get("stage") or "").strip()
+        headline = " · ".join(part for part in (email or "未知邮箱", stage or record["error"]) if part)
+        log_service.add(LOG_TYPE_REGISTER, f"任务{index} 注册失败：{headline}"[:REGISTER_FAILURE_SUMMARY_LIMIT], record)
+    except Exception as error:
+        # 记日志永远不能反过来影响注册任务本身。
+        print(f"写入注册机失败日志出错: {error}", file=sys.stderr)
 
 
 def _classify_worker_error(error: Exception) -> tuple[str, bool]:
@@ -467,6 +625,13 @@ class PlatformRegistrar:
             mail_provider.release_mailbox(mailbox)
             raise RuntimeError("邮箱服务未返回 address")
         label = str(mailbox.get("label") or "")
+        note_task_facts(
+            index,
+            email=email,
+            mail_domain=_mailbox_domain(email),
+            mail_provider=str(mailbox.get("provider") or ""),
+            mail_label=label,
+        )
         step(index, f"邮箱创建完成[{label}]: {email}")
         try:
             password = _random_password()
@@ -534,12 +699,20 @@ def worker(index: int) -> dict:
     这里只负责收尾：写号、刷额度、记统计。存储后端（json/sqlite/postgres/git）
     必须只由一个进程写，所以持久化留在主进程。
     """
+    try:
+        return _worker(index)
+    finally:
+        drop_task_context(index)
+
+
+def _worker(index: int) -> dict:
     from services.register import task_process
 
     start = time.time()
     engine = str(config.get("engine") or "playwright").strip()
     step(index, f"任务启动 (引擎: {engine})")
     failure: dict[str, Any] | None = None
+    detail: dict[str, Any] = {}
     result: dict[str, Any] = {}
     try:
         outcome = task_process.run_registration_task(
@@ -550,6 +723,8 @@ def worker(index: int) -> dict:
         )
         if not outcome.get("ok"):
             failure = {"error": str(outcome.get("error") or "注册失败"), "fatal": bool(outcome.get("fatal"))}
+            # 子进程带回来的现场（邮箱、停在哪一步、堆栈、过程记录）。
+            detail = outcome.get("detail") if isinstance(outcome.get("detail"), dict) else {}
         else:
             result = outcome.get("result") or {}
             access_token = str(result["access_token"])
@@ -560,11 +735,13 @@ def worker(index: int) -> dict:
     except Exception as e:
         message, fatal = _classify_worker_error(e)
         failure = {"error": message, "fatal": fatal}
+        detail = failure_detail(index, e)
     cost = time.time() - start
     if failure:
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1
+        _record_register_failure(index, failure, detail, cost)
         log(f"任务{index} 注册失败，本次耗时{cost:.1f}s，原因: {failure['error']}", "red")
         return {"ok": False, "index": index, "error": failure["error"], "fatal": failure["fatal"]}
     with stats_lock:

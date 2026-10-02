@@ -16,8 +16,10 @@ from curl_cffi import requests as curl_requests
 
 from services.register import mail_provider
 from services.register.openai_register import (
+    _mailbox_domain,
     config,
     log,
+    note_task_facts,
     platform_auth0_client,
     platform_oauth_client_id,
     platform_oauth_redirect_uri,
@@ -764,6 +766,13 @@ async def _async_register(index: int, proxy: str) -> dict:
                 mail_provider.release_mailbox(mailbox)
                 raise RuntimeError("邮箱服务未返回 address")
             label = str(mailbox.get("label") or "")
+            note_task_facts(
+                index,
+                email=email,
+                mail_domain=_mailbox_domain(email),
+                mail_provider=str(mailbox.get("provider") or ""),
+                mail_label=label,
+            )
             step(index, f"邮箱创建完成[{label}]: {email}")
 
             password = _random_password()

@@ -33,6 +33,8 @@ from services.register import mail_provider, openai_register
 TASK_TIMEOUT_SECONDS = 600
 # 强杀之后留给内核回收进程组的时间。
 KILL_REAP_TIMEOUT_SECONDS = 30
+# 父进程留存的输出尾部行数：超时和崩溃时子进程没机会回传 detail，这些就是唯一线索。
+TASK_LOG_TAIL_LINES = 200
 _CONFIG_KEYS = ("mail", "proxy", "total", "threads", "engine")
 
 # 子进程里指向真正的 stdout（fd 1）。模块级是因为日志 sink 是个回调。
@@ -92,6 +94,9 @@ class _TaskOutput:
         self._on_log = on_log
         self._on_mailbox_result = on_mailbox_result
         self.result: dict[str, Any] | None = None
+        # 本任务自己的输出尾部（每个任务一个子进程、一个 _TaskOutput，不会串台）：
+        # 超时被强杀和崩溃时子进程来不及回传 detail，失败日志只能靠这些行说明现场。
+        self.log_tail: list[str] = []
 
     def feed(self, raw: str) -> None:
         line = raw.strip()
@@ -120,6 +125,10 @@ class _TaskOutput:
             self._forward_log(line)
 
     def _forward_log(self, text: str, color: str = "") -> None:
+        if text.strip():
+            self.log_tail.append(text)
+            if len(self.log_tail) > TASK_LOG_TAIL_LINES:
+                del self.log_tail[:-TASK_LOG_TAIL_LINES]
         if self._on_log is None:
             return
         try:
@@ -207,18 +216,34 @@ def run_registration_task(
             "ok": False,
             "fatal": False,
             "error": f"注册超过 {int(timeout)}s 未完成，已终止并回收进程组",
+            "detail": {
+                "stage": f"任务超过 {int(timeout)}s 未完成，已被强制终止",
+                "timeout_seconds": int(timeout),
+                "steps": output.log_tail,
+            },
         }
     if output.result is None:
         return {
             "ok": False,
             "fatal": False,
             "error": f"注册子进程异常退出（退出码 {proc.returncode}）且未返回结果",
+            "detail": {
+                "stage": "注册子进程异常退出且未返回结果",
+                "exit_code": proc.returncode,
+                "steps": output.log_tail,
+            },
         }
     if not output.result.get("ok"):
+        detail = output.result.get("detail")
+        detail = dict(detail) if isinstance(detail, dict) else {}
+        # 子进程给了过程记录就用它的（按任务号采集，干净）；没给就是崩溃前的最后输出。
+        if not detail.get("steps"):
+            detail["steps"] = output.log_tail
         return {
             "ok": False,
             "fatal": bool(output.result.get("fatal")),
             "error": str(output.result.get("error") or "注册失败"),
+            "detail": detail,
         }
     result = output.result.get("result")
     return {"ok": True, "result": result if isinstance(result, dict) else {}}
@@ -287,7 +312,15 @@ def main() -> int:
         result = _run_registration(index)
     except Exception as error:
         message, fatal = openai_register._classify_worker_error(error)
-        _emit({"type": "result", "ok": False, "error": message, "fatal": fatal})
+        # 现场只有这里拿得到：引擎跑在本进程里，过程记录和邮箱信息都在本进程的内存里。
+        # 必须在 except 块内组装——堆栈要靠 error 自己带的那份。
+        _emit({
+            "type": "result",
+            "ok": False,
+            "error": message,
+            "fatal": fatal,
+            "detail": openai_register.failure_detail(index, error),
+        })
     else:
         _emit({"type": "result", "ok": True, "result": result})
     return 0

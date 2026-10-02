@@ -20,6 +20,9 @@ from utils.helper import anthropic_sse_stream, describe_exception, public_error_
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
+# 注册机失败日志：只记失败（成功的注册没有排查价值），单独一个日志页看，
+# 走的是同一份 logs.jsonl 与同一套筛选/导出/清理，新增一种类型即可。
+LOG_TYPE_REGISTER = "register"
 INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id"}
 # 一键导出：默认最近 10 条，条数上界防止一次导出把浏览器拖死。
 LOG_EXPORT_DEFAULT_LIMIT = 10
@@ -156,7 +159,7 @@ class LogService:
         duration = detail.get("duration_ms")
         if isinstance(duration, int):
             parts.append(f"耗时={duration}ms")
-        for key in ("account_email", "image_trace", "conversation_id", "endpoint"):
+        for key in ("account_email", "email", "mail_domain", "image_trace", "conversation_id", "endpoint", "stage"):
             value = str(detail.get(key) or "").strip()
             if value:
                 parts.append(f"{key}={value}")

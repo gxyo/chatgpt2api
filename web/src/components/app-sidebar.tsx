@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
   BarChart3,
+  FileWarning,
   Image as ImageIcon,
   Images,
   LogOut,
@@ -34,6 +35,7 @@ const adminNavItems: NavItem[] = [
   { href: "/accounts", label: "号池管理", icon: Users },
   { href: "/register", label: "注册机", icon: UserPlus },
   { href: "/register-stats", label: "注册统计", icon: UserCheck },
+  { href: "/register-logs", label: "注册日志", icon: FileWarning },
   { href: "/image-manager", label: "图片管理", icon: Images },
   { href: "/logs", label: "日志管理", icon: ScrollText },
   { href: "/settings", label: "设置", icon: Settings },
