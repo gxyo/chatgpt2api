@@ -48,7 +48,12 @@ OTP_SIGNUP_OPTION_SELECTOR = (
     'a:has-text("Sign up with a one-time code"), '
     'button:has-text("使用一次性验证码注册"), a:has-text("使用一次性验证码注册")'
 )
-PASSWORD_REJECTION_SELECTOR = 'text="Failed to create account. Please try again."'
+# OpenAI 拒绝用密码注册时的提示。原来这里是 text="Failed to create account. Please try again."
+# —— 带引号的 text= 是精确匹配，而线上页面渲染出来的是 "Failed to create account. Please try again"
+# （没有结尾句号），一个标点之差就让检测永远为假：兜底切换一次都没触发过，白白干等 15 秒
+# 之后报"提交密码后页面未继续"，把上游拒绝伪装成流程卡死。文案和标点都可能再变，
+# 改成对正文做大小写不敏感的子串匹配，只认稳定的前缀。
+PASSWORD_REJECTION_TEXT = "failed to create account"
 SUBMIT_BUTTON_SELECTOR = (
     'button[type="submit"], button:has-text("Continue"), button:has-text("Verify"), '
     'button:has-text("继续"), button:has-text("验证")'
@@ -443,6 +448,18 @@ async def _locator_is_visible(page, selector: str) -> bool:
         return False
 
 
+async def _page_rejects_password_signup(page) -> bool:
+    """OpenAI 反滥用拒掉了这次创建账号（"Failed to create account. Please try again"）。
+
+    读页面正文做子串判断，不用选择器：上游文案和标点会变，精确匹配已经失效过一次。
+    """
+    try:
+        body = await page.inner_text("body")
+    except Exception:
+        return False
+    return PASSWORD_REJECTION_TEXT in body.lower()
+
+
 async def _wait_for_signup_step(page, captured_code: list[str], timeout_ms: int = SIGNUP_STEP_TIMEOUT) -> str:
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
     while True:
@@ -523,7 +540,7 @@ async def _submit_password(page, index: int, password: str) -> bool:
     while True:
         if not await password_input.is_visible():
             return True
-        if await _locator_is_visible(page, PASSWORD_REJECTION_SELECTOR):
+        if await _page_rejects_password_signup(page):
             await _return_to_otp_signup(page, index)
             return False
         if asyncio.get_running_loop().time() >= deadline:

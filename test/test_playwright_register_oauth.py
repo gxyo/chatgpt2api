@@ -10,6 +10,7 @@ from services.register.playwright_register import (
     _install_oauth_routes,
     _exchange_oauth_token_in_browser,
     _fill_birthdate,
+    _page_rejects_password_signup,
     _replace_pkce_params,
     _return_to_otp_signup,
     _secret_fingerprint,
@@ -18,6 +19,15 @@ from services.register.playwright_register import (
     _submit_password,
     _switch_to_password_if_offered,
     _wait_for_signup_step,
+)
+
+
+# 线上真实抓到的页面正文（结尾没有句号——旧选择器就是被这个标点废掉的）。
+LIVE_PASSWORD_REJECTION_BODY = (
+    "Create a password You’ll use this password to log in to ChatGPT and other OpenAI products "
+    "Email address Edit Password Your password must contain: At least 12 characters . Complete. "
+    "Failed to create account. Please try again Continue OR Sign up with a one-time code "
+    "Already have an account? Log in Terms of UsePrivacy Policy"
 )
 
 
@@ -487,11 +497,9 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
         submit_button = MagicMock()
         submit_button.first = submit_button
         submit_button.click = AsyncMock()
-        rejection = MagicMock()
-        rejection.first = rejection
-        rejection.is_visible = AsyncMock(return_value=True)
         page = MagicMock()
-        page.locator.side_effect = [password_input, submit_button, rejection]
+        page.locator.side_effect = [password_input, submit_button]
+        page.inner_text = AsyncMock(return_value=LIVE_PASSWORD_REJECTION_BODY)
 
         with patch(
             "services.register.playwright_register._return_to_otp_signup", AsyncMock()
@@ -502,6 +510,34 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
         password_input.fill.assert_awaited_once_with("Secret123456!")
         submit_button.click.assert_awaited_once()
         return_to_otp.assert_awaited_once()
+
+    async def test_password_rejection_matches_ignoring_punctuation_and_case(self) -> None:
+        # live 正文结尾没有句号。旧实现是 text="...again."（精确匹配），一个标点之差
+        # 让兜底永远不触发，线上表现是干等 15 秒后报"提交密码后页面未继续"。
+        page = MagicMock()
+        page.inner_text = AsyncMock(return_value=LIVE_PASSWORD_REJECTION_BODY)
+        self.assertTrue(await _page_rejects_password_signup(page))
+
+        page.inner_text = AsyncMock(
+            return_value="Failed to create account. Please try again."
+        )
+        self.assertTrue(await _page_rejects_password_signup(page))
+
+    async def test_normal_page_is_not_mistaken_for_a_rejection(self) -> None:
+        page = MagicMock()
+        page.inner_text = AsyncMock(
+            return_value=(
+                "Create a password You’ll use this password to log in to ChatGPT and other "
+                "OpenAI products Email address Edit Password Your password must contain: "
+                "At least 12 characters . Complete. Continue"
+            )
+        )
+        self.assertFalse(await _page_rejects_password_signup(page))
+
+    async def test_unreadable_page_is_not_treated_as_a_rejection(self) -> None:
+        page = MagicMock()
+        page.inner_text = AsyncMock(side_effect=Exception("frame detached"))
+        self.assertFalse(await _page_rejects_password_signup(page))
 
     async def test_password_rejection_clicks_one_time_code_option(self) -> None:
         option = MagicMock()
