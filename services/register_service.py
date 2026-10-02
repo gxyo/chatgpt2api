@@ -10,11 +10,18 @@ from pathlib import Path
 
 from services.account_service import account_service
 from services.config import DATA_DIR
-from services.register import mail_provider, openai_register
+from services.register import browser_reaper, mail_provider, openai_register
 from services.register_stats_service import RegisterStatsStore
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
+
+# 撞上 PID/线程耗尽后自动清理残留浏览器进程的次数上限。清完还是起不来说明不是
+# 泄漏而是真的到顶了，再重试只是刷屏，此时才停下等人工处理。
+MAX_SELF_HEAL_ATTEMPTS = 3
+SELF_HEAL_COOLDOWN_SECONDS = 5
+# 空闲（没有任务在跑）时顺手清扫的间隔。空闲时容器里本就不该有浏览器进程。
+BROWSER_SWEEP_INTERVAL_SECONDS = 60
 
 
 def _serialize_outlook_pool(credentials: list[dict]) -> str:
@@ -320,6 +327,8 @@ class RegisterService:
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
             self._save()
+            # 上一轮任务留下的孤儿进程若不先清掉，新一轮一开局就是资源耗尽的局面。
+            self._sweep_leaked_browsers("启动前")
             self._runner = threading.Thread(target=self._run, daemon=True, name="openai-register")
             self._runner.start()
             self._append_log(f"注册任务启动，模式={self._config['mode']}，线程数={self._config['threads']}", "yellow")
@@ -445,6 +454,27 @@ class RegisterService:
             stats["running"] = max(0, int(stats.get("running") or 0) + delta)
             stats["updated_at"] = _now()
 
+    def _sweep_leaked_browsers(self, reason: str) -> int:
+        """清理没有任务在跑时仍挂着的 Chromium / Node 驱动进程。
+
+        只看 running，不看 futures：本方法只从注册任务自己的线程（`_run`）和
+        `start()` 调用，而该线程是唯一的任务提交方，所以等它空闲下来时不可能
+        有浏览器正在启动，不存在误杀。
+
+        空闲时本该一个浏览器都没有，因此这里连僵尸一起收：waitpid 全量回收只在
+        这个前提下才安全（本项目除 Playwright 外不 spawn 任何子进程）。
+        """
+        if int(self.get()["stats"].get("running") or 0) != 0:
+            return 0
+        killed = browser_reaper.kill_browser_processes()
+        reaped = browser_reaper.reap_zombie_children()
+        if killed or reaped:
+            self._append_log(
+                f"已清理残留浏览器/驱动进程 {killed} 个、回收僵尸进程 {reaped} 个（{reason}）",
+                "yellow",
+            )
+        return killed
+
     def _run_worker(self, task_number: int) -> dict:
         self._change_running(1)
         try:
@@ -456,6 +486,8 @@ class RegisterService:
         threads = int(self.get()["threads"])
         submitted, done, success, fail = 0, 0, 0, 0
         fatal_error = ""
+        self_heal_attempts = 0
+        last_sweep = time.monotonic()
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures = set()
             while True:
@@ -479,6 +511,11 @@ class RegisterService:
                 if not futures and (not self.get()["enabled"] or mode == "total"):
                     break
                 if not futures:
+                    # 补号模式每轮之间会空一段时间，正好用来清扫上一批可能留下的孤儿。
+                    now = time.monotonic()
+                    if now - last_sweep >= BROWSER_SWEEP_INTERVAL_SECONDS:
+                        last_sweep = now
+                        self._sweep_leaked_browsers("空闲时")
                     time.sleep(max(1, int(cfg.get("check_interval") or 5)))
                     continue
                 finished, futures = wait(futures, return_when=FIRST_COMPLETED)
@@ -488,18 +525,31 @@ class RegisterService:
                         result = future.result()
                         success += 1 if result.get("ok") else 0
                         fail += 0 if result.get("ok") else 1
-                        if result.get("fatal") and not fatal_error:
+                        if result.get("fatal"):
                             fatal_error = str(result.get("error") or "注册运行环境发生不可恢复错误")
-                            with self._lock:
-                                self._config["enabled"] = False
-                                self._save()
-                            self._append_log(
-                                f"检测到不可恢复的系统资源错误，已自动停止注册任务，避免持续重试：{fatal_error}。"
-                                "请检查主机/容器的 PID、僵尸进程和内存，处理后再重新启动任务",
-                                "red",
-                            )
+                            if self.get()["enabled"] and self_heal_attempts < MAX_SELF_HEAL_ATTEMPTS:
+                                self_heal_attempts += 1
+                                self._append_log(
+                                    f"检测到系统资源耗尽：{fatal_error}；"
+                                    f"第 {self_heal_attempts}/{MAX_SELF_HEAL_ATTEMPTS} 次自动清理残留浏览器进程后继续",
+                                    "yellow",
+                                )
+                                self._sweep_leaked_browsers("资源耗尽自愈")
+                                time.sleep(SELF_HEAL_COOLDOWN_SECONDS)
+                            elif self.get()["enabled"]:
+                                with self._lock:
+                                    self._config["enabled"] = False
+                                    self._save()
+                                self._append_log(
+                                    f"清理 {MAX_SELF_HEAL_ATTEMPTS} 次后仍无法创建浏览器子进程，已自动停止注册任务：{fatal_error}。"
+                                    "请检查主机/容器的 PID、僵尸进程和内存，处理后再重新启动任务",
+                                    "red",
+                                )
                     except Exception:
                         fail += 1
+        # 任务结束前把这一轮可能留下的孤儿一并清掉，否则它们会一直占着 PID
+        # 等到下次启动——而那正是撞上限的时刻。
+        self._sweep_leaked_browsers("任务结束后")
         self._bump(running=0, done=done, success=success, fail=fail, finished_at=_now())
         with self._lock:
             self._config["enabled"] = False

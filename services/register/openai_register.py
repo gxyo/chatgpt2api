@@ -497,37 +497,79 @@ class PlatformRegistrar:
         }
 
 
+def _forward_child_log(text: str, color: str = "") -> None:
+    """子进程的日志只投给 sink（UI 日志面板）。
+
+    控制台那一份由子进程自己的 stderr 打到容器日志里，这里再 log() 一次就重复了。
+    """
+    sink = register_log_sink
+    if sink is None:
+        return
+    try:
+        sink(text, color)
+    except Exception:
+        pass
+
+
+def _forward_child_mailbox_result(message: dict) -> None:
+    """补记注册结果统计。
+
+    邮箱池状态（used/failed/in_use）子进程已经自己更新过了，这里只喂 sink，
+    不能再调一次 mark_mailbox_result。
+    """
+    sink = mail_provider.mailbox_result_sink
+    if sink is None:
+        return
+    mailbox = message.get("mailbox") if isinstance(message.get("mailbox"), dict) else {}
+    try:
+        sink(mailbox, success=bool(message.get("success")))
+    except Exception:
+        pass
+
+
 def worker(index: int) -> dict:
+    """跑一次注册任务。
+
+    注册本身在独立子进程里完成（见 services/register/task_process.py），
+    这里只负责收尾：写号、刷额度、记统计。存储后端（json/sqlite/postgres/git）
+    必须只由一个进程写，所以持久化留在主进程。
+    """
+    from services.register import task_process
+
     start = time.time()
     engine = str(config.get("engine") or "playwright").strip()
+    step(index, f"任务启动 (引擎: {engine})")
+    failure: dict[str, Any] | None = None
+    result: dict[str, Any] = {}
     try:
-        step(index, f"任务启动 (引擎: {engine})")
-        if engine == "playwright":
-            from services.register.playwright_register import register as pw_register
-            result = pw_register(index, config["proxy"])
+        outcome = task_process.run_registration_task(
+            index,
+            {key: config[key] for key in ("mail", "proxy", "total", "threads", "engine")},
+            on_log=_forward_child_log,
+            on_mailbox_result=_forward_child_mailbox_result,
+        )
+        if not outcome.get("ok"):
+            failure = {"error": str(outcome.get("error") or "注册失败"), "fatal": bool(outcome.get("fatal"))}
         else:
-            registrar = PlatformRegistrar(config["proxy"])
-            try:
-                result = registrar.register(index)
-            finally:
-                registrar.close()
-        cost = time.time() - start
-        access_token = str(result["access_token"])
-        account_service.add_account_items([result])
-        refresh_result = account_service.refresh_accounts([access_token])
-        if refresh_result.get("errors"):
-            step(index, f"账号已保存，刷新状态暂未成功，稍后可重试: {refresh_result['errors']}", "yellow")
-        with stats_lock:
-            stats["done"] += 1
-            stats["success"] += 1
-            avg = (time.time() - stats["start_time"]) / stats["success"]
-        log(f'{result["email"]} 注册成功，本次耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
-        return {"ok": True, "index": index, "result": result}
+            result = outcome.get("result") or {}
+            access_token = str(result["access_token"])
+            account_service.add_account_items([result])
+            refresh_result = account_service.refresh_accounts([access_token])
+            if refresh_result.get("errors"):
+                step(index, f"账号已保存，刷新状态暂未成功，稍后可重试: {refresh_result['errors']}", "yellow")
     except Exception as e:
-        cost = time.time() - start
+        message, fatal = _classify_worker_error(e)
+        failure = {"error": message, "fatal": fatal}
+    cost = time.time() - start
+    if failure:
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1
-        message, fatal = _classify_worker_error(e)
-        log(f"任务{index} 注册失败，本次耗时{cost:.1f}s，原因: {message}", "red")
-        return {"ok": False, "index": index, "error": message, "fatal": fatal}
+        log(f"任务{index} 注册失败，本次耗时{cost:.1f}s，原因: {failure['error']}", "red")
+        return {"ok": False, "index": index, "error": failure["error"], "fatal": failure["fatal"]}
+    with stats_lock:
+        stats["done"] += 1
+        stats["success"] += 1
+        avg = (time.time() - stats["start_time"]) / stats["success"]
+    log(f'{result["email"]} 注册成功，本次耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
+    return {"ok": True, "index": index, "result": result}

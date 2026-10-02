@@ -41,7 +41,7 @@ class RegisterServiceTests(unittest.TestCase):
             "浏览器启动失败：系统无法创建 Chromium 子进程，PID/线程或内存资源已耗尽",
         )
 
-    def test_fatal_worker_error_stops_registration_instead_of_retrying(self) -> None:
+    def test_fatal_worker_error_self_heals_then_stops_after_max_attempts(self) -> None:
         from services import register_service as register_module
 
         calls = []
@@ -58,20 +58,69 @@ class RegisterServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = register_module.RegisterService(Path(tmp_dir) / "register.json")
             service.update({"mode": "total", "total": 100, "threads": 1})
-            with patch.object(register_module.openai_register, "worker", side_effect=fatal_worker):
+            with patch.object(register_module.openai_register, "worker", side_effect=fatal_worker), \
+                 patch.object(register_module.browser_reaper, "kill_browser_processes", return_value=5), \
+                 patch.object(register_module.browser_reaper, "reap_zombie_children", return_value=0), \
+                 patch.object(register_module, "SELF_HEAL_COOLDOWN_SECONDS", 0):
                 service.start()
                 self.assertIsNotNone(service._runner)
                 service._runner.join(timeout=5)
 
             snapshot = service.get()
 
+        # 每撞一次资源上限就清一次残留进程继续跑，共 3 次；清完还是起不来才停。
         self.assertFalse(service._runner.is_alive())
         self.assertFalse(snapshot["enabled"])
-        self.assertEqual(calls, [1])
-        self.assertEqual(snapshot["stats"]["done"], 1)
+        self.assertEqual(calls, [1, 2, 3, 4])
+        self.assertEqual(snapshot["stats"]["done"], 4)
+        self.assertTrue(
+            any("自动清理残留浏览器进程后继续" in item["text"] for item in snapshot["logs"])
+        )
         self.assertTrue(
             any("已自动停止注册任务" in item["text"] for item in snapshot["logs"])
         )
+        self.assertTrue(
+            any("已清理残留浏览器/驱动进程 5 个" in item["text"] for item in snapshot["logs"])
+        )
+
+    def test_fatal_worker_error_does_not_restart_after_user_stopped(self) -> None:
+        """用户手动停掉之后不该再自愈续跑。"""
+        from services import register_service as register_module
+
+        calls = []
+
+        def stopping_worker(task_number: int) -> dict:
+            calls.append(task_number)
+            service.stop()
+            return {"ok": False, "index": task_number, "error": "浏览器进程资源已耗尽", "fatal": True}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = register_module.RegisterService(Path(tmp_dir) / "register.json")
+            service.update({"mode": "total", "total": 100, "threads": 1})
+            with patch.object(register_module.openai_register, "worker", side_effect=stopping_worker), \
+                 patch.object(register_module.browser_reaper, "kill_browser_processes", return_value=0), \
+                 patch.object(register_module.browser_reaper, "reap_zombie_children", return_value=0), \
+                 patch.object(register_module, "SELF_HEAL_COOLDOWN_SECONDS", 0):
+                service.start()
+                service._runner.join(timeout=5)
+
+            snapshot = service.get()
+
+        self.assertEqual(calls, [1])
+        self.assertFalse(snapshot["enabled"])
+
+    def test_sweep_is_skipped_while_a_worker_is_running(self) -> None:
+        from services import register_service as register_module
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = register_module.RegisterService(Path(tmp_dir) / "register.json")
+            service._change_running(1)
+            try:
+                with patch.object(register_module.browser_reaper, "kill_browser_processes") as kill:
+                    self.assertEqual(service._sweep_leaked_browsers("测试"), 0)
+                    kill.assert_not_called()
+            finally:
+                service._change_running(-1)
 
     def test_running_counts_only_workers_actively_executing(self) -> None:
         from services import register_service as register_module

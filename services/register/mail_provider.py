@@ -3,32 +3,74 @@ from __future__ import annotations
 import hashlib
 import imaplib
 import json
+import os
 import random
 import re
 import string
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from email import message_from_bytes, message_from_string, policy
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterator, TypeVar
 
 from curl_cffi import requests
+
+try:  # Windows 上没有 fcntl，退化成纯线程锁（服务端只在 Linux 容器里跑）
+    import fcntl
+except ImportError:  # pragma: no cover - 平台差异
+    fcntl = None  # type: ignore[assignment]
 
 
 from services.config import DATA_DIR
 
 DDG_ALIASES_FILE = DATA_DIR / "ddg_aliases.json"
+DDG_ALIASES_LOCK_FILE = DATA_DIR / "ddg_aliases.lock"
 _ddg_aliases_lock = Lock()
 
 OUTLOOK_TOKEN_USED_FILE = DATA_DIR / "outlook_token_used.json"
+OUTLOOK_TOKEN_USED_LOCK_FILE = DATA_DIR / "outlook_token_used.lock"
 _outlook_token_state_lock = Lock()
 # in_use 超过该秒数视为陈旧（注册进程崩溃残留），可被重新领用
 OUTLOOK_IN_USE_STALE_SECONDS = 3600
 OUTLOOK_RECORDED_STATES = {"used", "in_use", "token_invalid", "failed"}
 OUTLOOK_UNAVAILABLE_STATES = {"used", "token_invalid", "failed"}
 mailbox_result_sink: Callable[..., None] | None = None
+
+
+@contextmanager
+def _state_file_lock(thread_lock: Lock, guard_file: Path) -> Iterator[None]:
+    """包住状态文件的「读-改-写」：进程内锁 + 文件锁。
+
+    注册任务改成子进程后，这两个状态文件的写方从多个线程变成了多个进程，纯线程
+    锁挡不住跨进程的丢更新：A 领用邮箱 X 的同时 B 用旧快照把 X 覆盖回可用，X 就
+    会被重复发放；已用状态被覆盖则会重复投递同一个邮箱。
+
+    锁文件与状态文件同目录；POSIX 走 flock，持锁进程被 SIGKILL 时内核自动释放。
+    """
+    with thread_lock:
+        handle = None
+        if fcntl is not None:
+            try:
+                guard_file.parent.mkdir(parents=True, exist_ok=True)
+                handle = open(guard_file, "a+b")
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            except OSError:
+                if handle is not None:
+                    handle.close()
+                handle = None
+        try:
+            yield
+        finally:
+            if handle is not None:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                handle.close()
 
 
 def _load_ddg_aliases() -> set[str]:
@@ -42,16 +84,34 @@ def _load_ddg_aliases() -> set[str]:
     return set()
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """先写临时文件再 rename，读取方永远看不到被截断的半份状态。
+
+    临时名带 pid，多个注册子进程同时落盘也不会互相覆盖。带锁的读改写靠
+    _state_file_lock，这里解决的是不带锁的读（如 SSE 快照里的池统计）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _save_ddg_aliases(aliases: set[str]) -> None:
-    DDG_ALIASES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DDG_ALIASES_FILE.write_text(json.dumps(sorted(aliases), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _atomic_write_text(DDG_ALIASES_FILE, json.dumps(sorted(aliases), ensure_ascii=False, indent=2) + "\n")
 
 
 def _is_ddg_alias_duplicate(address: str) -> bool:
     target = str(address or "").strip().lower()
     if not target:
         return False
-    with _ddg_aliases_lock:
+    with _state_file_lock(_ddg_aliases_lock, DDG_ALIASES_LOCK_FILE):
         used = _load_ddg_aliases()
         return target in used
 
@@ -60,7 +120,7 @@ def _record_ddg_alias(address: str) -> None:
     target = str(address or "").strip().lower()
     if not target:
         return
-    with _ddg_aliases_lock:
+    with _state_file_lock(_ddg_aliases_lock, DDG_ALIASES_LOCK_FILE):
         used = _load_ddg_aliases()
         used.add(target)
         _save_ddg_aliases(used)
@@ -100,9 +160,8 @@ def _load_outlook_token_state() -> dict[str, dict[str, Any]]:
 
 
 def _save_outlook_token_state(state: dict[str, dict[str, Any]]) -> None:
-    OUTLOOK_TOKEN_USED_FILE.parent.mkdir(parents=True, exist_ok=True)
     ordered = {key: state[key] for key in sorted(state)}
-    OUTLOOK_TOKEN_USED_FILE.write_text(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _atomic_write_text(OUTLOOK_TOKEN_USED_FILE, json.dumps(ordered, ensure_ascii=False, indent=2) + "\n")
 
 
 def _outlook_entry_available(entry: dict[str, Any] | None) -> bool:
@@ -127,7 +186,7 @@ def _set_outlook_token_state(address: str, state: str, reason: str = "") -> None
     target = str(address or "").strip().lower()
     if not target:
         return
-    with _outlook_token_state_lock:
+    with _state_file_lock(_outlook_token_state_lock, OUTLOOK_TOKEN_USED_LOCK_FILE):
         store = _load_outlook_token_state()
         store[target] = {"state": str(state), "reason": str(reason or ""), "updated_at": datetime.now(timezone.utc).isoformat()}
         _save_outlook_token_state(store)
@@ -138,7 +197,7 @@ def _release_outlook_token_state(address: str) -> None:
     target = str(address or "").strip().lower()
     if not target:
         return
-    with _outlook_token_state_lock:
+    with _state_file_lock(_outlook_token_state_lock, OUTLOOK_TOKEN_USED_LOCK_FILE):
         store = _load_outlook_token_state()
         entry = store.get(target)
         if isinstance(entry, dict) and str(entry.get("state") or "") == "in_use":
@@ -152,7 +211,7 @@ def reset_outlook_token_pool_state(scope: str = "all") -> int:
     scope=all 清空所有记录；scope=failed 仅清除 failed/token_invalid/in_use（保留 used）。
     返回被清除的条目数。
     """
-    with _outlook_token_state_lock:
+    with _state_file_lock(_outlook_token_state_lock, OUTLOOK_TOKEN_USED_LOCK_FILE):
         store = _load_outlook_token_state()
         if not store:
             return 0
@@ -169,7 +228,7 @@ def reset_outlook_token_pool_state(scope: str = "all") -> int:
 
 def prune_outlook_unused_credentials(credentials: list[dict[str, str]]) -> tuple[list[dict[str, str]], int]:
     """Return credentials with recorded state, plus the number pruned as unused."""
-    with _outlook_token_state_lock:
+    with _state_file_lock(_outlook_token_state_lock, OUTLOOK_TOKEN_USED_LOCK_FILE):
         store = _load_outlook_token_state()
     kept: list[dict[str, str]] = []
     removed = 0
@@ -1177,7 +1236,7 @@ class OutlookTokenProvider(BaseMailProvider):
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
         if not self.pool:
             raise RuntimeError("OutlookToken 邮箱池为空，请在邮箱配置中导入 email----password----client_id----refresh_token")
-        with _outlook_token_state_lock:
+        with _state_file_lock(_outlook_token_state_lock, OUTLOOK_TOKEN_USED_LOCK_FILE):
             store = _load_outlook_token_state()
             credential = next((item for item in self.pool if _outlook_entry_available(store.get(item["email"].strip().lower()))), None)
             if credential is None:
