@@ -9,7 +9,7 @@ from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
-from services.log_service import LoggedCall
+from services.log_service import LoggedCall, image_request_detail
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -98,7 +98,8 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
-        call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
+        call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt,
+                          extra_detail=image_request_detail(payload))
         await filter_or_log(call, body.prompt)
         return await call.run(openai_v1_image_generations.handle, payload)
 
@@ -111,7 +112,8 @@ def create_router() -> APIRouter:
         payload, image_sources, mask_sources = await parse_image_edit_request(request)
         prompt = str(payload["prompt"])
         model = str(payload["model"])
-        call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt)
+        call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt,
+                          extra_detail=image_request_detail(payload))
         await filter_or_log(call, prompt)
         payload["images"] = await read_image_sources(image_sources)
         if mask_sources:

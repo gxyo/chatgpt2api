@@ -11,7 +11,7 @@ from typing import Any
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
-from services.log_service import LOG_TYPE_CALL, log_service
+from services.log_service import LOG_TYPE_CALL, image_request_detail, log_service, merge_extra_detail
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 from utils.beijing_time import beijing_now_text, beijing_text_from_timestamp
 from utils.helper import describe_exception, sanitize_image_error_text
@@ -302,6 +302,7 @@ class ImageTaskService:
                 request_preview=request_text(payload.get("prompt")),
                 urls=_collect_image_urls(data),
                 account_email=account_email,
+                extra_detail=image_request_detail(payload),
             )
         except Exception as exc:
             error_message = sanitize_image_error_text(str(exc) or "image task failed")
@@ -322,6 +323,7 @@ class ImageTaskService:
                 error=error_message,
                 account_email=account_email,
                 exc=exc,
+                extra_detail=image_request_detail(payload),
             )
 
     def _timeout_secs(self) -> float:
@@ -365,6 +367,7 @@ class ImageTaskService:
         urls: list[str] | None = None,
         account_email: str = "",
         exc: BaseException | None = None,
+        extra_detail: dict[str, Any] | None = None,
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
         summary_prefix = "图生图" if mode == "edit" else "文生图"
@@ -381,6 +384,7 @@ class ImageTaskService:
         }
         if request_preview:
             detail["request_text"] = request_preview
+        merge_extra_detail(detail, extra_detail)
         if error:
             detail["error"] = error
         if exc is not None:

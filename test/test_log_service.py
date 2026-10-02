@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 import api.system as system_module
 import services.log_service as log_service_module
-from services.log_service import LoggedCall, LogService
+from services.log_service import LoggedCall, LogService, image_request_detail
 from utils.helper import CHANNEL_BUSY_MESSAGE, UpstreamHTTPError, describe_exception
 
 
@@ -204,6 +204,59 @@ class LoggedCallDetailTests(unittest.TestCase):
             detail = service.list()[0]["detail"]
             self.assertNotIn("image_diagnostics", detail)
             self.assertNotIn("image_trace", detail)
+
+
+class ImageRequestDetailTests(unittest.TestCase):
+    """生图入参（要了几 K、几张）要平铺进日志详情，页面和导出才看得到。"""
+
+    def _logged(self, service: LogService, **kwargs) -> dict[str, object]:
+        call = LoggedCall({"id": "k1", "name": "管理员", "role": "admin"},
+                          "/v1/images/generations", "gpt-image-2", "文生图",
+                          extra_detail=kwargs.pop("extra_detail", None))
+        with mock.patch.object(log_service_module, "log_service", service):
+            call.log("调用完成")
+        return service.list()[0]["detail"]
+
+    def test_request_params_land_in_detail(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = LogService(Path(tmp_dir) / "logs.jsonl")
+            detail = self._logged(service, extra_detail={
+                "size": "4096x4096", "n": 2, "quality": "high", "response_format": "url",
+            })
+            self.assertEqual(detail["size"], "4096x4096")
+            self.assertEqual(detail["n"], 2)
+            self.assertEqual(detail["quality"], "high")
+            self.assertEqual(detail["response_format"], "url")
+
+    def test_empty_values_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = LogService(Path(tmp_dir) / "logs.jsonl")
+            detail = self._logged(service, extra_detail={
+                "size": None, "n": 1, "quality": "", "response_format": None,
+            })
+            self.assertNotIn("size", detail)
+            self.assertNotIn("quality", detail)
+            self.assertNotIn("response_format", detail)
+            self.assertEqual(detail["n"], 1)
+
+    def test_export_carries_params_and_headline(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = LogService(Path(tmp_dir) / "logs.jsonl")
+            self._logged(service, extra_detail={"size": "2048x2048", "n": 1})
+
+            text, count = service.build_export()
+            self.assertEqual(count, 1)
+            self.assertIn('"size": "2048x2048"', text)
+            self.assertIn("size=2048x2048", text)
+
+    def test_helper_picks_only_known_keys(self):
+        detail = image_request_detail({
+            "size": "1024x1024", "n": 1, "quality": "auto",
+            "response_format": "b64_json", "prompt": "不该出现", "base_url": "http://x",
+        })
+        self.assertEqual(detail, {
+            "size": "1024x1024", "n": 1, "quality": "auto", "response_format": "b64_json",
+        })
 
 
 class LogExportApiTests(unittest.TestCase):

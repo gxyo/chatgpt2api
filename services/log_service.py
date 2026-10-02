@@ -159,7 +159,8 @@ class LogService:
         duration = detail.get("duration_ms")
         if isinstance(duration, int):
             parts.append(f"耗时={duration}ms")
-        for key in ("account_email", "email", "mail_domain", "image_trace", "conversation_id", "endpoint", "stage"):
+        for key in ("size", "n", "quality", "account_email", "email", "mail_domain", "image_trace",
+                    "conversation_id", "endpoint", "stage"):
             value = str(detail.get(key) or "").strip()
             if value:
                 parts.append(f"{key}={value}")
@@ -273,6 +274,31 @@ def _strip_internal_response_fields(value: object) -> object:
     return value
 
 
+def merge_extra_detail(detail: dict[str, Any], extra_detail: dict[str, Any] | None) -> None:
+    """把请求侧入参平铺进 detail。
+
+    平铺而不是嵌成子对象：日志页详情弹窗只渲染标量字段，嵌套了就看不到。
+    空值跳过，免得日志里一堆 null。
+    """
+    for key, value in (extra_detail or {}).items():
+        if value is None or value == "":
+            continue
+        detail.setdefault(key, value)
+
+
+def image_request_detail(payload: dict[str, Any]) -> dict[str, Any]:
+    """生图请求的入参，落进调用日志，方便事后核对客户端到底要了多大的图。
+
+    两条生图路径（/v1/images/* 和 /api/image-tasks/*）共用，免得日志字段对不齐。
+    """
+    return {
+        "size": payload.get("size"),
+        "n": payload.get("n"),
+        "quality": payload.get("quality"),
+        "response_format": payload.get("response_format"),
+    }
+
+
 def _request_excerpt(text: object, limit: int = 1000) -> str:
     value = str(text or "").strip()
     if not value:
@@ -331,6 +357,8 @@ class LoggedCall:
     started: float = field(default_factory=time.time)
     request_text: str = ""
     request_shape: dict[str, int] | None = None
+    # 请求侧的入参（图片尺寸、张数、质量等），落日志时平铺进 detail。
+    extra_detail: dict[str, Any] | None = None
 
     async def run(self, handler, *args, sse: str = "openai"):
         from services.protocol.conversation import ImageGenerationError
@@ -427,6 +455,7 @@ class LoggedCall:
             detail["request_text"] = request_excerpt
         if self.request_shape:
             detail["request_shape"] = self.request_shape
+        merge_extra_detail(detail, self.extra_detail)
         if error:
             detail["error"] = error
         if exc is not None:
