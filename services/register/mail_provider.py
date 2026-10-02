@@ -110,26 +110,32 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-def _load_rotation_state() -> dict[str, int]:
+def _load_rotation_state() -> dict[str, str]:
     try:
         data = json.loads(ROTATION_STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(key): int(value) for key, value in data.items() if isinstance(value, (int, float))}
+    return {str(key): str(value) for key, value in data.items() if isinstance(value, str) and value}
 
 
-def _next_rotation_index(key: str) -> int:
-    """取本次该用的轮询位置，并把游标推进一格。
+def _next_rotation_index(key: str, identities: list[str]) -> int:
+    """取本次该用的轮询位置：接上次用过的那个往下走，到末尾回到开头。
 
-    游标落在文件里而不是模块全局：每个注册任务都是独立子进程，进程内的计数器
-    看不到别的任务推到哪了。状态文件的读-改-写由 _state_file_lock 跨进程串行。
+    锚点是「上一次用的那一个」本身，不是计数器取模。域名列表会被增删和调序
+    （面板上挪一下就是一个新顺序），计数器一取模就跳号，看着就跟"每次开始都
+    取第一个"一样；按名字续接则永远跟着当前列表的顺序走。
+
+    状态落在文件里而不是模块全局：每个注册任务都是独立子进程，进程内的计数器
+    看不到别的任务推到哪了。读-改-写由 _state_file_lock 跨进程串行。
     """
     with _state_file_lock(_rotation_state_lock, ROTATION_STATE_LOCK_FILE):
         state = _load_rotation_state()
-        index = int(state.get(key) or 0)
-        state[key] = index + 1
+        last = state.get(key) or ""
+        # 上次用的那个还在列表里，就取它的下一个；已被删掉（或从没跑过）就从第一个开始。
+        index = (identities.index(last) + 1) % len(identities) if last in identities else 0
+        state[key] = identities[index]
         try:
             _atomic_write_text(
                 ROTATION_STATE_FILE,
@@ -330,7 +336,7 @@ def _next_domain(domains: list[str]) -> str:
         raise RuntimeError("mail.domain 不能为空")
     if len(domains) == 1:
         return domains[0]
-    return domains[_next_rotation_index("domain") % len(domains)]
+    return domains[_next_rotation_index("domain_last", domains)]
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -1479,7 +1485,9 @@ def _next_entry(mail_config: dict) -> dict:
     items = _enabled_entries(mail_config)
     if len(items) == 1:
         return dict(items[0])
-    return dict(items[_next_rotation_index("provider") % len(items)])
+    # provider_ref（type#序号）是条目的稳定身份，拿它当轮询锚点，跟域名一套逻辑。
+    identities = [str(item.get("provider_ref") or item.get("type") or index) for index, item in enumerate(items)]
+    return dict(items[_next_rotation_index("provider_last", identities)])
 
 
 def _create_provider(mail_config: dict, provider: str = "", provider_ref: str = "") -> BaseMailProvider:
