@@ -110,6 +110,7 @@ export type SettingsConfig = {
   image_account_concurrency?: number | string;
   image_quota_error_message?: string;
   image_parallel_generation?: boolean;
+  image_upscale_enabled?: boolean;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];

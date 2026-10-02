@@ -326,6 +326,11 @@ class ConfigStore:
         return bool(value)
 
     @property
+    def image_upscale_enabled(self) -> bool:
+        """超分总开关。关掉后客户端就算传 4K 也不放大。"""
+        return _normalize_bool(self.data.get("image_upscale_enabled", False))
+
+    @property
     def auto_remove_invalid_accounts(self) -> bool:
         value = self.data.get("auto_remove_invalid_accounts", False)
         if isinstance(value, str):
@@ -428,6 +433,7 @@ class ConfigStore:
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
         data["image_parallel_generation"] = self.image_parallel_generation
+        data["image_upscale_enabled"] = self.image_upscale_enabled
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels
@@ -472,6 +478,8 @@ class ConfigStore:
             next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(
                 next_data.get("chat_completion_cache")
             )
+        if "image_upscale_enabled" in next_data:
+            next_data["image_upscale_enabled"] = _normalize_bool(next_data.get("image_upscale_enabled"))
         self.data = next_data
         self._save()
         return self.get()

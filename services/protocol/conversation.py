@@ -13,6 +13,7 @@ import tiktoken
 from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
+from services.image_upscale_service import parse_size_long_edge, upscale_png
 from services.openai_backend_api import (
     ImageContentPolicyError,
     ImageMainlineStateError,
@@ -340,6 +341,7 @@ def format_image_result(
     base_url: str | None = None,
     created: int | None = None,
     message: str = "",
+    size: str | None = None,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     for item in items:
@@ -347,15 +349,19 @@ def format_image_result(
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        # 免费号只出 1K 图，落盘前放大：客户端 size 要了 2K/4K 就照办，
+        # 不传或 "auto" 则维持 1K。b64_json 和 url 用同一份字节，免得两个出口不一致。
+        image_bytes = upscale_png(base64.b64decode(b64_json), parse_size_long_edge(size))
+        url = save_image_bytes(image_bytes, base_url)
         if response_format == "b64_json":
             data.append({
-                "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "b64_json": base64.b64encode(image_bytes).decode("ascii"),
+                "url": url,
                 "revised_prompt": revised_prompt,
             })
         else:
             data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": url,
                 "revised_prompt": revised_prompt,
             })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
@@ -1057,6 +1063,7 @@ def stream_image_outputs(
             request.response_format,
             request.base_url,
             int(time.time()),
+            size=request.size,
         )["data"]
         if data:
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
@@ -1153,6 +1160,7 @@ def stream_image_outputs(
                         request.response_format,
                         request.base_url,
                         int(time.time()),
+                        size=request.size,
                     )["data"]
                     if data:
                         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
@@ -1267,6 +1275,7 @@ def stream_image_outputs(
                     request.response_format,
                     request.base_url,
                     int(time.time()),
+                    size=request.size,
                 )["data"]
                 if data:
                     yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
@@ -1327,6 +1336,7 @@ def stream_codex_image_outputs(
         request.response_format,
         request.base_url,
         int(time.time()),
+        size=request.size,
     )["data"]
     if data:
         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)

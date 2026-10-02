@@ -27,6 +27,7 @@ export function ConfigCard() {
   const setImageCleanupTime = useSettingsStore((state) => state.setImageCleanupTime);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
+  const setImageUpscaleEnabled = useSettingsStore((state) => state.setImageUpscaleEnabled);
   const setImageQuotaErrorMessage = useSettingsStore((state) => state.setImageQuotaErrorMessage);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
@@ -199,6 +200,18 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-neutral-200 bg-white"
             />
             <p className="text-xs text-neutral-500">限制每个账号同时处理的图片请求数量，默认 3。</p>
+          </div>
+          <div className="space-y-2 md:col-span-2">
+            <label className="flex items-center gap-3 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-700">
+              <Checkbox
+                checked={Boolean(config?.image_upscale_enabled)}
+                onCheckedChange={(checked) => setImageUpscaleEnabled(Boolean(checked))}
+              />
+              生成后超分放大
+            </label>
+            <p className="text-xs leading-5 text-neutral-500">
+              免费号只能出 1K。开启后调用方在请求里传 size 就能放大：2048x2048 得 2K，4096x4096 得 4K；不传或传 auto 仍是 1K。注意磁盘占用会成倍增加（4K 约为 1K 的 8 倍）。
+            </p>
           </div>
           <div className="space-y-2 md:col-span-2">
             <label className="flex items-center gap-2 text-sm text-neutral-700">
