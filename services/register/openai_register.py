@@ -470,7 +470,17 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
 
 
-def request_platform_oauth_token(session: Any, code: str, code_verifier: str) -> dict:
+def request_platform_oauth_token(
+    session: Any, code: str, code_verifier: str,
+    *, client_id: str = "", redirect_uri: str = "", device_id: str = "",
+) -> dict:
+    """用一次性 code 换 token。
+
+    ``client_id`` / ``redirect_uri`` / ``device_id`` 允许调用方覆盖成「签发 code 的那次
+    authorize 实际用的值」：浏览器流程里的 authorize 是上游 SPA 自己发的，它的 client 未必
+    还是我们写死的常量，拿旧 client 去换只会拿到 invalid_grant。API 流程自己发 authorize，
+    不传覆盖值，走默认常量。
+    """
     headers = {
         "accept": "*/*",
         "accept-language": "zh-CN,zh;q=0.9",
@@ -489,15 +499,17 @@ def request_platform_oauth_token(session: Any, code: str, code_verifier: str) ->
         "sec-fetch-site": "same-site",
         "user-agent": user_agent,
     }
+    if device_id:
+        headers["oai-device-id"] = device_id
     resp = session.post(
         f"{auth_base}/api/accounts/oauth/token",
         headers=headers,
         json={
-            "client_id": platform_oauth_client_id,
+            "client_id": client_id or platform_oauth_client_id,
             "code_verifier": code_verifier,
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": platform_oauth_redirect_uri,
+            "redirect_uri": redirect_uri or platform_oauth_redirect_uri,
         },
         verify=False,
         timeout=60,

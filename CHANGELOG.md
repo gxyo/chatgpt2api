@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.2 - 2026-10-06
+
++ [修复] 大幅修复注册成功率：OAuth 兑换一直 `invalid_grant`，是因为**我们改写的 PKCE challenge 常常根本没生效**。Playwright 的路由只对请求链的第一个 URL 回调路由，跳转目标不回调，实测跨域 302 的目标连 route 都进不来（本地 probe 复现：A 302 到 B，B 只看到原始 challenge）。浏览器发起的 authorize 一旦是被跳转带过去的，我们改写的那次就不是真正签发 code 的那次，code 仍绑在浏览器自己那份 verifier 上，拿我们的 verifier 去换必然 400。现在改为**按「code 是谁签发的」决定用谁的 verifier**：`page.on("request")` 能看到包括路由不到的那几跳在内的所有请求，把最后一条带 challenge 的请求当作签发方，在抓到 code 的那一刻快照下来；签发方正是我们改写成功的那次 → 用自带 verifier（改写生效，`改写生效=是`）；不是（路由不到的跳转，绝大多数线上失败就是这种）→ 兑换前按 S256 反查浏览器自己留存的 verifier：此刻页面正停在 callback（platform.openai.com 源）、上一步被我们替换成了桩页面，SPA 的 sessionStorage/localStorage 里那份 verifier 还在，凡是「算出来等于签发那条 challenge」的明文就是真的，直接拿它兑换（`verifier 来源=浏览器`）。反查只认 S256 反算不认「长得像」，否则会把存储里那条 challenge 自己当成 verifier 用（两者在 transaction 对象里挨着，明文匹配会误中）。
++ [修复] 修掉一个会让上面这条路永远失效的坑：**路由 handler 里读不了页面存储**。请求停在 handler 里时页面正处于导航中，`page.evaluate` 在 async API 下不会报错、而是一直不返回，只能等到超时——实测（本地 probe：handler 里 evaluate 5 秒超时，请求放行后页面才正常加载）。所以反查一律挪到兑换前、导航结束之后做，handler 里只记参数、不做任何页面读写。
++ [修复] OAuth 兑换改为跟上游实际用的参数走：`client_id` 不再写死 `app_2SKx67EdpoN0G6j64rFvigXD`，而是从观察到的 authorize 请求里取（含路由不到的那几跳——只有 `page.on("request")` 看得到它们），`redirect_uri` 同理，并带上浏览器那份 `oai-device-id`。上游 SPA 换过 client 的话，拿旧 client 去换人家的 code 同样只会得到 `invalid_grant`，这在本机读代码是看不出来的。
++ [新增] 注册流程的诊断信息：`从浏览器存储里反查到 verifier` / `浏览器存储里没有匹配 challenge 的 verifier（候选 N 条）` 等事件写进注册日志，兑换前有一行 `OAuth 诊断: verifier 来源=…, client_id=…, device_id=…, 观察到的 challenge=N 条, 签发方 challenge_fp=…（改写生效=是/否）`，失败时的错误里也带上 `verifier` 来源、`client_id` 与是否改写生效。这样下一批线上失败日志能直接回答「这个 code 是谁签发的、我们拿的是谁那份 verifier、存储里到底有没有」，不用再靠猜。
++ [修复] 新增对上游证件核验闸门（`auth.openai.com/verify-your-identity`）的处理：这种页面只有一句说明加一个 Continue，自动化过不去。现在会点一次 Continue 试一下，第二次再遇到就直接以 `上游要求证件核验（verify-your-identity），当前 IP 或邮箱域名已被风控` 收尾。原来这种情况会一路干等到超时，最后报成「无法识别注册流程页面」，把上游风控伪装成我们自己的选择器坏了，白白浪费一轮排查。
+
 ## 2.0.1 - 2026-10-02
 
 + [修复] 修复同一账号并发请求被上游判 `{"skipped_mainline":true}` 的问题：conduit 握手锁改按账号身份（user_id/邮箱）索引，access_token 刷新轮换后仍然是同一把锁，同账号的 prepare→mainline 窗口不会再并排跑；释放时只放掉本线程拿到的那把锁。搜索、可编辑文件导出（两者与生图共用号池和 `/backend-api/f/conversation` 链路）也纳入同一个窗口，不再互相挤掉对方的 conduit。

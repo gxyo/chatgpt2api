@@ -7,9 +7,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from services.register.playwright_register import (
     OAUTH_ROUTE_PATTERN,
     OAUTH_TOKEN_PATH,
+    _code_is_bound_to_our_challenge,
+    _continue_identity_verification,
     _install_oauth_routes,
     _exchange_oauth_token_in_browser,
     _fill_birthdate,
+    _match_verifier,
     _page_rejects_password_signup,
     _replace_pkce_params,
     _return_to_otp_signup,
@@ -18,8 +21,12 @@ from services.register.playwright_register import (
     _should_block_browser_oauth_request,
     _submit_password,
     _switch_to_password_if_offered,
+    _verifier_candidates,
     _wait_for_signup_step,
+    platform_oauth_client_id,
+    platform_oauth_redirect_uri,
 )
+from utils.pkce import code_challenge_for
 
 
 # 线上真实抓到的页面正文（结尾没有句号——旧选择器就是被这个标点废掉的）。
@@ -31,16 +38,37 @@ LIVE_PASSWORD_REJECTION_BODY = (
 )
 
 
+def _oauth_context(**overrides) -> dict:
+    """和 ``_browser_register_flow`` 里建的那份同形，免得测试用的字典少键（少键会 KeyError 而不是判定失败）。"""
+    context = {
+        "challenges": [],
+        "client_id": "",
+        "redirect_uri": "",
+        "device_id": "",
+        "verifier": "",
+        "verifier_source": "自带",
+        "issuer_fp": "",
+        "rewritten_fps": set(),
+    }
+    context.update(overrides)
+    return context
+
+
 class FakePage:
     def __init__(self) -> None:
         self.routes = {}
         self.listeners = {}
+        # 页面存储快照（sessionStorage/localStorage/cookie 摊平后的样子）。
+        self.storage = {"values": [], "device_id": ""}
 
     async def route(self, pattern, handler) -> None:
         self.routes[pattern] = handler
 
     def on(self, event, handler) -> None:
         self.listeners[event] = handler
+
+    async def evaluate(self, script, *args):
+        return self.storage
 
 
 class FakeFrame:
@@ -382,6 +410,238 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
         await handler(form_post)
         self.assertIsNotNone(form_post.aborted)
 
+    def test_verifier_candidates_flatten_storage_values(self) -> None:
+        verifier = "v" * 60
+        candidates = _verifier_candidates([
+            json.dumps({"code_verifier": verifier, "state": "short"}),
+            f"oai-did=abc; other={verifier}",
+            "",
+            None,
+        ])
+
+        self.assertIn(verifier, candidates)
+        self.assertNotIn("", candidates)
+
+    def test_verifier_matching_only_accepts_a_real_s256_preimage(self) -> None:
+        verifier = "browser-verifier-" + "x" * 40
+        challenge = code_challenge_for(verifier)
+
+        # challenge 自己也在存储里（transaction 对象两个字段挨着），但它不是 verifier：
+        # 用它去兑换只会换错人，所以只认能反算出 challenge 的那个明文。
+        self.assertEqual(_match_verifier([challenge, verifier], [challenge]), verifier)
+        self.assertEqual(_match_verifier([challenge], [challenge]), "")
+        self.assertEqual(_match_verifier([verifier], []), "")
+
+    async def test_authorize_is_rewritten_and_the_rewrite_is_recorded(self) -> None:
+        page = FakePage()
+        page.storage = {"values": [json.dumps({"code_verifier": "someone-elses"})], "device_id": ""}
+        oauth = _oauth_context()
+        events: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", [], events, oauth)
+
+        route = FakeRoute(
+            "https://auth.openai.com/oauth/authorize"
+            "?client_id=app_browser&code_challenge=browser-challenge&code_challenge_method=S256",
+            frame=frame_at("https://platform.openai.com/signup"),
+        )
+        await page.routes[OAUTH_ROUTE_PATTERN](route)
+
+        # 改写仍然照旧——但**不能**在这里读存储：请求正停在 handler 里，页面处于导航中，
+        # page.evaluate 会一直等到超时也不返回（实测），反查只能等兑换前那次做。
+        params = parse_qs(urlparse(route.continued_url).query)
+        self.assertEqual(params["code_challenge"], ["our-challenge"])
+        self.assertEqual(oauth["client_id"], "app_browser")
+        self.assertEqual(oauth["rewritten_fps"], {_secret_fingerprint("browser-challenge")})
+        self.assertEqual(oauth["verifier"], "")  # handler 里不下结论
+
+    async def test_code_signed_by_a_rewritten_authorize_keeps_our_verifier(self) -> None:
+        # 改写真的生效时（那次就是签发 code 的那次），自带 verifier 是对的，
+        # 不该再去存储里换成浏览器那份。
+        oauth = _oauth_context(
+            issuer_fp=_secret_fingerprint("browser-challenge"),
+            rewritten_fps={_secret_fingerprint("browser-challenge")},
+        )
+
+        self.assertTrue(_code_is_bound_to_our_challenge(oauth))
+
+    async def test_code_signed_by_an_unrouted_authorize_needs_the_browser_verifier(self) -> None:
+        # 跳转目标路由不到，改写的不是签发 code 的那次：签发指纹不在改写集合里。
+        oauth = _oauth_context(
+            issuer_fp=_secret_fingerprint("browser-challenge"),
+            rewritten_fps={_secret_fingerprint("other-challenge")},
+        )
+
+        self.assertFalse(_code_is_bound_to_our_challenge(oauth))
+        self.assertFalse(_code_is_bound_to_our_challenge(_oauth_context()))
+
+    async def test_browser_verifier_is_matched_against_the_issuer_challenge_only(self) -> None:
+        # 存储里可能同时躺着两条 challenge（我们改写前后的），只有签发 code 的那条算数。
+        issuer_verifier = "issuer-verifier-" + "a" * 40
+        other_verifier = "other-verifier-" + "b" * 40
+        oauth = _oauth_context(
+            challenges=[code_challenge_for(other_verifier), code_challenge_for(issuer_verifier)],
+            issuer_fp=_secret_fingerprint(code_challenge_for(issuer_verifier)),
+        )
+
+        with patch(
+            "services.register.playwright_register._browser_storage_snapshot",
+            AsyncMock(return_value=(_verifier_candidates([issuer_verifier, other_verifier]), "")),
+        ):
+            from services.register.playwright_register import _resolve_browser_verifier
+
+            await _resolve_browser_verifier(MagicMock(), oauth, lambda _: None, stage="兑换前")
+
+        self.assertEqual(oauth["verifier"], issuer_verifier)
+        self.assertEqual(oauth["verifier_source"], "浏览器")
+
+    async def test_browser_verifier_probe_falls_back_to_our_own_when_nothing_matches(self) -> None:
+        oauth = _oauth_context(
+            challenges=[code_challenge_for("browser-verifier")],
+            issuer_fp=_secret_fingerprint(code_challenge_for("browser-verifier")),
+        )
+        events: list[str] = []
+
+        with patch(
+            "services.register.playwright_register._browser_storage_snapshot",
+            AsyncMock(return_value=(["unrelated-value-" + "c" * 40], "")),
+        ):
+            from services.register.playwright_register import _resolve_browser_verifier
+
+            await _resolve_browser_verifier(MagicMock(), oauth, events.append, stage="兑换前")
+
+        self.assertEqual(oauth["verifier"], "")
+        self.assertEqual(oauth["verifier_source"], "自带")
+        self.assertTrue(any("没有匹配 challenge 的 verifier" in event for event in events))
+
+    async def test_issuer_fingerprint_is_taken_from_the_unrouted_request(self) -> None:
+        # 跳转目标进不了 handler，只有 page.on("request") 看得到它——签发方的指纹只能从那儿拿，
+        # 顺带还得把它的 client_id 抄下来（上游换过 client 的话，写死那个兑换必然 invalid_grant）。
+        page = FakePage()
+        verifier = "browser-verifier-" + "d" * 40
+        challenge = code_challenge_for(verifier)
+        oauth = _oauth_context()
+        events: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", [], events, oauth)
+
+        page.listeners["request"](
+            SimpleNamespace(
+                url=f"https://auth.openai.com/oauth/authorize"
+                f"?client_id=app_browser&code_challenge={challenge}&code_challenge_method=S256"
+            )
+        )
+
+        # issuer_fp 是抓到 code 那一刻快照的（见 test_captured_code_remembers_the_issuing_challenge），
+        # 但 challenge 与 client_id 必须当场记下——它们来自一条 handler 根本看不到的请求。
+        self.assertEqual(oauth["challenges"], [challenge])
+        self.assertEqual(oauth["client_id"], "app_browser")
+        self.assertEqual(oauth["rewritten_fps"], set())  # 没经过 handler，不算改写
+
+    async def test_our_own_rewritten_challenge_is_not_mistaken_for_the_browser_s(self) -> None:
+        # 改写后的请求也会走 page.on("request")，但那条 challenge 是我们生成的，
+        # 当成「浏览器的」会让兑换去用一份根本不存在的 verifier。
+        page = FakePage()
+        oauth = _oauth_context()
+        await _install_oauth_routes(page, 1, "our-challenge", [], [], oauth)
+
+        page.listeners["request"](
+            SimpleNamespace(
+                url="https://auth.openai.com/oauth/authorize?code_challenge=our-challenge"
+            )
+        )
+
+        self.assertEqual(oauth["issuer_fp"], "")
+        self.assertEqual(oauth["challenges"], [])
+
+    async def test_captured_code_remembers_the_issuing_challenge(self) -> None:
+        page = FakePage()
+        verifier = "browser-verifier-" + "e" * 40
+        challenge = code_challenge_for(verifier)
+        oauth = _oauth_context()
+        captured: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", captured, [], oauth)
+        page.listeners["request"](
+            SimpleNamespace(url=f"https://auth.openai.com/x?code_challenge={challenge}")
+        )
+
+        route = FakeRoute(
+            "https://platform.openai.com/auth/callback?code=one-time-code&state=s",
+            frame=frame_at("https://platform.openai.com/signup"),
+        )
+        await page.routes[OAUTH_ROUTE_PATTERN](route)
+
+        self.assertEqual(captured, ["one-time-code"])
+        self.assertEqual(oauth["issuer_fp"], _secret_fingerprint(challenge))
+
+    async def test_observed_authorize_params_are_used_for_the_exchange(self) -> None:
+        session = MagicMock()
+        page = MagicMock()
+        context = MagicMock()
+        context.cookies = AsyncMock(return_value=[])
+
+        with patch(
+            "services.register.playwright_register.curl_requests.Session", return_value=session
+        ), patch(
+            "services.register.playwright_register.request_platform_oauth_token",
+            return_value={"access_token": "access"},
+        ) as exchange_token:
+            await _exchange_oauth_token_in_browser(
+                page, context, 7, "one-time-code", "browser-verifier", "",
+                client_id="app_browser", redirect_uri="https://platform.openai.com/auth/callback",
+                device_id="dev-1",
+            )
+
+        exchange_token.assert_called_once_with(
+            session,
+            "one-time-code",
+            "browser-verifier",
+            client_id="app_browser",
+            redirect_uri="https://platform.openai.com/auth/callback",
+            device_id="dev-1",
+        )
+
+    async def test_identity_verification_page_is_detected_before_the_timeout(self) -> None:
+        page = MagicMock()
+        page.url = "https://auth.openai.com/verify-your-identity"
+
+        self.assertEqual(await _wait_for_signup_step(page, []), "identity")
+        page.locator.assert_not_called()
+
+    async def test_identity_verification_is_continued_once_then_reported_as_risk_control(self) -> None:
+        button = MagicMock()
+        button.first = button
+        button.wait_for = AsyncMock()
+        button.click = AsyncMock()
+        page = MagicMock()
+        page.url = "https://auth.openai.com/verify-your-identity"
+        page.locator.return_value = button
+
+        await _continue_identity_verification(page, 8)
+        button.click.assert_awaited_once()
+
+        button.wait_for = AsyncMock(side_effect=Exception("no button"))
+        with self.assertRaises(RuntimeError) as raised:
+            await _continue_identity_verification(page, 8)
+        self.assertIn("verify-your-identity", str(raised.exception))
+        self.assertIn("风控", str(raised.exception))
+
+    async def test_identity_gate_does_not_loop_forever_in_the_state_machine(self) -> None:
+        page = SimpleNamespace()
+        with patch(
+            "services.register.playwright_register._wait_for_signup_step",
+            AsyncMock(side_effect=["profile", "identity", "identity"]),
+        ), patch(
+            "services.register.playwright_register._fill_profile", AsyncMock()
+        ), patch(
+            "services.register.playwright_register._continue_identity_verification", AsyncMock()
+        ) as continue_identity:
+            with self.assertRaises(RuntimeError) as raised:
+                await _run_signup_state_machine(
+                    page, 9, "Secret123!", "Test User", "25", {"address": "test@example.com"}, []
+                )
+
+        self.assertIn("verify-your-identity", str(raised.exception))
+        continue_identity.assert_awaited_once()
+
     async def test_signup_flow_requests_are_left_alone(self) -> None:
         page = FakePage()
         await _install_oauth_routes(page, 1, "our-challenge", [])
@@ -687,7 +947,14 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
         session.cookies.set.assert_called_once_with(
             "session-cookie", "cookie-value", domain=".openai.com", path="/", secure=True
         )
-        exchange_token.assert_called_once_with(session, "one-time-code", "code-verifier")
+        exchange_token.assert_called_once_with(
+            session,
+            "one-time-code",
+            "code-verifier",
+            client_id=platform_oauth_client_id,
+            redirect_uri=platform_oauth_redirect_uri,
+            device_id="",
+        )
         context.request.post.assert_not_called()
         session.close.assert_called_once()
 
