@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 import { Card, CardContent, statCardClass } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
@@ -12,11 +14,14 @@ export function StatTile({
   value,
   caption,
   tone,
+  action,
 }: {
   label: string;
   value: string;
   caption?: string;
   tone: string;
+  /** 卡片右上角的操作区（比如只刷新这一张卡的按钮）。 */
+  action?: ReactNode;
 }) {
   return (
     <Card className={statCardClass}>
@@ -24,6 +29,7 @@ export function StatTile({
         <div className="flex items-center gap-2 text-xs font-medium text-neutral-500 dark:text-neutral-400">
           <span className={cn("size-2 rounded-full", tone)} />
           {label}
+          {action ? <div className="ml-auto">{action}</div> : null}
         </div>
         <div className="mt-3 text-3xl leading-none font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
           {value}

@@ -81,6 +81,34 @@ class AccountCapabilityTests(unittest.TestCase):
 
             self.assertEqual(items[0]["image_inflight"], 2)
 
+    def test_image_inflight_total_sums_slots_across_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1", "token-2", "token-3"])
+            now = time.monotonic()
+            service._image_inflight["token-1"] = [now, now]
+            service._image_inflight["token-2"] = [now]
+
+            self.assertEqual(service.image_inflight_total(), 3)
+
+            service.release_image_slot("token-1")
+            self.assertEqual(service.image_inflight_total(), 2)
+
+    def test_image_inflight_total_ignores_expired_slots(self) -> None:
+        """租约过期的残留槽位不算「正在请求」，但要记进 _image_expired_slots 让 release 变成空操作。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            now = time.monotonic()
+            service._image_inflight["token-1"] = [now - 10_000, now]
+
+            self.assertEqual(service.image_inflight_total(), 1)
+            self.assertEqual(service._image_expired_slots["token-1"], 1)
+
+            service.release_image_slot("token-1")
+            # 这次 release 抵消的是那个过期槽位，真正在跑的那个不能被顺手放掉。
+            self.assertEqual(service.image_inflight_total(), 1)
+
     def test_malformed_numeric_account_fields_are_normalized(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))

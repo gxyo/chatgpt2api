@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
+from services.account_service import account_service
 from services.config import config
 from services.image_service import (
     delete_images,
@@ -176,6 +177,15 @@ def create_router(app_version: str) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
+    @router.get("/api/stats/inflight")
+    async def get_inflight_stats(authorization: str | None = Header(default=None)):
+        """号池当前在途的生图请求数，供统计页「当前请求数」卡片单独刷新。
+
+        只查内存态计数，不读盘，所以可以随便点刷新。
+        """
+        require_admin(authorization)
+        return {"count": account_service.image_inflight_total()}
+
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -217,8 +227,7 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/health", response_model=None)
     async def health_dashboard(format: str = Query(default="html")):
-        from services.account_service import account_service as acct_svc
-        stats = acct_svc.get_stats()
+        stats = account_service.get_stats()
         storage = config.get_storage_backend()
         storage_health = storage.health_check()
         healthy = stats["active"] > 0 or stats["unlimited_quota_count"] > 0

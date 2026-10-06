@@ -11,7 +11,7 @@ import { WaveChart } from "@/components/wave-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { fetchImageStats, type ImageStatsResponse } from "@/lib/api";
+import { fetchImageStats, fetchInflightStats, type ImageStatsResponse } from "@/lib/api";
 import { getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -20,6 +20,7 @@ const REQUESTS_DOT = "bg-[#2a78d6] dark:bg-[#3987e5]";
 const SUCCESS_DOT = "bg-[#2a78d6]/50 dark:bg-[#3987e5]/50";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
 const NEUTRAL_DOT = "bg-neutral-300 dark:bg-neutral-600";
+const LIVE_DOT = "bg-[#2fa96b] dark:bg-[#3fc07f]";
 
 // days=0 表示不按天数取区间，交给后端按已有记录算「全部」。
 const PRESETS = [
@@ -50,6 +51,10 @@ function StatsContent() {
   const [preset, setPreset] = useState<PresetKey | null>("today");
   const [data, setData] = useState<ImageStatsResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  // 「当前请求数」是实时值，跟日期筛选无关，所以自己一份状态、自己一个刷新按钮。
+  const [inflight, setInflight] = useState<number | null>(null);
+  const [isInflightLoading, setIsInflightLoading] = useState(false);
+  const [inflightUpdatedAt, setInflightUpdatedAt] = useState("");
 
   const loadStats = async (nextPreset = preset, start = startDate, end = endDate) => {
     setIsLoading(true);
@@ -64,11 +69,30 @@ function StatsContent() {
     }
   };
 
+  const loadInflight = async () => {
+    setIsInflightLoading(true);
+    try {
+      const result = await fetchInflightStats();
+      setInflight(result.count);
+      setInflightUpdatedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "获取当前请求数失败");
+    } finally {
+      setIsInflightLoading(false);
+    }
+  };
+
   useEffect(() => {
     void loadStats(preset, startDate, endDate);
     // 与 logs / image-manager 页面一致：筛选条件变化即重新拉取。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preset, startDate, endDate]);
+
+  useEffect(() => {
+    void loadInflight();
+    // 只在进入页面时拉一次，之后靠卡片右上角的按钮手动刷新。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const applyPreset = (key: PresetKey, days: number) => {
     if (key === "all") {
@@ -141,7 +165,11 @@ function StatsContent() {
           </Button>
           <Button
             className="h-10 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800"
-            onClick={() => void loadStats()}
+            onClick={() => {
+              // 「查询」= 把这一页的数据都重拉一遍，当前请求数也顺带刷掉。
+              void loadStats();
+              void loadInflight();
+            }}
             disabled={isLoading}
           >
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
@@ -150,7 +178,7 @@ function StatsContent() {
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
         <StatTile
           label="请求数"
           value={String(totals?.requests ?? 0)}
@@ -174,6 +202,24 @@ function StatsContent() {
           value={totals ? formatRate(totals.success_rate) : "-"}
           caption={`平均耗时 ${formatDuration(totals?.avg_duration_ms ?? 0)}`}
           tone={NEUTRAL_DOT}
+        />
+        <StatTile
+          label="当前请求数"
+          value={inflight === null ? "-" : String(inflight)}
+          caption={inflightUpdatedAt ? `更新于 ${inflightUpdatedAt}` : "点右上角刷新"}
+          tone={LIVE_DOT}
+          action={
+            <button
+              type="button"
+              title="刷新当前请求数"
+              aria-label="刷新当前请求数"
+              className="-my-1 rounded-md p-1 text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-700 disabled:opacity-50 dark:text-neutral-500 dark:hover:bg-white/10 dark:hover:text-neutral-100"
+              disabled={isInflightLoading}
+              onClick={() => void loadInflight()}
+            >
+              <RefreshCw className={cn("size-3.5", isInflightLoading && "animate-spin")} />
+            </button>
+          }
         />
       </div>
 
@@ -223,7 +269,10 @@ function StatsContent() {
         <Button
           variant="ghost"
           className="h-8 rounded-lg px-3 text-neutral-500"
-          onClick={() => void loadStats()}
+          onClick={() => {
+            void loadStats();
+            void loadInflight();
+          }}
           disabled={isLoading}
         >
           <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />

@@ -605,6 +605,16 @@ export async function fetchImageStats(filters: { start_date?: string; end_date?:
   return httpRequest<ImageStatsResponse>(`/api/stats/images${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
+export type InflightStatsResponse = {
+  /** 号池当前在途的生图请求数（正在生成、尚未结束的图片数）。 */
+  count: number;
+};
+
+/** 只读内存态计数，统计页的「当前请求数」卡片自己刷新自己，不跟着日期筛选走。 */
+export async function fetchInflightStats() {
+  return httpRequest<InflightStatsResponse>("/api/stats/inflight");
+}
+
 /** 注册结果的波形点，字段形状与 ImageStatsPoint 一致，波形图组件直接复用。 */
 export type RegisterStatsPoint = ImageStatsPoint;
 

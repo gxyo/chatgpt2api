@@ -1231,6 +1231,16 @@ class AccountService:
             token = self._resolve_access_token_locked(access_token)
             return len(self._image_inflight.get(token, []))
 
+    def image_inflight_total(self) -> int:
+        """号池当前在途的生图请求总数，统计页「当前请求数」卡片用。
+
+        先剪一遍租约过期的槽位：残留的槽位要等下一次选号或 release 才会被清掉，
+        不剪的话统计页会把早就超时、只是还没走到 release 的陈年槽位也算成「正在请求」。
+        """
+        with self._image_slot_condition:
+            self._prune_expired_image_slots_locked()
+            return sum(len(slots) for slots in self._image_inflight.values())
+
     def image_handshake_diagnostics(self, access_token: str) -> dict[str, Any]:
         """某账号最近的握手排队情况，仅用于日志排错。"""
         if not access_token:
