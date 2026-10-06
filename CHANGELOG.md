@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.3 - 2026-10-06
+
++ [修复] 修复生图失败日志里的现场是「上一次尝试」的问题：诊断只在大异常分支里刷新，凡是最终错误来自轮询超时、请求 deadline、选号失败这些分支的，导出的 `image_diagnostics` 都停留在更早的一次尝试上——`detail.account_email` 和 `image_diagnostics.account_email` 常常是两个不同的账号，等于拿另一条请求的现场在排查。现在快照挂在每次尝试的 `finally` 上，任何出口都会刷新，顶层账号也改成取本次尝试的账号。
++ [新增] 生图失败日志新增**尝试轨迹** `attempts` / `attempts_summary`（一行看完）：第几次尝试用的哪个号、结局是什么（`success` / `poll_timeout` / `mainline_rejected` / `transient_upstream` / `content_policy` / `account_select_failed` …）、这次花了多少毫秒、同账号并发几条。选号失败也占一条记录——线上「轮询超时之后再也选不到号」最后报的也是超时文案，没有这一条就分不清是上游慢还是号池空了。
++ [新增] 生图失败日志新增**阶段耗时** `phases` / `phase_<阶段>_ms`：参考图上传、预热、握手排队、主链路 SSE、轮询、下载各自用掉多少毫秒，直接回答「这条请求的时间到底花在哪一步、还剩多少预算给轮询」。最后一段按「到失败那一刻」算，所以卡在中间的那一段（最常见的轮询超时，压根走不到下一个打点）也会如实报出来，不会显示成 0。轮询现场还单独记 `poll_reason`（`budget_exhausted` / `fast_fail_upstream_status` / `request_deadline`）、轮询次数、最后一次上游状态码、是否因请求级 deadline 被截短。
++ [新增] 生图失败日志新增**号池现场** `pool_ready` / `pool_available` / `pool_inflight_total` / `pool_max_concurrency`，以及 conduit 握手的粘性结果 `conduit_acquired`（拿到过就是 true，不会因为主链路跑完正常释放而被抹掉，以前只记当前锁状态、事后看永远是 false，没法当证据）。
++ [新增] 图生图请求的入参补上参考图信息：`input_images` / `input_images_bytes` / `input_masks` / `input_masks_bytes`（只数张数和字节数，图片内容一律不进日志），失败时用来确认「是不是几 MB 的大图在上传阶段就把请求预算耗光了」。
++ [新增] 超分（LANCZOS 放大）新增一条 `image_upscale_done` 日志：原图尺寸 → 目标尺寸、等锁排队毫秒数、超分耗时与输出字节数。全部超分是串行的，等锁久说明同时在超分的请求多，这段等待也是用户实打实等掉的时间。
+
 ## 2.0.2 - 2026-10-06
 
 + [修复] 大幅修复注册成功率：OAuth 兑换一直 `invalid_grant`，是因为**我们改写的 PKCE challenge 常常根本没生效**。Playwright 的路由只对请求链的第一个 URL 回调路由，跳转目标不回调，实测跨域 302 的目标连 route 都进不来（本地 probe 复现：A 302 到 B，B 只看到原始 challenge）。浏览器发起的 authorize 一旦是被跳转带过去的，我们改写的那次就不是真正签发 code 的那次，code 仍绑在浏览器自己那份 verifier 上，拿我们的 verifier 去换必然 400。现在改为**按「code 是谁签发的」决定用谁的 verifier**：`page.on("request")` 能看到包括路由不到的那几跳在内的所有请求，把最后一条带 challenge 的请求当作签发方，在抓到 code 的那一刻快照下来；签发方正是我们改写成功的那次 → 用自带 verifier（改写生效，`改写生效=是`）；不是（路由不到的跳转，绝大多数线上失败就是这种）→ 兑换前按 S256 反查浏览器自己留存的 verifier：此刻页面正停在 callback（platform.openai.com 源）、上一步被我们替换成了桩页面，SPA 的 sessionStorage/localStorage 里那份 verifier 还在，凡是「算出来等于签发那条 challenge」的明文就是真的，直接拿它兑换（`verifier 来源=浏览器`）。反查只认 S256 反算不认「长得像」，否则会把存储里那条 challenge 自己当成 verifier 用（两者在 transaction 对象里挨着，明文匹配会误中）。

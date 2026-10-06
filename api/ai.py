@@ -9,7 +9,7 @@ from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
-from services.log_service import LoggedCall, image_request_detail
+from services.log_service import LoggedCall, image_input_detail, image_request_detail
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -118,6 +118,10 @@ def create_router() -> APIRouter:
         payload["images"] = await read_image_sources(image_sources)
         if mask_sources:
             payload["mask"] = await read_image_sources(mask_sources)
+        # 参考图是上面这行读完才拿到字节的，日志对象的入参得在这儿补齐：
+        # 失败时能看出这次传了几张、多大，判断上传是否吃掉了请求预算。
+        if call.extra_detail is not None:
+            call.extra_detail.update(image_input_detail(payload))
         payload["base_url"] = resolve_image_base_url(request)
         return await call.run(openai_v1_image_edit.handle, payload)
 

@@ -286,17 +286,59 @@ def merge_extra_detail(detail: dict[str, Any], extra_detail: dict[str, Any] | No
         detail.setdefault(key, value)
 
 
+def _image_entries_bytes(entries: object) -> tuple[int, int]:
+    """数一下参考图/蒙版有几张、一共多少字节。
+
+    只数个数和体积，图片内容本身绝不进日志：单张就可能几 MB，落盘会把
+    logs.jsonl 撑爆，而且 base64 里也可能带着用户隐私。
+    """
+    count = 0
+    total = 0
+    if isinstance(entries, (list, tuple)):
+        for entry in entries:
+            data: object = entry
+            # 图片元组 (bytes, filename, mime) 和裸 bytes 两种形态都支持。
+            if isinstance(entry, (list, tuple)) and entry:
+                data = entry[0]
+            if isinstance(data, (bytes, bytearray)):
+                count += 1
+                total += len(data)
+    return count, total
+
+
+def image_input_detail(payload: dict[str, Any]) -> dict[str, Any]:
+    """图生图的输入图片信息：几张参考图、多大，有没有蒙版。
+
+    失败率高时最想确认的一件事：是不是客户端传了几 MB 的大图，上传阶段就把
+    请求预算吃光了，轮到轮询时已经没时间了。
+    """
+    detail: dict[str, Any] = {}
+    count, total = _image_entries_bytes(payload.get("images"))
+    if count:
+        detail["input_images"] = count
+        detail["input_images_bytes"] = total
+    mask_count, mask_total = _image_entries_bytes(payload.get("mask"))
+    if mask_count:
+        detail["input_masks"] = mask_count
+        detail["input_masks_bytes"] = mask_total
+    return detail
+
+
 def image_request_detail(payload: dict[str, Any]) -> dict[str, Any]:
     """生图请求的入参，落进调用日志，方便事后核对客户端到底要了多大的图。
 
     两条生图路径（/v1/images/* 和 /api/image-tasks/*）共用，免得日志字段对不齐。
+    /v1/images/edits 路由在读取参考图之前就建好了日志对象，那里还要再补一次
+    image_input_detail（参考图是读完之后才有字节数可数的）。
     """
-    return {
+    detail = {
         "size": payload.get("size"),
         "n": payload.get("n"),
         "quality": payload.get("quality"),
         "response_format": payload.get("response_format"),
     }
+    detail.update(image_input_detail(payload))
+    return detail
 
 
 def _request_excerpt(text: object, limit: int = 1000) -> str:

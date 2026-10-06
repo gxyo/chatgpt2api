@@ -58,6 +58,38 @@ class ImageMainlineStateError(RuntimeError):
     pass
 
 
+# `_poll_image_results` 挂在 ImagePollTimeoutError 上的现场字段。轮询超时和提前超时
+# 都走这一套，日志里靠它们区分「预算跑完了」和「上游一直在 5xx」。
+POLL_DIAGNOSTIC_KEYS = (
+    "poll_reason",
+    "poll_attempts",
+    "poll_elapsed_secs",
+    "poll_timeout_secs",
+    "poll_requested_timeout_secs",
+    "poll_budget_clamped_by_deadline",
+    "poll_interval_secs",
+    "poll_initial_wait_secs",
+    "poll_file_ids",
+    "poll_sediment_ids",
+    "poll_fast_fail_status",
+    "poll_consecutive_status",
+    "poll_last_upstream_status",
+    "poll_last_task_error",
+    "upstream_status_code",
+)
+
+
+def poll_timeout_diagnostics(exc: BaseException) -> Dict[str, Any]:
+    """把轮询超时异常上挂的现场整理成可以直接写进日志的扁平字段。"""
+    result: Dict[str, Any] = {}
+    for key in POLL_DIAGNOSTIC_KEYS:
+        value = getattr(exc, key, None)
+        if value is None or value == "":
+            continue
+        result[key] = value
+    return result
+
+
 def is_skipped_mainline_error(exc: BaseException) -> bool:
     """Return whether ChatGPT rejected a stale/consumed image mainline state.
 
@@ -245,7 +277,18 @@ class OpenAIBackendAPI:
         self.trace_id = ""
         # 本实例是否持有该账号的 conduit 窗口（prepare→mainline），以及等锁耗时。
         self.conduit_window_held = False
+        # 这次尝试到底有没有抢到过窗口。粘性：主链路跑完就会正常释放，
+        # window_held 那时已经是 false，排查 skipped_mainline 只能看这个。
+        self.conduit_acquired: bool | None = None
         self.conduit_wait_ms = 0
+        # 生图链路各阶段「首次到达」的时刻。失败诊断里折算成阶段耗时，
+        # 用来回答「这条请求的时间到底花在哪一步、还剩多少预算给轮询」。
+        self.image_phases: Dict[str, float] = {}
+        # 真正发上去的 prompt。调用方传进来的 prompt 会被 build_image_prompt 追加
+        # 「输出图片尺寸为 …」这类提示，日志里只记原始 prompt 就对不上现场了。
+        self.image_prompt_sent = ""
+        # 同一个账号上主链路（prepare→POST）因 conduit 失效重试过几次。
+        self.image_mainline_retries = 0
         self.session = requests.Session(**proxy_settings.build_session_kwargs(
             account=self.account,
             impersonate=self.fp["impersonate"],
@@ -315,7 +358,10 @@ class OpenAIBackendAPI:
             return None
         remaining = float(deadline) - time.monotonic()
         if remaining <= 0:
-            raise ImageRequestTimeoutError("image request deadline exceeded")
+            # 打个标记：这一路超时和「轮询把预算跑完」不是一回事，日志里要能分开。
+            exc = ImageRequestTimeoutError("image request deadline exceeded")
+            setattr(exc, "poll_reason", "request_deadline")
+            raise exc
         return remaining
 
     def _timeout_with_deadline(self, timeout: object = None) -> float:
@@ -2371,9 +2417,13 @@ class OpenAIBackendAPI:
           (capped at 16s, +jitter) honoring Retry-After when present.
         - All sleeps stay within timeout_secs; on exhaustion raises ImagePollTimeoutError.
         """
+        requested_timeout_secs = float(timeout_secs)
         remaining = self._remaining_deadline_secs()
         if remaining is not None:
             timeout_secs = min(timeout_secs, remaining)
+        # 轮询真正能用的预算被请求级 deadline 削过没有：被削了说明时间是被前面
+        # 的「上传 + 握手 + 主链路 SSE」吃掉的，不是上游出图慢。
+        budget_clamped = float(timeout_secs) < requested_timeout_secs
         start = time.time()
         attempt = 0
         interval = float(config.image_poll_interval_secs)
@@ -2427,6 +2477,35 @@ class OpenAIBackendAPI:
             return True
 
         last_task_error = ""
+
+        def _timeout_context(reason: str, **extra: Any) -> Dict[str, Any]:
+            """轮询超时（含提前超时）那一刻的现场。
+
+            上游 5xx 打不动就「提前超时」和「老老实实把预算跑完」是两种完全不同的
+            故障，返回给用户的文案却一模一样，所以这些数必须落进日志。
+            """
+            context: Dict[str, Any] = {
+                "poll_reason": reason,
+                "poll_attempts": attempt,
+                "poll_elapsed_secs": round(time.time() - start, 1),
+                "poll_timeout_secs": round(float(timeout_secs), 1),
+                "poll_requested_timeout_secs": round(requested_timeout_secs, 1),
+                "poll_budget_clamped_by_deadline": budget_clamped,
+                "poll_interval_secs": interval,
+                "poll_initial_wait_secs": initial_wait,
+                "poll_file_ids": len(file_ids),
+                "poll_sediment_ids": len(sediment_ids),
+            }
+            if last_task_error:
+                context["poll_last_task_error"] = str(last_task_error)[:200]
+            context.update(extra)
+            return context
+
+        def _with_timeout_context(exc: BaseException, reason: str, **extra: Any) -> BaseException:
+            for key, value in _timeout_context(reason, **extra).items():
+                setattr(exc, key, value)
+            return exc
+
         while _remaining() > 0:
             attempt += 1
             # 在每次轮询时，检查 /backend-api/tasks/ 是否有错误（仅记录，不中断）
@@ -2480,7 +2559,12 @@ class OpenAIBackendAPI:
                         )
                         setattr(fast_exc, "conversation_id", conversation_id or "")
                         setattr(fast_exc, "upstream_status_code", exc.status_code)
-                        raise fast_exc from exc
+                        raise _with_timeout_context(
+                            fast_exc,
+                            "fast_fail_upstream_status",
+                            poll_fast_fail_status=exc.status_code,
+                            poll_consecutive_status=consecutive_upstream_status,
+                        ) from exc
                     if _retry_sleep("upstream_status", exc.status_code, None, exc.retry_after):
                         continue
                     break
@@ -2546,6 +2630,12 @@ class OpenAIBackendAPI:
         if last_task_error:
             setattr(exc, "task_error", last_task_error)
         setattr(exc, "conversation_id", conversation_id or "")
+        _with_timeout_context(
+            exc,
+            "budget_exhausted",
+            poll_last_upstream_status=last_upstream_status_code,
+            poll_consecutive_status=consecutive_upstream_status,
+        )
         raise exc
 
     def _get_file_download_url(self, file_id: str) -> str:
@@ -2828,11 +2918,45 @@ class OpenAIBackendAPI:
 
     def _report_progress(self, step: str) -> None:
         """Report progress step to the callback if set."""
+        self.mark_image_phase(step)
         if self.progress_callback:
             try:
                 self.progress_callback(step)
             except Exception:
                 pass
+
+    def mark_image_phase(self, name: str) -> None:
+        """记录生图链路某阶段首次到达的时刻，只用于失败诊断，不影响控制流。"""
+        if name:
+            self.image_phases.setdefault(name, time.monotonic())
+
+    def image_phase_diagnostics(self) -> Dict[str, Any]:
+        """把阶段时间戳折算成相邻两阶段之间的毫秒耗时，按实际先后顺序返回。
+
+        每个 ``phase_<name>_ms`` 表示「从该阶段标记到下一个阶段标记」之间的耗时，
+        例如 ``phase_uploading_ms`` 是上传参考图用掉的时间、``phase_stream_done_ms``
+        是主链路 SSE 读完到开始轮询之间的间隔。
+
+        **最后一段算到「现在」**：失败正好落在某一段中间时（最常见的就是轮询超时，
+        压根走不到下一个打点），只按打点之间的差算会把卡住的那一段整个漏掉，
+        报出来的耗时全是 0，等于没记。这个方法只在失败收尾时调用，所以「现在」
+        就是这次尝试结束的时刻。
+        """
+        if not self.image_phases:
+            return {}
+        ordered = sorted(self.image_phases.items(), key=lambda item: item[1])
+        result: Dict[str, Any] = {"phases": [name for name, _ in ordered]}
+        previous = ordered[0][1]
+        for name, at in ordered:
+            result[f"phase_{name}_ms"] = int(max(0.0, at - previous) * 1000)
+            previous = at
+        result[f"phase_{ordered[-1][0]}_ms"] = int(max(0.0, time.monotonic() - ordered[-1][1]) * 1000)
+        result["phase_total_ms"] = int(max(0.0, time.monotonic() - ordered[0][1]) * 1000)
+        if self.image_prompt_sent:
+            result["prompt_sent_chars"] = len(self.image_prompt_sent)
+        if self.image_mainline_retries:
+            result["mainline_retries"] = self.image_mainline_retries
+        return result
 
     def _acquire_conduit_window(self) -> bool:
         """占用本账号的 conduit 握手窗口（prepare → mainline）。
@@ -2850,6 +2974,7 @@ class OpenAIBackendAPI:
         held = account_service.acquire_image_handshake(self.access_token, timeout)
         self.conduit_wait_ms = int((time.monotonic() - started) * 1000)
         self.conduit_window_held = bool(held)
+        self.conduit_acquired = bool(held)
         if not held:
             logger.warning({
                 "event": "conduit_window_timeout",
@@ -2886,6 +3011,8 @@ class OpenAIBackendAPI:
     ) -> Iterator[str]:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
+        # 这里拿到的已经是 build_image_prompt 处理过的 prompt（带尺寸/质量提示）。
+        self.image_prompt_sent = prompt
         self._report_progress("uploading")
         references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
         self._report_progress("bootstrapping")
@@ -2930,6 +3057,7 @@ class OpenAIBackendAPI:
                     recoverable = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
                     if not recoverable or attempt >= max_mainline_retries:
                         raise
+                    self.image_mainline_retries = attempt
                     upstream_model, thinking_effort = self._image_model_settings(model)
                     inflight = account_service.image_inflight_count(self.access_token)
                     logger.warning({
@@ -2964,6 +3092,9 @@ class OpenAIBackendAPI:
         try:
             yield from iter_sse_payloads(response)
         finally:
+            # 主链路 SSE 读到这儿结束，后面就是轮询了：两段耗时分开记，才看得出
+            # 时间是被「上游出图」吃掉的还是被「轮询」吃掉的。
+            self.mark_image_phase("stream_done")
             response.close()
 
     def _bootstrap(self) -> None:

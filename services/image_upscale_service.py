@@ -3,10 +3,12 @@ from __future__ import annotations
 import io
 import re
 import threading
+import time
 
 from PIL import Image, ImageFilter
 
 from services.config import config
+from utils.log import logger
 
 # 接受 2048x2048 / 2048×2048 两种分隔符
 _SIZE_RE = re.compile(r"^\s*(\d+)\s*[x×]\s*(\d+)\s*$", re.IGNORECASE)
@@ -52,7 +54,12 @@ def upscale_png(image_data: bytes, target: int | None) -> bytes:
                 return image_data
             scale = target / longest
             size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            # 排队等锁的时间单独记：全部超分是串行的，等锁久说明同时在超分的请求多，
+            # 这段等待也是用户实打实等掉的时间（按任务端点调用时尤其明显）。
+            queued_at = time.monotonic()
             with _UPSCALE_LOCK:
+                lock_wait_ms = int((time.monotonic() - queued_at) * 1000)
+                started = time.monotonic()
                 # P 模式要先转 RGB；RGBA 保留透明度，别把带 alpha 的图压成实底。
                 image = source.copy() if source.mode in {"RGB", "RGBA"} else source.convert("RGB")
                 image = image.resize(size, Image.Resampling.LANCZOS)
@@ -65,6 +72,17 @@ def upscale_png(image_data: bytes, target: int | None) -> bytes:
                 )
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
-                return buffer.getvalue()
+                result = buffer.getvalue()
+                logger.info({
+                    "event": "image_upscale_done",
+                    "from_size": f"{width}x{height}",
+                    "to_size": f"{size[0]}x{size[1]}",
+                    "target": target,
+                    "queue_wait_ms": lock_wait_ms,
+                    "upscale_ms": int((time.monotonic() - started) * 1000),
+                    "source_bytes": len(image_data),
+                    "result_bytes": len(result),
+                })
+                return result
     except Exception:
         return image_data

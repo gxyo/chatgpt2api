@@ -1298,6 +1298,34 @@ class AccountService:
                 excluded_tokens, plan_type, source_type, plan_types,
             ))
 
+    def image_pool_diagnostics(
+            self,
+            excluded_tokens: set[str] | None = None,
+            plan_type: str | None = None,
+            source_type: str | None = None,
+            plan_types: set[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
+        """失败那一刻的号池现场（只读，不占槽位），只给日志用。
+
+        「上游慢」和「号池干了」在调用日志里长得一模一样——都是「超时」。这几个数
+        用来区分：ready=0/quota 都没了说明是没号可换，ready>0 但 available=0 说明
+        是并发把槽位占满（image_account_concurrency 太挤），两者都要另开方向排查。
+        """
+        try:
+            with self._image_slot_condition:
+                self._prune_expired_image_slots_locked()
+                ready = self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+                available = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+                inflight_total = sum(len(slots) for slots in self._image_inflight.values())
+            return {
+                "pool_ready": len(ready),
+                "pool_available": len(available),
+                "pool_inflight_total": inflight_total,
+                "pool_max_concurrency": max(1, int(config.image_account_concurrency or 1)),
+            }
+        except Exception:
+            return {}
+
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
         excluded = set(excluded_tokens or set())
         with self._lock:

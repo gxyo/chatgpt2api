@@ -20,6 +20,7 @@ from services.openai_backend_api import (
     ImagePollTimeoutError,
     OpenAIBackendAPI,
     is_skipped_mainline_error,
+    poll_timeout_diagnostics,
 )
 from utils.helper import (
     CHANNEL_BUSY_MESSAGE,
@@ -896,6 +897,9 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
+    # 阶段打点：失败时 backend.image_phase_diagnostics() 会折算成各阶段耗时，
+    # 用来回答「这条请求的时间到底花在握手、主链路还是轮询上」。
+    _mark_phase(backend, "conversation_start")
     for event in conversation_events(
             backend,
             prompt=request.prompt,
@@ -926,6 +930,7 @@ def stream_image_outputs(
                 upstream_event_type=raw_type,
             )
 
+    _mark_phase(backend, "conversation_done")
     conversation_id = str(last.get("conversation_id") or "")
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
@@ -1021,6 +1026,7 @@ def stream_image_outputs(
             "poll_timeout_secs": poll_timeout,
         })
 
+    _mark_phase(backend, "poll_start")
     try:
         image_urls = backend.resolve_conversation_image_urls(
             conversation_id, file_ids, sediment_ids, poll_timeout_secs=poll_timeout,
@@ -1050,13 +1056,16 @@ def stream_image_outputs(
         else:
             raise
 
+    _mark_phase(backend, "poll_done")
     if image_urls:
         if request.progress_callback:
             request.progress_callback("receiving_image")
+        _mark_phase(backend, "download_start")
         image_items = [
             {"b64_json": base64.b64encode(image_data).decode("ascii")}
             for image_data in backend.download_image_bytes(image_urls)
         ]
+        _mark_phase(backend, "download_done")
         data = format_image_result(
             image_items,
             request.prompt,
@@ -1344,6 +1353,139 @@ def stream_codex_image_outputs(
     raise ImageGenerationError("No image result found in response")
 
 
+def _mark_phase(backend: Any, name: str) -> None:
+    """给后台记一个阶段时间点。测试里的假 backend 没有这个方法，静默跳过。"""
+    marker = getattr(backend, "mark_image_phase", None)
+    if not callable(marker):
+        return
+    try:
+        marker(name)
+    except Exception:
+        pass
+
+
+def _conduit_state(backend: Any) -> dict[str, Any]:
+    """这次尝试的 conduit 握手窗口现场：窗口拿到没有、等了多少毫秒。
+
+    这是排查 ``skipped_mainline`` 最关键的一组数——拿不到窗口还硬发主链路，
+    上游就会把这条 turn 判成 skipped_mainline。
+    """
+    if backend is None:
+        return {}
+    state: dict[str, Any] = {}
+    # acquired 是粘性的（拿到就记 true，不会因为正常释放被抹掉）；
+    # window_held 是当前锁状态，主链路跑完后按设计就是 false，别拿它当证据。
+    acquired = getattr(backend, "conduit_acquired", None)
+    if acquired is not None:
+        state["conduit_acquired"] = bool(acquired)
+    held = getattr(backend, "conduit_window_held", None)
+    if held is not None:
+        state["conduit_window_held"] = bool(held)
+    wait_ms = getattr(backend, "conduit_wait_ms", None)
+    if isinstance(wait_ms, int):
+        state["conduit_wait_ms"] = wait_ms
+    retries = getattr(backend, "image_mainline_retries", 0)
+    if retries:
+        state["mainline_retries"] = retries
+    return state
+
+
+def _pool_diagnostics(attempted_tokens: set[str], select_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """失败那一刻的号池现场（几个号可用、几个在忙）。测试桩没有这个方法，跳过。
+
+    专门用来区分「上游慢」和「号池空了」：轮询超时之后选不到号，最终报的也是超时，
+    光看错误文案分不出来。
+    """
+    getter = getattr(account_service, "image_pool_diagnostics", None)
+    if not callable(getter):
+        return {}
+    try:
+        pool = getter(attempted_tokens, **select_kwargs)
+    except Exception:
+        return {}
+    return pool if isinstance(pool, dict) else {}
+
+
+def _image_phases(backend: Any) -> dict[str, Any]:
+    """本次尝试各阶段的耗时（上传/握手/主链路/轮询），失败时用来定位卡点。
+
+    假 backend（测试桩）没有这个方法，静默跳过。
+    """
+    if backend is None:
+        return {}
+    getter = getattr(backend, "image_phase_diagnostics", None)
+    if not callable(getter):
+        return {}
+    try:
+        phases = getter()
+    except Exception:
+        return {}
+    return phases if isinstance(phases, dict) else {}
+
+
+def _start_image_attempt(diagnostics: dict[str, Any], token: str, account_email: str) -> dict[str, Any]:
+    """开一条尝试记录：这次用的是哪个号、同账号在途多少条。
+
+    token 可以为空——「一个号都没选出来」本身也是一次尝试，也得进轨迹。
+    """
+    inflight = account_service.image_inflight_count(token) if token else 0
+    attempt: dict[str, Any] = {
+        "n": len(diagnostics.get("attempts") or []) + 1,
+        "account_email": account_email,
+        "request_token": anonymize_token(token) if token else "",
+        "image_inflight": inflight,
+        "image_peers": max(0, inflight - 1),
+        "started_ts": round(time.time(), 2),
+    }
+    diagnostics.setdefault("attempts", []).append(attempt)
+    return attempt
+
+
+def _finish_image_attempt(attempt: dict[str, Any] | None, outcome: str, error: str = "", **extra: Any) -> None:
+    """给当前尝试收尾：结局、耗时、附加现场。同一个字典只写一次。"""
+    if not attempt:
+        return
+    attempt["outcome"] = outcome or "unknown"
+    started = float(attempt.get("started_ts") or 0.0)
+    if started:
+        attempt["dur_ms"] = int(max(0.0, time.time() - started) * 1000)
+    if error:
+        attempt["error"] = str(error)[:200]
+    attempt.update(extra)
+
+
+def _attempts_summary(attempts: list[dict[str, Any]]) -> str:
+    """把尝试轨迹压成一行：试了几个号、各自卡在哪一步、分别花了多久。"""
+    parts: list[str] = []
+    for attempt in attempts:
+        bits = [f"#{attempt.get('n')} {attempt.get('account_email') or '?'} {attempt.get('outcome') or 'unknown'}"]
+        marks: list[str] = []
+        for key, label in (
+            ("poll_reason", "poll"),
+            ("poll_attempts", "polls"),
+            ("poll_last_upstream_status", "last_status"),
+            ("mainline_retries", "mainline_retries"),
+            ("image_peers", "peers"),
+        ):
+            if attempt.get(key):
+                marks.append(f"{label}={attempt[key]}")
+        if attempt.get("poll_elapsed_secs"):
+            marks.append(f"poll_elapsed={attempt['poll_elapsed_secs']}s")
+        if attempt.get("conduit_wait_ms"):
+            marks.append(f"conduit_wait={attempt['conduit_wait_ms']}ms")
+        # 抢没抢到 conduit 窗口是 skipped_mainline 的直接证据，单独标一个 short tag。
+        if attempt.get("conduit_acquired") is False:
+            marks.append("conduit=miss")
+        if marks:
+            bits.append("(" + ",".join(marks) + ")")
+        if attempt.get("dur_ms") is not None:
+            bits.append(f"{attempt['dur_ms']}ms")
+        if attempt.get("error"):
+            bits.append(str(attempt["error"])[:80])
+        parts.append(" ".join(bits))
+    return " → ".join(parts)[:600]
+
+
 def _generate_single_image(
         request: ConversationRequest,
         index: int,
@@ -1397,14 +1539,83 @@ def _generate_single_image_attempts(
     rescue_deadline = 0.0
     rescue_attempts = 0
 
+    # 本次请求拿到的总预算（秒）。生图失败时「预算还剩多少」比「跑了多久」更能说明问题：
+    # 上传 + 握手 + 主链路 SSE 都在这一个预算里扣，扣完轮询就没时间了。
+    request_budget_secs = (
+        max(0.0, float(request.deadline) - time.monotonic()) if request.deadline is not None else None
+    )
+    # 下面这几个在循环里被反复重绑，失败快照（finally 里那个闭包）读的是当前值。
+    backend: OpenAIBackendAPI | None = None
+    select_kwargs: dict[str, Any] = {}
+    token = ""
+    attempt: dict[str, Any] | None = None
+    attempt_outcome = "unknown"
+    attempt_error = ""
+    attempt_extra: dict[str, Any] = {}
+
+    def record_attempt_state() -> None:
+        """把「刚失败/刚结束的是哪一次尝试、卡在哪、号池当时什么状况」写进 diagnostics。
+
+        以前这份现场只在通用异常分支里刷新，最终错误只要来自别的分支（轮询超时、
+        deadline、选号失败），导出的诊断就停留在上一次尝试上——账号邮箱都对不上号。
+        现在挂在 try 的 finally 上，任何出口都会刷新，且带尝试序号。
+        """
+        if attempt_outcome == "success":
+            # 成功路径没有异常带着 diagnostics 出去，这份快照注定被丢掉；
+            # 跳过号池快照（要抢号池锁）省点开销。之后的尝试失败时会重新算。
+            _finish_image_attempt(attempt, attempt_outcome, attempt_error)
+            return
+        conduit = _conduit_state(backend)
+        # 握手/主链路现场同时挂到这一条尝试记录上，尝试轨迹那一行才有东西可写。
+        _finish_image_attempt(attempt, attempt_outcome, attempt_error, **conduit, **attempt_extra)
+        remaining = remaining_image_deadline_secs(request.deadline)
+        inflight = account_service.image_inflight_count(token) if token else 0
+        handshake = account_service.image_handshake_diagnostics(token) if token else {}
+        pool = _pool_diagnostics(attempted_tokens, select_kwargs)
+        diagnostics.update({
+            "trace_id": trace_id,
+            "index": index,
+            # 顶层账号取「本次尝试」的号：以前这里写的是循环变量，导出的现场
+            # 常常是上一次尝试、另一个账号，跟 detail.account_email 对不上。
+            "account_email": (attempt or {}).get("account_email", account_email),
+            "request_token": anonymize_token(token) if token else "",
+            "image_inflight": inflight,
+            "image_peers": max(0, inflight - 1),
+            "rescue": rescue_deadline > 0,
+            "poll_timeout_retries": poll_timeout_retry_count,
+            "attempts": list(diagnostics.get("attempts") or []),
+            "attempts_summary": _attempts_summary(diagnostics.get("attempts") or []),
+            **conduit,
+            **_image_phases(backend),
+            **handshake,
+            **pool,
+        })
+        if request_budget_secs is not None:
+            diagnostics["request_deadline_secs"] = round(request_budget_secs, 1)
+            diagnostics["request_remaining_secs"] = round(remaining, 1) if remaining is not None else None
+            diagnostics["request_deadline_expired"] = remaining == 0.0
+
     while True:
         in_rescue = rescue_deadline > 0
-        ensure_image_deadline(request.deadline)
+        try:
+            ensure_image_deadline(request.deadline)
+        except ImageGenerationError:
+            diagnostics["retry_stopped"] = "request_deadline"
+            raise
         if in_rescue:
             if not transient_rescue_wait(rescue_deadline, rescue_attempts, request.deadline):
+                diagnostics["retry_stopped"] = "rescue_window_exhausted"
                 ensure_image_deadline(request.deadline)
                 raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email)
             rescue_attempts += 1
+        backend = None
+        attempt = None
+        attempt_outcome = "unknown"
+        attempt_error = ""
+        attempt_extra = {}
+        # token 一起清空：选号失败时若留着上一轮的 token，快照会把上一个号的
+        # 并发数/握手状态算到这一次头上。
+        token = ""
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1430,6 +1641,12 @@ def _generate_single_image_attempts(
             if not in_rescue:
                 attempted_tokens.add(token)
         except RuntimeError as exc:
+            # 选号失败也要占一条尝试记录：生产上「轮询超时之后再也选不到号」最后
+            # 报的也是超时文案，轨迹里少了这一条就分不清是上游慢还是号池空了。
+            # 账号留空：这一步压根没选出号，写上一轮的号反而误导。
+            attempt = _start_image_attempt(diagnostics, "", "")
+            attempt_outcome, attempt_error = "account_select_failed", str(exc)
+            record_attempt_state()
             ensure_image_deadline(request.deadline)
             if last_transient_error or is_retriable_upstream_error(exc):
                 if not in_rescue:
@@ -1452,6 +1669,7 @@ def _generate_single_image_attempts(
         returned_result = False
         account = account_service.get_account(token) or {}
         account_email = str(account.get("email") or "").strip()
+        attempt = _start_image_attempt(diagnostics, token, account_email)
         logger.debug({
             "event": "image_account_lookup",
             "trace_id": trace_id,
@@ -1487,11 +1705,13 @@ def _generate_single_image_attempts(
                 outputs.append(output)
             if returned_message:
                 account_service.mark_image_result(token, False)
+                attempt_outcome = "message"
                 return outputs
             if not returned_result:
                 account_service.mark_image_result(token, False)
                 if emitted_for_token:
                     conv_id = outputs[-1].conversation_id if outputs else ""
+                    attempt_outcome, attempt_error = "no_image", "upstream completed without generating images"
                     raise ImageGenerationError(
                         "upstream completed without generating images",
                         status_code=400,
@@ -1500,11 +1720,21 @@ def _generate_single_image_attempts(
                         account_email=account_email,
                         conversation_id=conv_id,
                     )
+                attempt_outcome = "empty_stream"
                 return outputs
             account_service.mark_image_result(token, True)
+            attempt_outcome = "success"
             return outputs
         except ImagePollTimeoutError as exc:
             account_service.mark_image_result(token, False)
+            attempt_outcome, attempt_error = "poll_timeout", str(exc)
+            # 轮询是「预算跑完了」还是「上游一直 5xx 提前超时」，两者文案一样、现场不同。
+            poll_context = poll_timeout_diagnostics(exc)
+            if poll_context:
+                diagnostics.update(poll_context)
+                # 轮询现场挂到本次尝试上（由 finally 里的 record_attempt_state 统一收尾），
+                # 换号重试的话这一段会跟着这次尝试留在轨迹里。
+                attempt_extra.update(poll_context)
             if account_email:
                 setattr(exc, "account_email", account_email)
             # 轮询超时：如果还没有拿到最终消息/图片，只丢弃本账号的进度并换号重试。
@@ -1537,6 +1767,7 @@ def _generate_single_image_attempts(
                 conversation_id=getattr(exc, "conversation_id", ""),
             ) from exc
         except ImageContentPolicyError as exc:
+            attempt_outcome, attempt_error = "content_policy", str(exc)
             account_service.mark_image_result(token, False)
             logger.warning({
                 "event": "image_stream_content_policy_error",
@@ -1555,11 +1786,15 @@ def _generate_single_image_attempts(
                 conversation_id=getattr(exc, "conversation_id", ""),
             ) from exc
         except ImageGenerationError as exc:
+            attempt_outcome, attempt_error = "generation_error", str(exc)
             account_service.mark_image_result(token, False)
             if account_email and not getattr(exc, "account_email", ""):
                 exc.account_email = account_email
             error_text = str(exc)
             if is_skipped_mainline_error(exc):
+                # 上游把这条 turn 判成 skipped_mainline：这个号上的 conduit 状态
+                # 被别的并发请求吃掉了。日志里单独标出来，别和其它 400 混在一起。
+                attempt_outcome = "mainline_rejected"
                 account_service.mark_image_mainline_rejected(token)
             if not emitted_for_token and is_token_auth_error(exc, error_text):
                 try:
@@ -1641,6 +1876,10 @@ def _generate_single_image_attempts(
             # never mark this 400 retryable in the generic same-POST loop.
             mainline_rejected = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
             transient = mainline_rejected or is_retriable_upstream_error(exc)
+            attempt_outcome = "mainline_rejected" if mainline_rejected else (
+                "transient_upstream" if transient else "upstream_error"
+            )
+            attempt_error = str(exc)
             last_error = CHANNEL_BUSY_MESSAGE if transient else str(exc)
             last_transient_error = last_transient_error or transient
             if transient:
@@ -1742,6 +1981,11 @@ def _generate_single_image_attempts(
             if transient:
                 raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email, conversation_id="") from exc
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
+        finally:
+            # 无论这次尝试是成功、重试还是抛错，都在这里把现场落到 diagnostics。
+            # 之前只在大异常分支里刷新，所以导出的 image_diagnostics 经常停留在
+            # 上一次尝试、上一个账号上。
+            record_attempt_state()
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
