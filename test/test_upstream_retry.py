@@ -88,6 +88,7 @@ class FakeAccountService:
         self.image_results: list[tuple[str, bool]] = []
         self.text_used: list[str] = []
         self.selected_image_tokens: list[str] = []
+        self.account_rejected_tokens: list[str] = []
         self.removed_invalid_tokens: list[tuple[str, str]] = []
 
     def get_available_access_token(self, excluded_tokens=None, deadline=None, **kwargs):
@@ -110,6 +111,9 @@ class FakeAccountService:
 
     def mark_image_mainline_rejected(self, access_token: str) -> None:
         return None
+
+    def mark_image_account_rejected(self, access_token: str) -> None:
+        self.account_rejected_tokens.append(access_token)
 
     def get_account(self, access_token: str):
         return {"email": f"{access_token}@example.test"}
@@ -194,14 +198,14 @@ class UpstreamRetryTests(unittest.TestCase):
 
         prepare_payload = api.session.calls[0][2]["json"]
         mainline_payload = api.session.calls[1][2]["json"]
-        self.assertEqual(prepare_payload["model"], "gpt-5-5")
-        self.assertEqual(mainline_payload["model"], "gpt-5-5")
+        # 图片会话一律发 auto，由上游挑当前可用的图片模型：网页从来不发文本模型名。
+        self.assertEqual(prepare_payload["model"], "auto")
+        self.assertEqual(mainline_payload["model"], "auto")
         self.assertNotIn("thinking_effort", prepare_payload)
         self.assertNotIn("thinking_effort", mainline_payload)
-        self.assertNotEqual(prepare_payload["model"], "gpt-5-5-thinking")
-        self.assertNotEqual(mainline_payload["model"], "gpt-5-5-thinking")
 
-    def test_image_handshake_splits_thinking_suffix_in_both_stages(self):
+    def test_image_handshake_ignores_the_text_model_setting_in_both_stages(self):
+        """default_upstream_model_name 是文本模型设置，图片链路不再拿它当图片模型。"""
         api = OpenAIBackendAPI()
         api.session = FakeSession([
             FakeResponse(200, {"conduit_token": "conduit-token"}),
@@ -217,11 +221,53 @@ class UpstreamRetryTests(unittest.TestCase):
             conduit_token = api._prepare_image_conversation("draw a cat", requirements, "gpt-image-2")
             api._start_image_generation("draw a cat", requirements, conduit_token, "gpt-image-2")
 
+        for call in api.session.calls:
+            payload = call[2]["json"]
+            self.assertEqual(payload["model"], "auto")
+            self.assertNotIn("thinking_effort", payload)
+
+    def test_image_handshake_payload_matches_the_2026_10_page_capture(self):
+        """payload 形状要跟网页一致：少一个字段都会被算进可信度评分。"""
+        api = OpenAIBackendAPI()
+        api.session = FakeSession([
+            FakeResponse(200, {"conduit_token": "conduit-token"}),
+            FakeResponse(200),
+        ])
+
+        with mock.patch.dict(backend_config.data, {}, clear=True):
+            requirements = ChatRequirements(token="requirements-token")
+            conduit_token = api._prepare_image_conversation("draw a cat", requirements, "gpt-image-2")
+            api._start_image_generation("draw a cat", requirements, conduit_token, "gpt-image-2")
+
         prepare_payload = api.session.calls[0][2]["json"]
         mainline_payload = api.session.calls[1][2]["json"]
         for payload in (prepare_payload, mainline_payload):
-            self.assertEqual(payload["model"], "gpt-5-5")
-            self.assertEqual(payload["thinking_effort"], "extended")
+            self.assertEqual(payload["parent_message_id"], "client-created-root")
+            self.assertEqual(payload["system_hints"], ["picture_v2"])
+            self.assertEqual(payload["local_function_names"], ["local.continue_in_work"])
+            self.assertEqual(payload["client_contextual_info"]["app_surface"], "codex_browser")
+        # prepare 和主对话请求共用一个 turn trace id，网页就是这么发的。
+        self.assertEqual(
+            api.session.calls[0][2]["headers"]["X-Oai-Turn-Trace-Id"],
+            api.session.calls[1][2]["headers"]["X-Oai-Turn-Trace-Id"],
+        )
+        self.assertTrue(api.session.calls[0][2]["headers"]["X-Oai-Turn-Trace-Id"])
+        # 图片工具的动态提及：正文前面插 @创建图像，并在 offsets 里标出它的范围。
+        message = mainline_payload["messages"][0]
+        self.assertEqual(message["content"]["parts"][-1], "@创建图像 draw a cat")
+        metadata = message["metadata"]
+        self.assertEqual(metadata["serialization_metadata"]["render_format"], "markdown")
+        offsets = metadata["serialization_metadata"]["custom_symbol_offsets"]
+        self.assertEqual(len(offsets), 1)
+        self.assertEqual(offsets[0]["symbol"], "ecosystemMention")
+        self.assertEqual(offsets[0]["startIndex"], 0)
+        self.assertEqual(offsets[0]["endIndex"], len("@创建图像"))
+        self.assertEqual(message["recipient"], "all")
+        self.assertEqual(message["status"], "finished_successfully")
+        self.assertEqual(message["weight"], 1)
+        self.assertEqual(mainline_payload["turn_attribution"], {"turn_trigger": "composer"})
+        self.assertEqual(mainline_payload["client_prepare_state"], "success")
+        self.assertEqual(mainline_payload["genui_state_snapshots"], [])
 
     def test_image_handshake_reuses_prepare_message_state_in_mainline(self):
         api = OpenAIBackendAPI()
@@ -264,7 +310,9 @@ class UpstreamRetryTests(unittest.TestCase):
         }
 
         with mock.patch.dict(backend_config.data, configured, clear=True):
-            self.assertEqual(api._image_model_settings("gpt-image-2"), ("gpt-5-5", ""))
+            self.assertEqual(api._image_model_settings("gpt-image-2"), "auto")
+        # codex 图片模型是另一条链路，仍按原名走
+        self.assertEqual(api._image_model_settings("codex-gpt-image-2"), "codex-gpt-image-2")
 
     def test_picture_stream_rebuilds_handshake_after_skipped_mainline(self):
         api = OpenAIBackendAPI("token-a")
@@ -294,18 +342,14 @@ class UpstreamRetryTests(unittest.TestCase):
         self.assertEqual(start.call_args_list[0].args[2], "conduit-one")
         self.assertEqual(start.call_args_list[1].args[2], "conduit-two")
         for prepare_call, start_call in zip(prepare.call_args_list, start.call_args_list):
-            self.assertEqual(
-                prepare_call.kwargs["parent_message_id"],
-                start_call.kwargs["parent_message_id"],
-            )
+            # parent_message_id 不再逐次重抽：网页固定发 client-created-root，
+            # 由两个方法内部各自兜底，调用方根本不传。
+            self.assertNotIn("parent_message_id", prepare_call.kwargs)
+            self.assertNotIn("parent_message_id", start_call.kwargs)
             self.assertEqual(
                 prepare_call.kwargs["message_id"],
                 start_call.kwargs["message_id"],
             )
-        self.assertNotEqual(
-            prepare.call_args_list[0].kwargs["parent_message_id"],
-            prepare.call_args_list[1].kwargs["parent_message_id"],
-        )
         self.assertNotEqual(
             prepare.call_args_list[0].kwargs["message_id"],
             prepare.call_args_list[1].kwargs["message_id"],

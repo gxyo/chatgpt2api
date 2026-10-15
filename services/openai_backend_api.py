@@ -22,6 +22,11 @@ from PIL import Image
 from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
+from services.sentinel_solver_client import (
+    solve_turnstile,
+    solver_timezone_pair,
+    solver_user_agent,
+)
 from utils.helper import (
     UpstreamHTTPError,
     anonymize_token,
@@ -32,7 +37,13 @@ from utils.helper import (
     split_image_model,
 )
 from utils.log import logger
-from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
+from utils.pow import (
+    build_legacy_requirements_token,
+    build_proof_token,
+    build_proof_token_from_p,
+    build_requirements_token,
+    parse_pow_resources,
+)
 from utils.turnstile import solve_turnstile_token
 
 
@@ -58,6 +69,16 @@ class ImageMainlineStateError(RuntimeError):
     pass
 
 
+class ImageAccountRejectedError(RuntimeError):
+    """上游把这次图片会话判成不可信账号，用伪装过的 404 "Model not found" 回绝。
+
+    2026-10 起 sentinel 校验不过（或账号被标记）时不报 403，而是回一个看不出异常的
+    404。它和「模型真的不存在」在字面上完全一样，所以只认「auto 图片会话 + 404 +
+    detail 精确等于 Model not found」这一个组合，其它 404 一律按普通错误走。
+    """
+    pass
+
+
 # `_poll_image_results` 挂在 ImagePollTimeoutError 上的现场字段。轮询超时和提前超时
 # 都走这一套，日志里靠它们区分「预算跑完了」和「上游一直在 5xx」。
 POLL_DIAGNOSTIC_KEYS = (
@@ -77,6 +98,35 @@ POLL_DIAGNOSTIC_KEYS = (
     "poll_last_task_error",
     "upstream_status_code",
 )
+
+
+def is_account_rejected_error(exc: BaseException, upstream_model: str) -> bool:
+    """判断这次失败是不是上游「拒绝这个账号」的伪装响应。
+
+    三个条件同时成立才算，避免误伤：
+
+    - 请求确实落在图片会话这条链路上：上游模型是 ``auto``，**或者**出错的是
+      ``/backend-api/f/conversation`` 这条主对话路径（不含 ``/prepare`` 之类的旁支）；
+    - HTTP 状态码恰好是 404；
+    - JSON 里的 ``detail`` 精确等于 ``Model not found``（不是包含，也不是那种
+      detail 是一个对象的 404）。
+
+    其它 404 一律不套用这条规则：模型改名、路径写错、账号真没权限都可能回 404，
+    把它们当成「账号被拒」会让整个号池被无谓地冷却掉。
+    """
+    if not isinstance(exc, UpstreamHTTPError) or exc.status_code != 404:
+        return False
+    # 路径是比模型名更硬的信号：模型名可能被本地配置改掉，路径不会。
+    on_image_path = str(getattr(exc, "context", "") or "") == IMAGE_CONVERSATION_PATH
+    if str(upstream_model or "") != "auto" and not on_image_path:
+        return False
+    body = exc.body
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (TypeError, ValueError):
+            return False
+    return isinstance(body, dict) and body.get("detail") == ACCOUNT_REJECTED_DETAIL
 
 
 def poll_timeout_diagnostics(exc: BaseException) -> Dict[str, Any]:
@@ -142,6 +192,37 @@ class ChatRequirements:
 DEFAULT_CLIENT_VERSION = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887"
 DEFAULT_CLIENT_BUILD_NUMBER = "6708908"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
+# 2026-10-14 起 chrome110 的 TLS 指纹会被判为低可信，对话接口返回伪装成 404 的
+# "Model not found"。旧指纹只作为 legacy 链路显式回退用，默认一律用新版。
+DEFAULT_IMPERSONATE = "chrome146"
+LEGACY_IMPERSONATE = "chrome110"
+LEGACY_IMPERSONATES = {LEGACY_IMPERSONATE}
+# 上游拒绝账号时的伪装响应：HTTP 404 + {"detail": "Model not found"}。
+ACCOUNT_REJECTED_DETAIL = "Model not found"
+# 图片会话主链路的路径：只有这条路上的 404 才可能是「账号被判低可信」。
+IMAGE_CONVERSATION_PATH = "/backend-api/f/conversation"
+# 网页新开一轮对话时 parent_message_id 发的是这个固定字符串，不是随机 uuid。
+CLIENT_CREATED_ROOT = "client-created-root"
+# 网页用图片工具时会在 prompt 前面插一个 @创建图像 动态提及（composer 里选中工具后
+# 自动插入的那段文本），并在 serialization_metadata.custom_symbol_offsets 里标出它的
+# 起止位置。措辞要和网页一致：上游按这串文本核对偏移量。
+IMAGE_CREATION_MENTION = "@创建图像"
+
+
+def image_client_contextual_info() -> Dict[str, Any]:
+    """图片会话 payload 里的 ``client_contextual_info``（每次返回新的一份）。
+
+    做成函数而不是模块级常量：字典会被下游 payload 直接持有，共享同一个对象迟早
+    有人就地改到别的请求上去。
+    """
+    return {
+        "app_name": "chatgpt.com",
+        "app_surface": "codex_browser",
+        "has_web_push_capabilities": True,
+        "web_push_notification_permission": "default",
+    }
+
+
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 DEFAULT_UPSTREAM_RETRY_ATTEMPTS = 3
 DEFAULT_UPSTREAM_RETRY_BASE_DELAY_SECS = 0.5
@@ -265,6 +346,8 @@ class OpenAIBackendAPI:
         self.deadline = deadline
         self.account = account_service.get_account(self.access_token) if self.access_token else {}
         self.account = self.account if isinstance(self.account, dict) else {}
+        # 一轮图片会话共用同一个 turn trace id：prepare 里生成，主对话请求复用。
+        self._image_turn_trace_id = ""
         self.fp = self._build_fp()
         self.user_agent = self.fp["user-agent"]
         self.device_id = self.fp["oai-device-id"]
@@ -344,13 +427,79 @@ class OpenAIBackendAPI:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
         )
-        fp.setdefault("impersonate", "chrome110")
+        # 账号里存着旧指纹（chrome110）时直接升级成当前默认值：那个指纹现在会被
+        # 上游判成低可信，留着它等于让这个号一直报 "Model not found"。
+        if fp.get("impersonate") in LEGACY_IMPERSONATES:
+            fp.pop("impersonate")
+        fp.setdefault("impersonate", self._default_impersonate())
         fp.setdefault("oai-device-id", new_uuid())
         fp.setdefault("oai-session-id", new_uuid())
         fp.setdefault("sec-ch-ua", '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"')
         fp.setdefault("sec-ch-ua-mobile", "?0")
         fp.setdefault("sec-ch-ua-platform", '"Windows"')
         return fp
+
+    @staticmethod
+    def _default_impersonate() -> str:
+        """legacy 链路固定用旧指纹，其余走当前默认值。"""
+        return LEGACY_IMPERSONATE if config.image_sentinel_mode == "legacy" else DEFAULT_IMPERSONATE
+
+    @staticmethod
+    def _use_new_sentinel() -> bool:
+        return config.image_sentinel_mode != "legacy"
+
+    def _drop_restricted_cookies(self) -> None:
+        """清掉 finalize 种下的受限 Cookie（``oai-sc``）。
+
+        留着它，后续对话会被上游当成「受限会话」，拒绝的形态是伪装的
+        404 ``Model not found`` —— 看起来像账号不可用，其实只是这轮握手不干净。
+        只清这一个名字，别动其它 Cookie。
+        """
+        jar = self.session.cookies.jar
+        for cookie in list(jar):
+            if cookie.name == "oai-sc":
+                jar.clear(cookie.domain, cookie.path, cookie.name)
+
+    def _sentinel_user_agent(self) -> str:
+        """requirements/proof token 里编码的 UA：与算 Turnstile 的求解页面保持一致。
+
+        求解服务没配或取不到时退回调用的账号 UA（旧行为）。旧版链路完全不碰求解
+        服务，切回去就是改动前那条路。
+        """
+        if not self._use_new_sentinel():
+            return self.user_agent
+        return solver_user_agent() or self.user_agent
+
+    def _sentinel_timezone_pair(self) -> tuple[str, int]:
+        """上报给上游的 ``(时区名, 偏移)`` —— 整对一起定，不各取一处。
+
+        新版优先照抄求解页面报的那一对（它和算 Turnstile 的是同一个浏览器），取不到
+        就整对退回本机配置。上游不挂代理时只对「出口 IP + 浏览器时区」做自洽检查，
+        两边不一致会被算成低可信，所以宁可整对退回，也不混着拼。
+        旧版链路不碰求解服务，直接用 config（默认值等于改动前写死的 Asia/Shanghai / -480）。
+        """
+        if self._use_new_sentinel():
+            pair = solver_timezone_pair()
+            if pair:
+                return pair
+        return config.timezone, config.timezone_offset_min
+
+    def _sentinel_timezone(self) -> str:
+        return self._sentinel_timezone_pair()[0]
+
+    def _sentinel_timezone_offset_min(self) -> int:
+        return self._sentinel_timezone_pair()[1]
+
+    def _solve_turnstile(self, dx: str, p_token: str, requirements: Dict[str, Any] | None = None) -> str:
+        """新版走求解服务，旧版只用本地求解器。
+
+        ``requirements`` 是整份 prepare 响应：转给求解服务后，它可以直接调用
+        chatgpt.com 页面自带的那份 turnstile 模块（比我们移植的 VM 更跟得上上游）。
+        里面只有挑战材料，没有账号 token / Cookie / 用户 prompt。
+        """
+        if self._use_new_sentinel():
+            return solve_turnstile(dx, p_token, requirements)
+        return solve_turnstile_token(dx, p_token) or ""
 
     def _remaining_deadline_secs(self) -> float | None:
         deadline = getattr(self, "deadline", None)
@@ -522,7 +671,7 @@ class OpenAIBackendAPI:
                     "gizmo_id": None,
                     "requested_default_model": None,
                     "conversation_id": None,
-                    "timezone_offset_min": -480,
+                    "timezone_offset_min": self._sentinel_timezone_offset_min(),
                 },
             )
         except UpstreamHTTPError as exc:
@@ -536,7 +685,7 @@ class OpenAIBackendAPI:
         try:
             response = self._fast_request(
                 "get",
-                route + "?timezone_offset_min=-480",
+                route + f"?timezone_offset_min={self._sentinel_timezone_offset_min()}",
                 "/backend-api/accounts/check",
                 attempts=ACCOUNT_INFO_RETRY_ATTEMPTS,
                 timeout=ACCOUNT_INFO_TIMEOUT_SECS,
@@ -623,6 +772,60 @@ class OpenAIBackendAPI:
             "Upgrade-Insecure-Requests": "1",
         }
 
+    def _build_requirements_p(self) -> str:
+        """构造 prepare 提交的 ``p``。
+
+        新版用求解页面的 UA（要求里写的「p、UA、时区和挑战执行环境保持一致」就是
+        这一条：UA 不一致时上游会把这次会话判成低可信）。取不到求解页面 UA 时退回
+        账号 UA。
+        """
+        return build_requirements_token(self._sentinel_user_agent(), self.pow_script_sources, self.pow_data_build)
+
+    def _build_proof_token(self, seed: str, difficulty: str, source_p: str) -> str:
+        """解 proof token。新版 FNV-1a 必须在 prepare 用的那份 ``p`` 上算。
+
+        ``p`` 解不出来（例如调用方没传）时退回旧版构造器：那份字段是本地生成的、
+        和这次 prepare 没有关系，能不能过由上游决定——好过直接抛异常把生图整条链路
+        打断。
+        """
+        if self._use_new_sentinel() and source_p:
+            try:
+                return build_proof_token_from_p(source_p, seed, difficulty)
+            except ValueError as exc:
+                logger.warning({
+                    "event": "sentinel_proof_token_p_decode_failed",
+                    "trace_id": self.trace_id,
+                    "error": str(exc)[:200],
+                })
+        return build_proof_token(
+            seed,
+            difficulty,
+            self.user_agent,
+            script_sources=self.pow_script_sources,
+            data_build=self.pow_data_build,
+        )
+
+    @staticmethod
+    def _finalize_payload(prepare_data: Dict[str, Any], proof_token: str, turnstile_token: str) -> Dict[str, str]:
+        """finalize 的提交字段名。
+
+        网页当前提交的是 ``proofofwork`` / ``turnstile``；旧链路用的
+        ``proof_token`` / ``turnstile_token`` 是早期字段名，只传 prepare_token 更不行
+        ——上游会直接判这次握手没完成。
+        """
+        prepare_token = str(prepare_data.get("prepare_token") or "")
+        if config.image_sentinel_mode == "legacy":
+            return {
+                "prepare_token": prepare_token,
+                "proof_token": proof_token,
+                "turnstile_token": turnstile_token,
+            }
+        return {
+            "prepare_token": prepare_token,
+            "proofofwork": proof_token,
+            "turnstile": turnstile_token,
+        }
+
     def _build_requirements(self, data: Dict[str, Any], source_p: str = "") -> ChatRequirements:
         """把 sentinel 响应整理成后续对话需要的 token 集合。"""
         if (data.get("arkose") or {}).get("required"):
@@ -631,18 +834,17 @@ class OpenAIBackendAPI:
         proof_token = ""
         proof_info = data.get("proofofwork") or {}
         if proof_info.get("required"):
-            proof_token = build_proof_token(
+            proof_token = self._build_proof_token(
                 proof_info.get("seed", ""),
                 proof_info.get("difficulty", ""),
-                self.user_agent,
-                script_sources=self.pow_script_sources,
-                data_build=self.pow_data_build,
+                source_p,
             )
 
         turnstile_token = ""
         turnstile_info = data.get("turnstile") or {}
-        if turnstile_info.get("required") and turnstile_info.get("dx"):
-            turnstile_token = solve_turnstile_token(turnstile_info["dx"], source_p) or ""
+        if turnstile_info.get("required"):
+            # data 就是 prepare 响应本身：求解服务优先用它调页面自带的模块，dx 只是退路。
+            turnstile_token = self._solve_turnstile(turnstile_info.get("dx", ""), source_p, data)
 
         return ChatRequirements(
             token=data.get("token", ""),
@@ -758,7 +960,7 @@ class OpenAIBackendAPI:
             "supported_encodings": [],
             "system_hints": [],
             "timezone": timezone,
-            "timezone_offset_min": -480,
+            "timezone_offset_min": self._sentinel_timezone_offset_min(),
             "variant_purpose": "comparison_implicit",
             "websocket_request_id": new_uuid(),
             "client_contextual_info": {
@@ -783,28 +985,26 @@ class OpenAIBackendAPI:
             return "extended"
         return ""
 
-    def _image_model_settings(self, model: str) -> tuple[str, str]:
-        """把标准图片模型名映射为上游模型及思考强度。"""
+    def _image_model_settings(self, model: str) -> str:
+        """图片会话统一用 ``auto``，由上游挑当前可用的图片模型。
+
+        以前这里把 ``default_upstream_model_name``（默认 ``gpt-5-5``）当成图片模型发
+        上去 —— 那是个文本模型设置，网页从来不会这么发。图片会话现在只认 ``auto``，
+        发别的值会被判低可信，而拒绝的形态是伪装的 404 ``Model not found``（正好会被
+        上面的换号逻辑当成「账号不行」）。codex 图片模型是另一条链路，仍按原名走。
+        """
         _, base_model = split_image_model(model)
-        if not base_model:
-            return "auto", ""
-        if base_model in {"gpt-image-2", "gpt-image-2.5"}:
-            upstream_model = config.default_upstream_model_name
-        elif base_model == CODEX_IMAGE_MODEL:
-            upstream_model = base_model
-        else:
-            return "auto", ""
-        model_name, separator, suffix = upstream_model.rpartition("-")
-        normalized_suffix = suffix.lower()
-        if separator and normalized_suffix in {"standard", "extended", "max"}:
-            return model_name, normalized_suffix
-        if separator and normalized_suffix == "thinking":
-            upstream_model = model_name
-        return upstream_model, self._normalize_thinking_effort(config.default_thinking_effort)
+        if base_model == CODEX_IMAGE_MODEL:
+            return CODEX_IMAGE_MODEL
+        return "auto"
 
     def _image_headers(self, path: str, requirements: ChatRequirements, conduit_token: str = "", accept: str = "*/*") -> \
             Dict[str, str]:
-        """构造图片链路请求头。"""
+        """构造图片链路请求头。
+
+        Turnstile/SO token 必须跟着图片请求一起发出去：求解服务算它就是为这条链路，
+        漏掉的话上游照样按低可信处理，把拒绝伪装成 404 ``Model not found``。
+        """
         headers = {
             "Content-Type": "application/json",
             "Accept": accept,
@@ -812,10 +1012,16 @@ class OpenAIBackendAPI:
         }
         if requirements.proof_token:
             headers["OpenAI-Sentinel-Proof-Token"] = requirements.proof_token
+        if requirements.turnstile_token:
+            headers["OpenAI-Sentinel-Turnstile-Token"] = requirements.turnstile_token
+        if requirements.so_token:
+            headers["OpenAI-Sentinel-SO-Token"] = requirements.so_token
         if conduit_token:
             headers["X-Conduit-Token"] = conduit_token
-        if accept == "text/event-stream":
-            headers["X-Oai-Turn-Trace-Id"] = new_uuid()
+        # prepare 和主对话请求共用同一个 turn trace id（网页就是这么发的）。
+        trace_id = str(self._image_turn_trace_id or "").strip()
+        if accept == "text/event-stream" or trace_id:
+            headers["X-Oai-Turn-Trace-Id"] = trace_id or new_uuid()
         return self._headers(path, headers)
 
     def _codex_responses_headers(self) -> Dict[str, str]:
@@ -1095,32 +1301,37 @@ class OpenAIBackendAPI:
             parent_message_id: str | None = None,
             message_id: str | None = None,
     ) -> str:
-        """为图片生成准备 conduit token。"""
+        """为图片生成准备 conduit token。
+
+        结构对齐网页 2026-10 的抓包：``model=auto``、``parent_message_id`` 是固定的
+        ``client-created-root``，prepare 与随后的主对话请求共用同一个
+        ``x-oai-turn-trace-id``。字段多一个少一个都会被算进可信度评分。
+        """
         path = "/backend-api/f/conversation/prepare"
-        upstream_model, thinking_effort = self._image_model_settings(model)
-        parent_message_id = str(parent_message_id or new_uuid())
+        upstream_model = self._image_model_settings(model)
+        self._image_turn_trace_id = new_uuid()
+        parent_message_id = str(parent_message_id or CLIENT_CREATED_ROOT)
         message_id = str(message_id or new_uuid())
         payload = {
             "action": "next",
-            "fork_from_shared_post": False,
+            "is_do_not_remember": False,
             "parent_message_id": parent_message_id,
             "model": upstream_model,
-            "client_prepare_state": "success",
-            "timezone_offset_min": -480,
-            "timezone": "Asia/Shanghai",
-            "conversation_mode": {"kind": "primary_assistant"},
+            "client_prepare_state": "sent",
+            "timezone_offset_min": self._sentinel_timezone_offset_min(),
+            "timezone": self._sentinel_timezone(),
             "system_hints": ["picture_v2"],
             "partial_query": {
                 "id": message_id,
                 "author": {"role": "user"},
                 "content": {"content_type": "text", "parts": [prompt]},
             },
-            "supports_buffering": True,
+            "client_contextual_info": image_client_contextual_info(),
+            "local_function_names": ["local.continue_in_work"],
             "supported_encodings": ["v1"],
-            "client_contextual_info": {"app_name": "chatgpt.com"},
+            "client_prepare_dispatch": "debounced",
+            "client_prepare_source": "composer_editor_state",
         }
-        if thinking_effort:
-            payload["thinking_effort"] = thinking_effort
         response = self._fast_request(
             "post",
             path,
@@ -1229,11 +1440,23 @@ class OpenAIBackendAPI:
             parent_message_id: str | None = None,
             message_id: str | None = None,
     ) -> requests.Response:
-        """启动图片生成或编辑的 SSE 请求。"""
-        upstream_model, thinking_effort = self._image_model_settings(model)
-        parent_message_id = str(parent_message_id or new_uuid())
+        """启动图片生成或编辑的 SSE 请求。
+
+        结构对齐网页 2026-10 的抓包：composer 选中图片工具后会在 prompt 前面插一段
+        ``@创建图像`` 动态提及，并在 ``serialization_metadata.custom_symbol_offsets``
+        里标出它的起止位置；消息体补齐 recipient/status/weight 等字段，
+        ``parent_message_id`` 是固定的 ``client-created-root``。
+        少一个字段都会被算进可信度评分，评分不够时上游把拒绝伪装成 404。
+
+        ``parent_message_id`` 参数保留只是为了兼容老调用方：新链路一律用
+        ``client-created-root``，和 prepare 发的保持一致。
+        """
+        upstream_model = self._image_model_settings(model)
+        parent_message_id = str(parent_message_id or CLIENT_CREATED_ROOT)
         message_id = str(message_id or new_uuid())
         references = references or []
+        # 提及和正文之间有一个空格，偏移量只覆盖提及本身。
+        mention_text = f"{IMAGE_CREATION_MENTION} {prompt}"
         parts = [{
             "content_type": "image_asset_pointer",
             "asset_pointer": f"file-service://{item['file_id']}",
@@ -1241,15 +1464,23 @@ class OpenAIBackendAPI:
             "height": item["height"],
             "size_bytes": item["file_size"],
         } for item in references]
-        parts.append(prompt)
-        content = {"content_type": "multimodal_text", "parts": parts} if references else {"content_type": "text",
-                                                                                          "parts": [prompt]}
+        parts.append(mention_text)
+        content = {"content_type": "multimodal_text", "parts": parts} if references else {
+            "content_type": "text", "parts": [mention_text]}
         metadata = {
             "developer_mode_connector_ids": [],
             "selected_github_repos": [],
             "selected_all_github_repos": False,
             "system_hints": ["picture_v2"],
-            "serialization_metadata": {"custom_symbol_offsets": []},
+            "serialization_metadata": {
+                "render_format": "markdown",
+                "custom_symbol_offsets": [{
+                    "id": "picture_v2",
+                    "symbol": "ecosystemMention",
+                    "startIndex": 0,
+                    "endIndex": len(IMAGE_CREATION_MENTION),
+                }],
+            },
         }
         if references:
             metadata["attachments"] = [{
@@ -1261,39 +1492,33 @@ class OpenAIBackendAPI:
                 "height": item["height"],
             } for item in references]
         payload = {
+            "turn_attribution": {"turn_trigger": "composer"},
             "action": "next",
+            "is_do_not_remember": False,
             "messages": [{
                 "id": message_id,
-                "author": {"role": "user"},
+                "author": {"metadata": {}, "name": None, "role": "user"},
+                "channel": None,
                 "create_time": time.time(),
+                "end_turn": None,
                 "content": content,
                 "metadata": metadata,
+                "recipient": "all",
+                "status": "finished_successfully",
+                "update_time": None,
+                "weight": 1,
             }],
             "parent_message_id": parent_message_id,
             "model": upstream_model,
-            "client_prepare_state": "sent",
-            "timezone_offset_min": -480,
-            "timezone": "Asia/Shanghai",
-            "conversation_mode": {"kind": "primary_assistant"},
-            "enable_message_followups": True,
             "system_hints": ["picture_v2"],
-            "supports_buffering": True,
+            "timezone_offset_min": self._sentinel_timezone_offset_min(),
+            "timezone": self._sentinel_timezone(),
+            "client_contextual_info": image_client_contextual_info(),
+            "local_function_names": ["local.continue_in_work"],
             "supported_encodings": ["v1"],
-            "client_contextual_info": {
-                "is_dark_mode": False,
-                "time_since_loaded": 1200,
-                "page_height": 1072,
-                "page_width": 1724,
-                "pixel_ratio": 1.2,
-                "screen_height": 1440,
-                "screen_width": 2560,
-                "app_name": "chatgpt.com",
-            },
-            "paragen_cot_summary_display_override": "allow",
-            "force_parallel_switch": "auto",
+            "genui_state_snapshots": [],
+            "client_prepare_state": "success",
         }
-        if thinking_effort:
-            payload["thinking_effort"] = thinking_effort
         path = "/backend-api/f/conversation"
         response = self._fast_request(
             "post",
@@ -1529,7 +1754,7 @@ class OpenAIBackendAPI:
                 "file_name": file_name,
                 "file_size": len(data),
                 "use_case": "multimodal",
-                "timezone_offset_min": -480,
+                "timezone_offset_min": self._sentinel_timezone_offset_min(),
                 "reset_rate_limits": False,
                 "store_in_library": True,
                 "library_persistence_mode": "opportunistic",
@@ -1602,8 +1827,8 @@ class OpenAIBackendAPI:
             "parent_message_id": "client-created-root",
             "model": EDITABLE_FILE_MODEL,
             "client_prepare_state": "success",
-            "timezone_offset_min": -480,
-            "timezone": "Asia/Shanghai",
+            "timezone_offset_min": self._sentinel_timezone_offset_min(),
+            "timezone": self._sentinel_timezone(),
             "conversation_mode": {"kind": "primary_assistant"},
             "system_hints": [],
             "partial_query": {"id": new_uuid(), "author": {"role": "user"}, "content": {"content_type": "text", "parts": [prompt]}},
@@ -1671,8 +1896,8 @@ class OpenAIBackendAPI:
                 "parent_message_id": "client-created-root",
                 "model": EDITABLE_FILE_MODEL,
                 "client_prepare_state": "sent",
-                "timezone_offset_min": -480,
-                "timezone": "Asia/Shanghai",
+                "timezone_offset_min": self._sentinel_timezone_offset_min(),
+                "timezone": self._sentinel_timezone(),
                 "conversation_mode": {"kind": "primary_assistant"},
                 "enable_message_followups": True,
                 "system_hints": [],
@@ -2111,8 +2336,8 @@ class OpenAIBackendAPI:
                 "parent_message_id": "client-created-root",
                 "model": model,
                 "client_prepare_state": "success",
-                "timezone_offset_min": -480,
-                "timezone": "Asia/Shanghai",
+                "timezone_offset_min": self._sentinel_timezone_offset_min(),
+                "timezone": self._sentinel_timezone(),
                 "conversation_mode": {"kind": "primary_assistant"},
                 "system_hints": ["search"],
                 "partial_query": {"id": new_uuid(), "author": {"role": "user"}, "content": {"content_type": "text", "parts": [prompt]}},
@@ -2153,8 +2378,8 @@ class OpenAIBackendAPI:
                 "parent_message_id": "client-created-root",
                 "model": model,
                 "client_prepare_state": "success",
-                "timezone_offset_min": -480,
-                "timezone": "Asia/Shanghai",
+                "timezone_offset_min": self._sentinel_timezone_offset_min(),
+                "timezone": self._sentinel_timezone(),
                 "conversation_mode": {"kind": "primary_assistant"},
                 "enable_message_followups": True,
                 "system_hints": [],
@@ -3028,9 +3253,10 @@ class OpenAIBackendAPI:
             for attempt in range(1, max_mainline_retries + 1):
                 self._remaining_deadline_secs()
                 # The prepare response contains one-shot state for exactly one
-                # mainline message. Keep both identifiers stable across the two
-                # requests, while generating a completely new pair on retry.
-                parent_message_id = new_uuid()
+                # mainline message. Keep the message id stable across the two
+                # requests, while generating a fresh one on retry.
+                # parent_message_id 不再每次重试换一个：网页新开一轮对话发的就是
+                # client-created-root 这个固定字符串，随机 uuid 反而会被算成低可信。
                 message_id = new_uuid()
                 try:
                     self._report_progress("getting_token")
@@ -3040,7 +3266,6 @@ class OpenAIBackendAPI:
                         prompt,
                         requirements,
                         model,
-                        parent_message_id=parent_message_id,
                         message_id=message_id,
                     )
                     self._report_progress("starting_generation")
@@ -3050,15 +3275,21 @@ class OpenAIBackendAPI:
                         conduit_token,
                         model,
                         references,
-                        parent_message_id=parent_message_id,
                         message_id=message_id,
                     )
                 except Exception as exc:
+                    # 官方 auto 图片会话被判低可信时，上游会把拒绝伪装成 404 Model not found。
+                    # 那不是「重试一次握手就能好」的状态，换成专用异常抛给上层换号逻辑。
+                    upstream_model_for_error = self._image_model_settings(model)
+                    if is_account_rejected_error(exc, upstream_model_for_error):
+                        raise ImageAccountRejectedError(
+                            "official image account rejected: Model not found"
+                        ) from exc
                     recoverable = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
                     if not recoverable or attempt >= max_mainline_retries:
                         raise
                     self.image_mainline_retries = attempt
-                    upstream_model, thinking_effort = self._image_model_settings(model)
+                    upstream_model = self._image_model_settings(model)
                     inflight = account_service.image_inflight_count(self.access_token)
                     logger.warning({
                         "event": "image_mainline_state_retry",
@@ -3075,7 +3306,6 @@ class OpenAIBackendAPI:
                         "handshake_wait_ms": handshake_wait_ms,
                         **account_service.image_handshake_diagnostics(self.access_token),
                         "upstream_model": upstream_model,
-                        "thinking_effort": thinking_effort or "auto",
                         "error": str(exc)[:300],
                     })
                     # The requirements and conduit token are one-shot state.  The
@@ -3112,7 +3342,7 @@ class OpenAIBackendAPI:
     def _get_chat_requirements(self) -> ChatRequirements:
         """获取当前模式对话所需的 sentinel token（prepare + finalize 两步流程）。"""
         base = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
-        p_token = build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)
+        p_token = self._build_requirements_p()
 
         prepare_path = base + "/prepare"
         response = self._fast_request(
@@ -3136,18 +3366,17 @@ class OpenAIBackendAPI:
         proof_token = ""
         proof_info = prepare_data.get("proofofwork") or {}
         if proof_info.get("required"):
-            proof_token = build_proof_token(
+            proof_token = self._build_proof_token(
                 proof_info.get("seed", ""),
                 proof_info.get("difficulty", ""),
-                self.user_agent,
-                script_sources=self.pow_script_sources,
-                data_build=self.pow_data_build,
+                p_token,
             )
 
         turnstile_token = ""
         turnstile_info = prepare_data.get("turnstile") or {}
-        if turnstile_info.get("required") and turnstile_info.get("dx"):
-            turnstile_token = solve_turnstile_token(turnstile_info["dx"], p_token) or ""
+        if turnstile_info.get("required"):
+            # 把整份 prepare 响应交给求解服务：它优先调页面自带的 turnstile 模块。
+            turnstile_token = self._solve_turnstile(turnstile_info.get("dx", ""), p_token, prepare_data)
 
         finalize_path = base + "/finalize"
         response = self._fast_request(
@@ -3155,13 +3384,11 @@ class OpenAIBackendAPI:
             finalize_path,
             "chat_requirements_finalize",
             headers=self._headers(finalize_path, {"Content-Type": "application/json"}),
-            json={
-                "prepare_token": prepare_data.get("prepare_token", ""),
-                "proof_token": proof_token,
-                "turnstile_token": turnstile_token,
-            },
+            json=self._finalize_payload(prepare_data, proof_token, turnstile_token),
         )
         data = response.json()
+        # finalize 会种下一个受限 Cookie，留着会让后续对话退化成伪装的 404。
+        self._drop_restricted_cookies()
 
         token = data.get("token", "")
         if not token:
@@ -3178,7 +3405,7 @@ class OpenAIBackendAPI:
 
     def _chat_target(self) -> tuple[str, str]:
         if self.access_token:
-            return "/backend-api/conversation", "Asia/Shanghai"
+            return "/backend-api/conversation", self._sentinel_timezone()
         return "/backend-anon/conversation", "America/Los_Angeles"
 
     def list_models(self) -> Dict[str, Any]:

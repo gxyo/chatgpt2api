@@ -15,6 +15,7 @@ from services.config import config
 from services.image_storage_service import image_storage_service
 from services.image_upscale_service import parse_size_long_edge, upscale_png
 from services.openai_backend_api import (
+    ImageAccountRejectedError,
     ImageContentPolicyError,
     ImageMainlineStateError,
     ImagePollTimeoutError,
@@ -1874,9 +1875,15 @@ def _generate_single_image_attempts(
             # Local handshake recovery can still exhaust its attempts. Use
             # the bounded account rescue flow with a fresh backend session;
             # never mark this 400 retryable in the generic same-POST loop.
+            # 官方 auto 图片会话被判低可信时上游回伪装过的 404 Model not found。
+            # 那不是「同一个号等一会就能成」的状态，当成换号信号走同一套重试预算。
+            account_rejected = isinstance(exc, ImageAccountRejectedError)
             mainline_rejected = isinstance(exc, ImageMainlineStateError) or is_skipped_mainline_error(exc)
-            transient = mainline_rejected or is_retriable_upstream_error(exc)
-            attempt_outcome = "mainline_rejected" if mainline_rejected else (
+            upstream_transient = is_retriable_upstream_error(exc)
+            transient = mainline_rejected or account_rejected or upstream_transient
+            attempt_outcome = (
+                "account_rejected" if account_rejected else
+                "mainline_rejected" if mainline_rejected else
                 "transient_upstream" if transient else "upstream_error"
             )
             attempt_error = str(exc)
@@ -1887,6 +1894,10 @@ def _generate_single_image_attempts(
             if mainline_rejected:
                 # 短时间内的新请求优先换个账号，别在同一个号上反复撞。
                 account_service.mark_image_mainline_rejected(token)
+            if account_rejected:
+                # 只做本地冷却：不动额度、不标封号、不扣代理健康分。上游对账号的
+                # 判定会自己恢复，冷却到点后照常参与选号。
+                account_service.mark_image_account_rejected(token)
             inflight = account_service.image_inflight_count(token)
             # 这批诊断既进容器日志，也写进调用方传入的 diagnostics —— 最后抛出的异常
             # 会带着它一起出去，日志页（和一键导出）里就能看到 image_peers、握手排队这些数。
@@ -1901,6 +1912,7 @@ def _generate_single_image_attempts(
                 "index": index,
                 "transient": transient,
                 "mainline_rejected": mainline_rejected,
+                "account_rejected": account_rejected,
                 "transient_attempts": transient_attempts,
                 "rescue": in_rescue,
                 **account_service.image_handshake_diagnostics(token),

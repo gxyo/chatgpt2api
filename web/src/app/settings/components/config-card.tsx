@@ -27,6 +27,7 @@ export function ConfigCard() {
   const setImageCleanupTime = useSettingsStore((state) => state.setImageCleanupTime);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
+  const setImageSentinelMode = useSettingsStore((state) => state.setImageSentinelMode);
   const setImageUpscaleEnabled = useSettingsStore((state) => state.setImageUpscaleEnabled);
   const setImageQuotaErrorMessage = useSettingsStore((state) => state.setImageQuotaErrorMessage);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
@@ -200,6 +201,27 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-neutral-200 bg-white"
             />
             <p className="text-xs text-neutral-500">限制每个账号同时处理的图片请求数量，默认 3。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-sm text-neutral-700">
+              <PlugZap className="size-4 text-neutral-500" />
+              生图握手模式
+            </label>
+            <Select
+              value={config?.image_sentinel_mode === "legacy" ? "legacy" : "new"}
+              onValueChange={(value) => setImageSentinelMode(value === "legacy" ? "legacy" : "new")}
+            >
+              <SelectTrigger className="h-10 w-full rounded-xl border-neutral-200 bg-white">
+                <SelectValue placeholder="选择握手模式" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="new">新版（sentinel 求解服务）</SelectItem>
+                <SelectItem value="legacy">旧版（本地模拟挑战）</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs leading-5 text-neutral-500">
+              新版从 sentinel-solver 容器里取真实 Chromium 算出的 Turnstile，需要该服务已启动；服务没配或算不出来会直接报错，不会退成本地模拟挑战。旧版沿用原来的本地模拟挑战，上游已开始拒绝，仅用于回滚对比。
+            </p>
           </div>
           <div className="space-y-2 md:col-span-2">
             <label className="flex items-center gap-3 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-700">
