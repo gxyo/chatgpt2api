@@ -28,10 +28,6 @@ FORCE_REFRESH_REMOVE_STATUS_CODES = {401, 402, 403, 502, 503, 504}
 # 账号刚拒绝过 conduit（skipped_mainline）后的「冷落」时长：这段时间里的新请求
 # 优先用别的账号。只是排序偏好，不会让请求失败。
 MAINLINE_REJECT_COOLDOWN_SECS = 8.0
-# 官方 auto 图片会话返回伪装过的 404 Model not found 后的冷却时长。这代表上游对这个
-# 账号的判定，换一次号也不一定能马上恢复，所以冷落得比 skipped_mainline 久得多。
-# 同样只影响选号排序：不清额度、不标封号、不扣代理健康分。冷却过后还会再试。
-ACCOUNT_REJECT_COOLDOWN_SECS = 600.0
 # 握手窗口的正常耗时只有 1-2 秒（prepare→mainline 定长超时 30s）。超过这个租约还
 # 没释放，只可能是持有线程死了或生成器被别处回收导致的泄漏——此时强制拆锁，
 # 否则那个账号以后每次请求都要白等一次窗口超时。
@@ -85,9 +81,6 @@ class AccountService:
         self._image_handshake_locks_guard = Lock()
         # 最近拒绝过 conduit 的账号（token -> monotonic 时间戳），只影响选号排序。
         self._image_mainline_rejects: dict[str, float] = {}
-        # 被上游以 404 Model not found 拒过的账号（token -> monotonic 时间戳），同样只
-        # 影响选号排序，冷却期 ACCOUNT_REJECT_COOLDOWN_SECS。
-        self._image_account_rejects: dict[str, float] = {}
         # 当前线程持有哪些握手锁。release 必须放掉「自己拿到的那把锁」，
         # 不能按 token 重新查一遍——轮换/别名解析后查到的可能是别人的锁。
         self._image_handshake_held = threading_local()
@@ -977,23 +970,15 @@ class AccountService:
         for token in list(self._image_mainline_rejects):
             if now - self._image_mainline_rejects[token] >= MAINLINE_REJECT_COOLDOWN_SECS:
                 del self._image_mainline_rejects[token]
-        for token in list(self._image_account_rejects):
-            if now - self._image_account_rejects[token] >= ACCOUNT_REJECT_COOLDOWN_SECS:
-                del self._image_account_rejects[token]
 
-    def _image_candidate_sort_key_locked(self, token: str, now: float) -> tuple[int, int, int]:
-        """选号排序：被上游拒过的账号排最后，其次比在途数。
+    def _image_candidate_sort_key_locked(self, token: str, now: float) -> tuple[int, int]:
+        """选号排序：刚被上游拒过 conduit 的账号排最后，其次比在途数。
 
         只是排序偏好，不是排除——号池里全是被拒过的账号时，排序退化成按在途数排。
-        两级排斥分开算：404 Model not found 是账号级判定，比 skipped_mainline 严重。
         """
         rejected_at = self._image_mainline_rejects.get(token)
         recently_rejected = 1 if rejected_at is not None and now - rejected_at < MAINLINE_REJECT_COOLDOWN_SECS else 0
-        account_rejected_at = self._image_account_rejects.get(token)
-        recently_account_rejected = (
-            1 if account_rejected_at is not None and now - account_rejected_at < ACCOUNT_REJECT_COOLDOWN_SECS else 0
-        )
-        return (recently_account_rejected, recently_rejected, len(self._image_inflight.get(token, [])))
+        return (recently_rejected, len(self._image_inflight.get(token, [])))
 
     def _list_available_candidate_tokens(
             self,
@@ -1026,20 +1011,6 @@ class AccountService:
             self._prune_mainline_rejects_locked(now)
             token = self._resolve_access_token_locked(access_token) or access_token
             self._image_mainline_rejects[token] = now
-
-    def mark_image_account_rejected(self, access_token: str) -> None:
-        """记一下「这个账号被上游以 404 Model not found 拒了」。
-
-        只做本地冷却：不动账号的额度/状态，也不影响代理健康分。上游对账号的判定可能
-        会自己恢复，所以冷却结束（ACCOUNT_REJECT_COOLDOWN_SECS）后照常参与选号。
-        """
-        if not access_token:
-            return
-        with self._image_slot_condition:
-            now = time.monotonic()
-            self._prune_mainline_rejects_locked(now)
-            token = self._resolve_access_token_locked(access_token) or access_token
-            self._image_account_rejects[token] = now
 
     def _image_slot_lease_timeout_secs(self) -> float:
         return max(30.0, float(config.image_poll_timeout_secs) * 1.2)

@@ -108,7 +108,6 @@ export type SettingsConfig = {
   image_cleanup_time?: string;
   image_poll_timeout_secs?: number | string;
   image_account_concurrency?: number | string;
-  image_sentinel_mode?: "new" | "legacy";
   image_quota_error_message?: string;
   image_parallel_generation?: boolean;
   image_upscale_enabled?: boolean;

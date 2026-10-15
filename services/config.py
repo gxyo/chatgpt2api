@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import json
 import os
 import sys
@@ -26,11 +25,6 @@ DEFAULT_LOG_CLEANUP_TIME = "03:00"
 MAX_LOG_RETENTION_DAYS = 3650
 # 「无可用生图额度」提示语的长度上限：这是个错误文案，不是留言板。
 MAX_IMAGE_QUOTA_ERROR_MESSAGE_LENGTH = 200
-
-# 客户端环境上报给上游的时区。默认值是历史行为（上海），非 UTC+8 的机器必须改：
-# 不挂代理时它要和出口 IP 的时区一致，挂代理时和 sentinel 求解页面的时区一致。
-DEFAULT_TIMEZONE = "Asia/Shanghai"
-DEFAULT_TIMEZONE_OFFSET_MIN = -480
 
 DEFAULT_CHAT_COMPLETION_CACHE = {
     "enabled": True,
@@ -416,67 +410,6 @@ class ConfigStore:
         ).strip().rstrip("/")
 
     @property
-    def timezone(self) -> str:
-        """对话/账号请求里上报给上游的时区名（IANA 名，如 America/Los_Angeles）。
-
-        取值顺序：``CHATGPT2API_TIMEZONE`` → config.json 的 ``timezone`` → 容器的
-        ``TZ`` → 历史默认值 Asia/Shanghai。compose 里只改 ``TZ`` 就能同时改这一项
-        （容器时区），不想动容器时区时用 ``CHATGPT2API_TIMEZONE`` 单独覆盖。
-        """
-        value = str(os.getenv("CHATGPT2API_TIMEZONE") or self.data.get("timezone") or "").strip()
-        return value or str(os.getenv("TZ") or "").strip() or DEFAULT_TIMEZONE
-
-    @property
-    def timezone_offset_min(self) -> int:
-        """JS 的 ``new Date().getTimezoneOffset()``：本地时间加多少分钟才到 UTC。
-
-        由进程本地时区算出来，和 ``timezone`` 同源（Linux 上 Python 跟着容器 ``TZ``
-        走，Windows 上跟系统时区走）。以前这里写死 -480，非 UTC+8 的机器上就和时区名
-        对不上，真实浏览器也不会报这个数。夏令时交给系统时间处理。
-        """
-        offset = datetime.now().astimezone().utcoffset()
-        if offset is None:
-            return DEFAULT_TIMEZONE_OFFSET_MIN
-        return -int(offset.total_seconds() // 60)
-
-    @property
-    def sentinel_solver_url(self) -> str:
-        """sentinel 求解服务地址（sentinel_solver/）。
-
-        新版链路要求它必须配：没配就是明确报错，不退回本地 Turnstile 求解器——
-        本地算出来的 token 会被上游拒，代价是账号被白冷却一轮。
-        """
-        return str(
-            os.getenv("CHATGPT2API_SENTINEL_SOLVER_URL")
-            or self.data.get("sentinel_solver_url")
-            or ""
-        ).strip().rstrip("/")
-
-    @property
-    def sentinel_solver_key(self) -> str:
-        return str(
-            os.getenv("CHATGPT2API_SENTINEL_SOLVER_KEY")
-            or self.data.get("sentinel_solver_key")
-            or ""
-        ).strip()
-
-    @property
-    def image_sentinel_mode(self) -> str:
-        """生图握手的版本开关：``new`` = 新版（求解服务 + FNV-1a PoW + chrome146），
-        ``legacy`` = 改动前的旧链路（本地 Turnstile VM + SHA3 PoW + chrome110）。
-
-        留旧链路的目的是出问题时能一键退回去对比，不是因为它还能用：旧链路在当前
-        上游版本上会被判低可信，对话接口返回伪装成 404 的 "Model not found"。
-
-        这个开关只切握手本身（指纹、PoW、finalize 字段名、Turnstile 求解器）。
-        请求体的形状两边共用新版：``model=auto``、``parent_message_id`` 固定、图片工具的
-        ``@创建图像`` 提及，这些是上游校验请求可信度的一部分，退回旧形状不会让请求变
-        可用，只会让它同时失去两种握手的支持。
-        """
-        value = str(self.data.get("image_sentinel_mode") or "").strip().lower()
-        return value if value in {"new", "legacy"} else "new"
-
-    @property
     def app_version(self) -> str:
         try:
             value = VERSION_FILE.read_text(encoding="utf-8").strip()
@@ -510,14 +443,7 @@ class ConfigStore:
         data["default_upstream_model_name"] = self.default_upstream_model_name
         data["default_thinking_effort"] = self.default_thinking_effort
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
-        data["sentinel_solver_url"] = self.sentinel_solver_url
-        data["image_sentinel_mode"] = self.image_sentinel_mode
-        # 只回可配置的时区名；timezone_offset_min 是从本地时区算出来的派生值，别放进来
-        # 让人以为改 config.json 能生效。
-        data["timezone"] = self.timezone
         data.pop("auth-key", None)
-        # 求解服务密钥是凭据，别跟着设置接口回给前端。
-        data.pop("sentinel_solver_key", None)
         return data
 
     def get_proxy_settings(self) -> str:
@@ -526,11 +452,6 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
-        # 时区是只读的「当前生效值」，由 TZ / CHATGPT2API_TIMEZONE 决定。设置页会把
-        # get() 的结果整份回传，这里要是照收，一次保存就把时区钉进 config.json，
-        # 之后改 TZ 再也不生效（偏移又是从进程时区算的，两者会各说各话）。
-        next_data.pop("timezone", None)
-        next_data.pop("timezone_offset_min", None)
         if "refresh_account_interval_minute" in next_data:
             next_data["refresh_account_interval_minute"] = _normalize_optional_interval(
                 next_data.get("refresh_account_interval_minute"), 5
@@ -559,9 +480,6 @@ class ConfigStore:
             )
         if "image_upscale_enabled" in next_data:
             next_data["image_upscale_enabled"] = _normalize_bool(next_data.get("image_upscale_enabled"))
-        if "image_sentinel_mode" in next_data:
-            mode = str(next_data.get("image_sentinel_mode") or "").strip().lower()
-            next_data["image_sentinel_mode"] = mode if mode in {"new", "legacy"} else "new"
         self.data = next_data
         self._save()
         return self.get()

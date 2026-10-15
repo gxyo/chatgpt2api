@@ -165,79 +165,6 @@ def build_pow_config(
     ]
 
 
-def sentinel_hash(text: str) -> str:
-    """当前网页 sentinel SDK 用的 hash：FNV-1a 32 位 + avalanche。
-
-    必须按 UTF-16 code unit 迭代：JS 的 ``charCodeAt`` 看到的是 code unit，
-    非 BMP 字符在 Python 里是一个 code point、在 JS 里是两个 unit，直接
-    ``ord()`` 会对不上。
-
-    旧的 SHA3-512 方案已经不被上游接受，PoW 结果也不再是无后缀的裸 base64。
-    """
-    h = 2166136261
-    for unit in _utf16_units(text):
-        h = ((h ^ unit) * 0x01000193) & 0xFFFFFFFF
-    h ^= h >> 16
-    h = (h * 0x85EBCA6B) & 0xFFFFFFFF
-    h ^= h >> 13
-    h = (h * 0xC2B2AE35) & 0xFFFFFFFF
-    h ^= h >> 16
-    return format(h & 0xFFFFFFFF, "08x")
-
-
-def _utf16_units(text: str) -> list[int]:
-    """把字符串拆成 JS 语义的 UTF-16 code unit 序列（代理对算两个单元）。"""
-    raw = text.encode("utf-16-le")
-    return [raw[index] | (raw[index + 1] << 8) for index in range(0, len(raw), 2)]
-
-
-def build_proof_token_v2(
-    seed: str,
-    difficulty: str,
-    base_config: list[Any],
-    limit: int = 500_000,
-) -> str:
-    """用 25 字段的 p 解出当前版本的 proof token（FNV-1a，结果带 ``~S`` 后缀）。
-
-    ``base_config`` 是 prepare 时提交的那个 ``p`` 解出来的数组；PoW 只改两个槽位：
-    下标 3 放 nonce、下标 9 放已经跑掉的毫秒数，其余字段原样保留——上游是把整段
-    JSON 重新 hash 的，动别的字节能过校验但和网页对不上。
-
-    传进来的一定是副本，调用方的列表不会被改。
-    """
-    difficulty = str(difficulty or "")
-    if not difficulty:
-        raise ValueError("proof token difficulty is required")
-    config = list(base_config)
-    started = time.time()
-    for nonce in range(limit):
-        config[3] = nonce
-        config[9] = round((time.time() - started) * 1000)
-        encoded = pybase64.b64encode(
-            json.dumps(config, separators=(",", ":"), ensure_ascii=False).encode()
-        ).decode()
-        if sentinel_hash(seed + encoded)[: len(difficulty)] <= difficulty:
-            return "gAAAAAB" + encoded + "~S"
-    raise RuntimeError(f"failed to solve proof token: difficulty={difficulty}")
-
-
-def decode_requirements_p(p_token: str) -> list[Any]:
-    """把 prepare 用的 ``p`` 还原成字段数组，PoW 要在原字段上改。
-
-    解不出来就抛 ValueError——宁可直接报错，也不要拿一份猜出来的字段去解一个
-    必然不通过的 PoW。
-    """
-    payload = p_token.removeprefix("gAAAAAC").removeprefix("gAAAAAB")
-    try:
-        decoded = pybase64.b64decode(payload)
-        config = json.loads(decoded.decode("utf-8"))
-    except Exception as exc:
-        raise ValueError("requirements token is not a decodable 25-field payload") from exc
-    if not isinstance(config, list):
-        raise ValueError("requirements token payload is not a field array")
-    return config
-
-
 def _pow_generate(seed: str, difficulty: str, config: list[Any], limit: int = 500000) -> tuple[str, bool]:
     target = bytes.fromhex(difficulty)
     diff_len = len(difficulty) // 2
@@ -255,24 +182,15 @@ def _pow_generate(seed: str, difficulty: str, config: list[Any], limit: int = 50
     return fallback, False
 
 
-def build_requirements_token(
+def build_legacy_requirements_token(
     user_agent: str,
     script_sources: Sequence[str] | None = None,
     data_build: str = "",
 ) -> str:
-    """构造 prepare 提交的 ``p``（25 字段，``gAAAAAC`` 前缀）。
-
-    新旧链路共用同一份字段表，差别只在 PoW 用哪种 hash、finalize 提交哪些字段名；
-    所以这个函数不叫 legacy —— 它现在就是网页提交的那份 ``p``。
-    """
     config = build_pow_config(user_agent, script_sources=script_sources, data_build=data_build)
     return "gAAAAAC" + pybase64.b64encode(
         json.dumps(config, separators=(",", ":"), ensure_ascii=False).encode()
     ).decode()
-
-
-# 旧名字继续可用：调用方和测试桩都还按这个名字 import。
-build_legacy_requirements_token = build_requirements_token
 
 
 def build_proof_token(
@@ -282,14 +200,8 @@ def build_proof_token(
     script_sources: Sequence[str] | None = None,
     data_build: str = "",
 ) -> str:
-    """旧版 PoW（SHA3-512、无后缀）。新链路请用 `build_proof_token_v2`。"""
     config = build_pow_config(user_agent, script_sources=script_sources, data_build=data_build)
     answer, solved = _pow_generate(seed, difficulty, config)
     if not solved:
         raise RuntimeError(f"failed to solve proof token: difficulty={difficulty}")
     return "gAAAAAB" + answer
-
-
-def build_proof_token_from_p(p_token: str, seed: str, difficulty: str) -> str:
-    """新版入口：直接在 prepare 用的那份 ``p`` 上解 PoW。"""
-    return build_proof_token_v2(seed, difficulty, decode_requirements_p(p_token))
