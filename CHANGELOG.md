@@ -2,9 +2,13 @@
 
 ## 2.0.4 - 2026-10-17
 
-+ [修复] `invalid_grant` 改为**换一张新 code 再兑换**，不再纠结用哪份 verifier。失败的兑换本身就会消耗掉原来那张 code，拿同一张 code 去试第二份 verifier 只会再失败一次；现在会重放浏览器自己那条原始 authorize URL（其余参数原样保留，只把 PKCE 换成我们的），拿一张必然绑在我们 verifier 上的新 code 直接兑换。此时账号已经创建成功、auth.openai.com 的会话 cookie 还在，重放有相当概率直接签发。
-+ [修复] 修正「code 是谁签发的」判定里一个会误报的来源：authorize 也可能是 POST，`code_challenge` 在请求体里、URL 上什么都没有。原来 `page.on("request")` 只看 query，会漏掉这类请求，把签发方错误地停在更早那条（往往正是我们改写过的）GET 上——上一批线上失败里 5 条 `invalid_grant` 全部显示「改写生效=是」却照样失败，很可能就是这个假阳性。现在 query 和请求体（JSON / 表单编码）都会解析。
-+ [修复] 证件核验闸门（`verify-your-identity`）不再干等 30 秒：Continue 按钮 5 秒点不到就算数，随后同样先尝试「用自带 PKCE 重新授权直接拿 code」——账号其实已经创建成功，只是当前会话被风控闸门拦住，没必要整次作废。
++ [修复] 修正「code 绑在谁的 verifier 上」的判定：`route.continue_(url=…)` 之后 `page.on("request")` 报的仍是**改写前**的 URL，只有 `page.on("response")` 带的是服务端实际收到的 URL（本地 probe 实测）。原来的判定拿请求事件跟改写集合比对，凡是改写过就必然判成「改写生效=是」——上一批 5 条 `invalid_grant` 全部是这个假阳性。现在以响应侧 URL 为准：签发指纹等于我们自己的 challenge 才算改写生效，否则用浏览器那份 verifier。
++ [修复] 判定优先级补上 POST authorize：`code_challenge` 也可能在请求体里（URL 上什么都没有），这种请求我们改写不到，code 只可能绑在它带的 challenge 上。现在请求体（JSON / 表单编码）优先于响应侧、响应侧优先于请求事件，并在日志里注明 `判定来源=请求体/响应/请求`。
++ [修复] `invalid_grant` 之后先用**浏览器那份 verifier 对同一张 code 再试一次**，失败才换新 code。线上最常见的形态是签发 code 的 POST 改写不到，code 其实绑在浏览器自己那份上；而重新 authorize 又常常只落到账号选择页/注册页，换不到新 code。失败的兑换可能已经消耗掉 code，那就还是 `invalid_grant`，与直接放弃没有区别。
++ [修复] `invalid_grant` 的兜底改为**换一张新 code 再兑换**：重放浏览器自己那条原始 authorize URL（其余参数原样保留，只把 PKCE 换成我们的），拿一张必然绑在我们 verifier 上的新 code 直接兑换。
++ [修复] 重新 authorize 落在 `/choose-an-account` 时点一下对应账号（按邮箱匹配，匹配不到再点默认按钮），不再干等 10 秒记一句「未签发新 code」。
++ [修复] 证件核验闸门（`verify-your-identity`）不再干等 30 秒：Continue 按钮 5 秒点不到就算数，随后同样先尝试重新授权拿 code——账号其实已经创建成功，只是当前会话被风控闸门拦住，没必要整次作废。
++ [修复] 不再拦截 `auth.openai.com/awe/**` 的 RUM 遥测请求（与兑换无关，还会反复重试）；诊断事件窗口从 16 条放宽到 40 条，并把相邻重复事件折叠成 `×N` 一行，避免遥测刷屏把改写/签发记录顶掉。
 + [新增] 兑换前无论判定结论如何，都把浏览器存储里反查到的 verifier 记进诊断（`只记诊断、不改用`），并在兑换成功时输出一行 `OAuth 诊断: 兑换成功 verifier 来源=…, code 捕获方式=…, 重新授权=是/否`，下一批日志可以直接对照判定准不准。
 
 ## 2.0.3 - 2026-10-06

@@ -8,10 +8,12 @@ from services.register.playwright_register import (
     OAUTH_ROUTE_PATTERN,
     OAUTH_TOKEN_PATH,
     IdentityVerificationRequired,
+    _advance_fresh_authorize,
     _code_is_bound_to_our_challenge,
     _continue_identity_verification,
     _install_oauth_routes,
     _exchange_oauth_token_in_browser,
+    _exchange_with_alternate_verifier,
     _exchange_with_fresh_code,
     _fill_birthdate,
     _is_invalid_grant,
@@ -24,6 +26,7 @@ from services.register.playwright_register import (
     _secret_fingerprint,
     _run_signup_state_machine,
     _should_block_browser_oauth_request,
+    _should_block_frameless_request,
     _submit_password,
     _switch_to_password_if_offered,
     _verifier_candidates,
@@ -53,7 +56,10 @@ def _oauth_context(**overrides) -> dict:
         "verifier": "",
         "verifier_source": "自带",
         "issuer_fp": "",
+        "issuer_source": "",
         "rewritten_fps": set(),
+        # 生产流程在创建上下文时写入自己的 challenge 指纹；测试里默认留空走旧判定。
+        "own_challenge_fp": "",
         "authorize_url": "",
         "browser_verifier": "",
         "capture_how": "",
@@ -73,6 +79,12 @@ class FakePage:
         self.goto_urls: list[str] = []
         # 导航发生时调用；用来模拟「重新 authorize 之后路由截到了新 code」。
         self.on_goto = None
+        # 账号选择页的替身：哪些选择器「看得见」、被点了哪些。
+        self.visible_selectors: set[str] = set()
+        self.clicked: list[str] = []
+
+    def locator(self, selector):
+        return FakeLocator(self, selector)
 
     async def route(self, pattern, handler) -> None:
         self.routes[pattern] = handler
@@ -92,6 +104,25 @@ class FakePage:
 
     async def wait_for_timeout(self, milliseconds):
         return None
+
+
+class FakeLocator:
+    """足够 ``_advance_fresh_authorize`` 用的 locator：看得见才点得到。"""
+
+    def __init__(self, page: "FakePage", selector: str) -> None:
+        self.page = page
+        self.selector = selector
+
+    @property
+    def first(self):
+        return self
+
+    async def wait_for(self, state=None, timeout=None) -> None:
+        if self.selector not in self.page.visible_selectors:
+            raise TimeoutError(f"not visible: {self.selector}")
+
+    async def click(self, timeout=None) -> None:
+        self.page.clicked.append(self.selector)
 
 
 class FakeFrame:
@@ -500,6 +531,129 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(_code_is_bound_to_our_challenge(oauth))
         self.assertFalse(_code_is_bound_to_our_challenge(_oauth_context()))
+
+    async def test_effective_rewrite_is_decided_by_the_response_url(self) -> None:
+        # route.continue_(url=…) 之后请求事件仍报**原始** URL，只有响应事件带的是服务端
+        # 实际收到的 URL（本地 probe 实测）。改写真的生效时，签发判定必须跟着响应侧走。
+        page = FakePage()
+        oauth = _oauth_context(own_challenge_fp=_secret_fingerprint("our-challenge"))
+        await _install_oauth_routes(page, 1, "our-challenge", [], [], oauth)
+        original = (
+            "https://auth.openai.com/oauth/authorize"
+            "?client_id=app_browser&code_challenge=browser-challenge"
+        )
+        route = FakeRoute(original, frame=frame_at("https://platform.openai.com/signup"))
+        await page.routes[OAUTH_ROUTE_PATTERN](route)
+
+        page.listeners["response"](
+            FakeResponse(200, route.continued_url, request=FakeRequest(original))
+        )
+        await page.routes[OAUTH_ROUTE_PATTERN](
+            FakeRoute(
+                "https://platform.openai.com/auth/callback?code=one-time-code&state=s",
+                frame=frame_at("https://platform.openai.com/signup"),
+            )
+        )
+
+        self.assertEqual(oauth["issuer_fp"], _secret_fingerprint("our-challenge"))
+        self.assertEqual(oauth["issuer_source"], "响应")
+        self.assertTrue(_code_is_bound_to_our_challenge(oauth))
+
+    async def test_body_authorize_issuer_beats_an_earlier_effective_rewrite(self) -> None:
+        # 线上形态：早期那条 GET 改写生效了（响应里带着我们的 challenge），但真正签发
+        # code 的是后面一条 POST，challenge 在请求体里、我们改写不到。判定必须落在
+        # 请求体那条上——否则又会拿我们的 verifier 去换浏览器签发的 code。
+        page = FakePage()
+        oauth = _oauth_context(own_challenge_fp=_secret_fingerprint("our-challenge"))
+        await _install_oauth_routes(page, 1, "our-challenge", [], [], oauth)
+        original = (
+            "https://auth.openai.com/oauth/authorize"
+            "?client_id=app_browser&code_challenge=browser-challenge"
+        )
+        route = FakeRoute(original, frame=frame_at("https://platform.openai.com/signup"))
+        await page.routes[OAUTH_ROUTE_PATTERN](route)
+        page.listeners["response"](
+            FakeResponse(200, route.continued_url, request=FakeRequest(original))
+        )
+
+        page.listeners["request"](
+            FakeRequest(
+                "https://auth.openai.com/api/accounts/authorize",
+                method="POST",
+                resource_type="fetch",
+                post_data=json.dumps({"code_challenge": "browser-challenge"}),
+            )
+        )
+        await page.routes[OAUTH_ROUTE_PATTERN](
+            FakeRoute(
+                "https://platform.openai.com/auth/callback?code=one-time-code&state=s",
+                frame=frame_at("https://platform.openai.com/signup"),
+            )
+        )
+
+        self.assertEqual(oauth["issuer_fp"], _secret_fingerprint("browser-challenge"))
+        self.assertEqual(oauth["issuer_source"], "请求体")
+        self.assertFalse(_code_is_bound_to_our_challenge(oauth))
+
+    async def test_telemetry_requests_are_not_blocked_after_the_callback(self) -> None:
+        # RUM 与兑换无关；拦它只会让重试把诊断窗口刷满，看不到真正的拦截记录。
+        rum = FakeRequest(
+            "https://auth.openai.com/awe/api/v2/rum", method="POST", resource_type="xhr"
+        )
+        self.assertEqual(_should_block_frameless_request(rum, True), "")
+        other = FakeRequest(
+            "https://auth.openai.com/api/accounts/session", method="POST", resource_type="xhr"
+        )
+        self.assertTrue(_should_block_frameless_request(other, True))
+
+    async def test_alternate_verifier_retries_the_same_code_with_the_browser_one(self) -> None:
+        # 判定为「code 是别人的」之后先拿浏览器那份 verifier 换同一张 code；
+        # 换到了就用浏览器来源记成功，不再走重新授权。
+        page = FakePage()
+        context = MagicMock()
+        oauth = _oauth_context(
+            browser_verifier="browser-verifier-value",
+            client_id="app_browser",
+            redirect_uri=platform_oauth_redirect_uri,
+            device_id="dev-1",
+        )
+
+        with patch(
+            "services.register.playwright_register._exchange_oauth_token_in_browser",
+            AsyncMock(return_value={"access_token": "access"}),
+        ) as exchange:
+            tokens = await _exchange_with_alternate_verifier(
+                page, context, 3, oauth, "one-time-code",
+                "own-verifier-value", "own-verifier-value", "",
+            )
+
+        self.assertEqual(tokens["access_token"], "access")
+        self.assertEqual(oauth["verifier"], "browser-verifier-value")
+        self.assertEqual(oauth["verifier_source"], "浏览器")
+        exchange.assert_awaited_once_with(
+            page, context, 3, "one-time-code", "browser-verifier-value", "",
+            client_id="app_browser",
+            redirect_uri=platform_oauth_redirect_uri,
+            device_id="dev-1",
+        )
+
+    async def test_fresh_authorize_clicks_the_account_on_the_chooser_page(self) -> None:
+        # 线上兜底最常见的落点是 /choose-an-account：点一下账号才会继续签发 code。
+        page = FakePage()
+        page.url = "https://auth.openai.com/choose-an-account"
+        page.visible_selectors = {'button:has-text("someone@example.com")'}
+
+        await _advance_fresh_authorize(page, 3, "someone@example.com")
+
+        self.assertEqual(page.clicked, ['button:has-text("someone@example.com")'])
+
+    async def test_fresh_authorize_leaves_other_landing_pages_alone(self) -> None:
+        page = FakePage()
+        page.url = "https://auth.openai.com/create-account"
+
+        await _advance_fresh_authorize(page, 3, "someone@example.com")
+
+        self.assertEqual(page.clicked, [])
 
     async def test_browser_verifier_is_matched_against_the_issuer_challenge_only(self) -> None:
         # 存储里可能同时躺着两条 challenge（我们改写前后的），只有签发 code 的那条算数。
