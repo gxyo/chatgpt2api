@@ -100,10 +100,14 @@ export type SettingsConfig = {
   image_cleanup_interval_unit?: "days" | "minutes" | string;
   image_cleanup_interval_minutes?: number | string;
   image_cleanup_time?: string;
+  /** 图片定时清理总开关；关闭后只是不再自动清理。 */
+  image_cleanup_enabled?: boolean | string;
   /** 定时清理是否保留当天图片（按天清理时生效）。 */
   image_cleanup_keep_today?: boolean | string;
   /** 日志清理是否保留当天日志；关闭后清理会带上当天已产生的日志。 */
   log_cleanup_keep_today?: boolean | string;
+  /** 每天自动清理日志时是否包含注册日志。 */
+  log_cleanup_include_register?: boolean | string;
   image_poll_timeout_secs?: number | string;
   image_generation_retry_count?: number | string;
   image_account_concurrency?: number | string;
@@ -775,6 +779,8 @@ export type LogRetentionInfo = {
   cleanup_time: string;
   /** 清理时是否保留当天已写入的日志。 */
   keep_today: boolean;
+  /** 每天自动清理是否包含注册日志。 */
+  include_register: boolean;
   size_bytes: number;
   /** 日志文件最后写入时间（Unix 秒）。 */
   updated_at: number;

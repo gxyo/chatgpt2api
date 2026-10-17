@@ -201,12 +201,19 @@ class LogService:
                 parts.append(f"{key}={value}")
         return " | ".join(part for part in parts if part)
 
-    def cleanup_before(self, cutoff_day: str, include_today_before: str = "", log_type: str = "") -> dict[str, int]:
+    def cleanup_before(
+        self,
+        cutoff_day: str,
+        include_today_before: str = "",
+        log_type: str = "",
+        exclude_types: set[str] | frozenset[str] = frozenset(),
+    ) -> dict[str, int]:
         """删除 cutoff_day 之前（不含当天）的日志。
 
         include_today_before 传入 ``YYYY-MM-DD HH:MM:SS`` 时，还会删除当天该时刻及之前
         写入的日志（用于「清理当天日志」开关）；留空则当天日志一律保留。
-        log_type 非空时只清理该类型的日志（例如注册日志页只删 register），其余原样保留。
+        log_type 非空时只清理该类型的日志（例如注册日志页只删 register），其余原样保留；
+        exclude_types 里的类型一律跳过（定时清理关闭「包含注册日志」时用）。
 
         保留下来的行按原样写回，不做重新序列化——统计服务靠比对已读过的尾部字节来推进
         增量游标，字节变了就得重找位置。日志按时间追加，要删的都是最老的一段前缀，
@@ -221,7 +228,8 @@ class LogService:
             item = self._parse_line(raw_line, line_number)
             day = self._log_day(item) if item is not None else ""
             time_text = str(item.get("time") or "") if item is not None else ""
-            matches_type = not log_type or (item is not None and str(item.get("type") or "") == log_type)
+            item_type = str(item.get("type") or "") if item is not None else ""
+            matches_type = (not log_type or item_type == log_type) and item_type not in exclude_types
             # 解析不出来的行一律留着：宁可少删几条，也不要把读不懂的内容丢掉。
             remove = matches_type and bool(day) and (
                 day < cutoff_day

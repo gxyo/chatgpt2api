@@ -271,7 +271,7 @@ def _save_image_cleanup_state(path: Path, state: dict[str, object]) -> None:
 
 def run_scheduled_image_cleanup_if_due(now: datetime | None = None) -> dict[str, int] | None:
     """Delete all images present at a due scheduled time using the date-delete path."""
-    if not config.image_cleanup_schedule_configured:
+    if not config.image_cleanup_schedule_configured or not getattr(config, "image_cleanup_enabled", True):
         return None
 
     current = now or _beijing_now()

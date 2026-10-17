@@ -145,6 +145,25 @@ class ImageCleanupTests(unittest.TestCase):
         self.assertEqual(state["last_run_at"], "2026-09-28T09:31:00")
         self.assertEqual(state["next_run_at"], "2026-10-01T09:30:00")
 
+    def test_scheduled_cleanup_master_switch_skips_the_run(self):
+        cleanup_config = mock.Mock()
+        cleanup_config.images_dir = self.images_dir
+        cleanup_config.image_cleanup_schedule_configured = True
+        cleanup_config.image_cleanup_enabled = False
+        cleanup_config.image_cleanup_interval_days = 1
+        cleanup_config.image_cleanup_time = "05:00"
+        state_file = self.root / "image_cleanup_state.json"
+        state_file.write_text(json.dumps({
+            "schedule": "1:05:00@+08:00",
+            "next_run_at": "2026-09-28T05:00:00",
+        }), encoding="utf-8")
+
+        with mock.patch.object(image_service, "config", cleanup_config), mock.patch.object(image_service, "delete_images") as delete_mock:
+            result = image_service.run_scheduled_image_cleanup_if_due(datetime(2026, 9, 28, 5, 1))
+
+        self.assertIsNone(result)
+        delete_mock.assert_not_called()
+
     def test_scheduled_cleanup_can_keep_the_current_day(self):
         """勾选「保留当天」后，05:00 清理只删到昨天，今天 00:00 之后的图片不动。"""
         cleanup_config = mock.Mock()

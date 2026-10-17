@@ -748,9 +748,12 @@ function LogsContent() {
                 />
                 天
               </label>
-              <label className="flex items-center gap-2 text-sm text-neutral-600">
+              <label
+                className="flex items-center gap-2 text-sm text-neutral-600"
+                title="关闭后不再每天自动清理；手动「立即清理」不受影响。"
+              >
                 <Checkbox checked={autoCleanup} onCheckedChange={(checked) => setAutoCleanup(Boolean(checked))} />
-                每天自动清理
+                启用定时清理
               </label>
               <label
                 className="flex items-center gap-2 text-sm text-neutral-600"
@@ -809,7 +812,7 @@ function LogsContent() {
             </span>
             <span className="text-xs text-neutral-500">
               占用 {formatBytes(retention?.size_bytes ?? 0)}
-              {retention ? ` · 保留最近 ${retentionDays} 天 · ${autoCleanup ? `每天 ${cleanupTime} 自动清理` : "未开启自动清理"}` : ""}
+              {retention ? ` · 保留最近 ${retentionDays} 天 · ${autoCleanup ? `每天 ${cleanupTime} 自动清理` : "未开启定时清理"}` : ""}
             </span>
             <span className="ml-auto inline-flex items-center rounded-lg border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors group-hover:border-brand/30 group-hover:text-foreground">
               设置

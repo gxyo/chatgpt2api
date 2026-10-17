@@ -53,6 +53,7 @@ def log_storage_info() -> dict[str, object]:
         "auto_cleanup": config.log_auto_cleanup,
         "cleanup_time": config.log_cleanup_time,
         "keep_today": bool(getattr(config, "log_cleanup_keep_today", True)),
+        "include_register": bool(getattr(config, "log_cleanup_include_register", True)),
         "size_bytes": size_bytes,
         "updated_at": updated_at,
     }
@@ -63,12 +64,14 @@ def cleanup_logs(
     keep_today: bool | None = None,
     now: datetime | None = None,
     log_type: str = "",
+    exclude_log_types: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     """按保留期清理日志，返回删了多少条、还剩多少条。
 
     keep_today 为 False 时，还会删除当天清理时刻之前已写入的日志（例如每天 05:00
     清理会把当天 00:00-05:00 的日志一并删掉）；为 None 时读取配置，默认保留当天。
-    log_type 非空时只清理该类型（注册日志页传 register），其余类型原样保留。
+    log_type 非空时只清理该类型（注册日志页传 register），其余类型原样保留；
+    exclude_log_types 里的类型一律跳过（定时清理未勾选「包含注册日志」时用）。
 
     只删日志，不动统计：统计服务已经把这些请求聚合到自己的快照里了，
     日志被截断后它只会把增量游标往前挪，不会重新计数。
@@ -82,6 +85,7 @@ def cleanup_logs(
         cutoff_day,
         include_today_before="" if keep_today else current.strftime("%Y-%m-%d %H:%M:%S"),
         log_type=log_type,
+        exclude_types=exclude_log_types,
     )
     try:
         size_bytes = log_service.path.stat().st_size
@@ -156,7 +160,11 @@ def run_scheduled_log_cleanup_if_due(now: datetime | None = None) -> dict[str, o
         if current < next_run_at:
             return None
 
-        result = cleanup_logs(now=current)
+        include_register = bool(getattr(config, "log_cleanup_include_register", True))
+        result = cleanup_logs(
+            now=current,
+            exclude_log_types=frozenset() if include_register else frozenset({"register"}),
+        )
         # 跳过停机期间错过的那些时刻：只留"下一次"，不做补跑。
         while next_run_at <= current:
             next_run_at += timedelta(days=1)

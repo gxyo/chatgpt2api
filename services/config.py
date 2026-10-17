@@ -356,6 +356,15 @@ class ConfigStore:
         return _normalize_image_cleanup_time(self.data.get("image_cleanup_time"))
 
     @property
+    def image_cleanup_enabled(self) -> bool:
+        """图片定时清理总开关。
+
+        默认开启，保持原有「配置了周期就执行」的行为；关闭后只是不再自动清理，
+        手动按日期删除不受影响。
+        """
+        return _normalize_bool(self.data.get("image_cleanup_enabled", True))
+
+    @property
     def image_cleanup_keep_today(self) -> bool:
         """定时清理是否保留当天图片。
 
@@ -363,6 +372,11 @@ class ConfigStore:
         执行日 00:00 之后生成的图片会留到下一次清理。
         """
         return _normalize_bool(self.data.get("image_cleanup_keep_today", False))
+
+    @property
+    def log_cleanup_include_register(self) -> bool:
+        """每天自动清理日志时是否包含注册日志；默认包含。"""
+        return _normalize_bool(self.data.get("log_cleanup_include_register", True))
 
     @property
     def log_cleanup_keep_today(self) -> bool:
@@ -529,8 +543,10 @@ class ConfigStore:
         data["image_cleanup_interval_unit"] = self.image_cleanup_interval_unit
         data["image_cleanup_interval_minutes"] = self.image_cleanup_interval_minutes
         data["image_cleanup_time"] = self.image_cleanup_time
+        data["image_cleanup_enabled"] = self.image_cleanup_enabled
         data["image_cleanup_keep_today"] = self.image_cleanup_keep_today
         data["log_cleanup_keep_today"] = self.log_cleanup_keep_today
+        data["log_cleanup_include_register"] = self.log_cleanup_include_register
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
@@ -577,6 +593,10 @@ class ConfigStore:
             next_data["image_cleanup_interval_minutes"] = _normalize_image_cleanup_interval_minutes(
                 next_data.get("image_cleanup_interval_minutes")
             )
+        if "image_cleanup_enabled" in next_data:
+            next_data["image_cleanup_enabled"] = _normalize_bool(
+                next_data.get("image_cleanup_enabled"), True
+            )
         if "image_cleanup_keep_today" in next_data:
             next_data["image_cleanup_keep_today"] = _normalize_bool(
                 next_data.get("image_cleanup_keep_today"), False
@@ -584,6 +604,10 @@ class ConfigStore:
         if "log_cleanup_keep_today" in next_data:
             next_data["log_cleanup_keep_today"] = _normalize_bool(
                 next_data.get("log_cleanup_keep_today"), True
+            )
+        if "log_cleanup_include_register" in next_data:
+            next_data["log_cleanup_include_register"] = _normalize_bool(
+                next_data.get("log_cleanup_include_register"), True
             )
         if "image_quota_error_message" in next_data:
             next_data["image_quota_error_message"] = _normalize_image_quota_error_message(

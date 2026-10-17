@@ -16,7 +16,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { cleanupSystemLogs, deleteSystemLogs, exportSystemLogs, fetchLogRetention, fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { cleanupSystemLogs, deleteSystemLogs, exportSystemLogs, fetchLogRetention, fetchSystemLogs, updateSettingsConfig, type SystemLog } from "@/lib/api";
 import { getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
@@ -95,6 +95,7 @@ function RegisterLogsContent() {
   // 注册日志清理：默认沿用日志管理页的保留天数与「保留当天」设置。
   const [retentionDays, setRetentionDays] = useState("30");
   const [keepToday, setKeepToday] = useState(true);
+  const [includeRegister, setIncludeRegister] = useState(true);
   const [isCleaning, setIsCleaning] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const parsedRetentionDays = Number.parseInt(retentionDays, 10);
@@ -105,11 +106,24 @@ function RegisterLogsContent() {
       .then((data) => {
         setRetentionDays(String(data.days));
         setKeepToday(data.keep_today !== false);
+        setIncludeRegister(data.include_register !== false);
       })
       .catch(() => {
         // 读取失败时保留默认值，手动清理仍可用。
       });
   }, []);
+
+  const toggleIncludeRegister = async (checked: boolean) => {
+    const previous = includeRegister;
+    setIncludeRegister(checked);
+    try {
+      await updateSettingsConfig({ log_cleanup_include_register: checked });
+      toast.success(checked ? "注册日志会参与每天自动清理" : "注册日志不再参与每天自动清理");
+    } catch (error) {
+      setIncludeRegister(previous);
+      toast.error(error instanceof Error ? error.message : "保存定时清理开关失败");
+    }
+  };
 
   const confirmCleanup = async () => {
     if (!retentionValid) {
@@ -268,7 +282,7 @@ function RegisterLogsContent() {
               注册日志清理
             </div>
             <p className="text-xs leading-5 text-muted-foreground">
-              只清理注册失败日志，不影响调用日志和统计。这里的天数仅用于本次清理；每天自动清理沿用日志管理页的设置，也会一并处理注册日志。
+              只清理注册失败日志，不影响调用日志和统计。这里的天数仅用于本次「立即清理」；每天自动清理沿用日志管理页的时间设置，是否包含注册日志由右侧开关控制。
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-3">
@@ -288,6 +302,16 @@ function RegisterLogsContent() {
             >
               <Checkbox checked={keepToday} onCheckedChange={(checked) => setKeepToday(Boolean(checked))} />
               保留当天日志
+            </label>
+            <label
+              className="flex items-center gap-2 text-sm text-neutral-600"
+              title="关闭后，每天自动清理不再处理注册日志；这里的手动「立即清理」仍然只清理注册日志。"
+            >
+              <Checkbox
+                checked={includeRegister}
+                onCheckedChange={(checked) => void toggleIncludeRegister(Boolean(checked))}
+              />
+              参与每天自动清理
             </label>
             <Button
               variant="outline"

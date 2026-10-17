@@ -99,6 +99,21 @@ class LogServiceCleanupTests(unittest.TestCase):
                 [("2026-09-27", "call"), ("2026-09-29", "register")],
             )
 
+    def test_cleanup_can_exclude_one_log_type(self):
+        """定时清理关掉「包含注册日志」后，register 记录原样保留。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-27 10:00:00", "call"),
+                log_line("2026-09-27 11:00:00", "register"),
+            ])
+
+            result = service.cleanup_before("2026-09-29", exclude_types={"register"})
+
+            self.assertEqual(result, {"removed": 1, "kept": 1})
+            remaining = service.path.read_text(encoding="utf-8")
+            self.assertIn('"type":"register"', remaining)
+            self.assertNotIn('"type":"call"', remaining)
+
     def test_cleanup_keeps_unparseable_lines(self):
         """读不懂的行一律留着，宁可少删也不丢内容。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -300,6 +315,7 @@ class CleanupReportTests(unittest.TestCase):
         self.assertIs(info["auto_cleanup"], True)
         self.assertEqual(info["cleanup_time"], "03:00")
         self.assertIs(info["keep_today"], True)
+        self.assertIs(info["include_register"], True)
 
     def test_storage_info_tolerates_a_missing_file(self):
         self.log_path.unlink()
@@ -380,6 +396,25 @@ class ScheduledLogCleanupTests(unittest.TestCase):
         self.assertEqual(
             json.loads(self.state_path.read_text(encoding="utf-8"))["next_run_at"], "2026-10-03T03:00:00"
         )
+
+    def test_scheduled_cleanup_can_skip_register_logs(self):
+        """注册日志页的「参与每天自动清理」关闭后，定时清理只动其他类型。"""
+        self.settings.log_cleanup_include_register = False
+        self.arm()
+        self.log_path.write_text(
+            "\n".join([
+                log_line("2020-01-01 10:00:00", "call"),
+                log_line("2020-01-01 11:00:00", "register"),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        result = run_scheduled_log_cleanup_if_due(self.at("2026-10-02T03:00:00"))
+
+        self.assertEqual(result["removed"], 1)
+        remaining = self.log_path.read_text(encoding="utf-8")
+        self.assertIn('"type":"register"', remaining)
+        self.assertNotIn('"type":"call"', remaining)
 
     def test_a_missed_slot_is_not_replayed(self):
         """关机错过一次就跳过，不补跑：只留下一次的时刻。"""

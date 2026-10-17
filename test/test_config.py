@@ -142,17 +142,26 @@ class ConfigLoadingTests(unittest.TestCase):
             # 图片清理默认删除执行日当天的数据（旧行为）；日志清理默认保留当天。
             self.assertFalse(store.image_cleanup_keep_today)
             self.assertTrue(store.log_cleanup_keep_today)
+            # 图片定时清理总开关与日志自动清理包含注册日志默认开启（保持旧行为）。
+            self.assertTrue(store.image_cleanup_enabled)
+            self.assertTrue(store.log_cleanup_include_register)
 
             config = store.update({
+                "image_cleanup_enabled": "0",
                 "image_cleanup_keep_today": "yes",
                 "log_cleanup_keep_today": "0",
+                "log_cleanup_include_register": False,
             })
 
+            self.assertIs(config["image_cleanup_enabled"], False)
             self.assertIs(config["image_cleanup_keep_today"], True)
             self.assertIs(config["log_cleanup_keep_today"], False)
+            self.assertIs(config["log_cleanup_include_register"], False)
             saved = json.loads(config_file.read_text(encoding="utf-8"))
+            self.assertIs(saved["image_cleanup_enabled"], False)
             self.assertIs(saved["image_cleanup_keep_today"], True)
             self.assertIs(saved["log_cleanup_keep_today"], False)
+            self.assertIs(saved["log_cleanup_include_register"], False)
 
     def test_invalid_image_cleanup_schedule_uses_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
