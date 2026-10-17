@@ -17,20 +17,13 @@ type ModeTone = {
   opacity: number;
 };
 
-// 调用方式之间是「身份」而非「量级」：用两个同饱和度、互相能掰开的类别色，
-// 主色宝蓝 + 次色青绿。不用同一主色的深浅两档 —— 浅蓝挨着深蓝容易读成「同一个量的剩余部分」，
-// 也显得发灰。图例和表头直接写出名称与百分比，颜色只做辅助。
+// 调用方式之间是「身份」而非「量级」：直接用主题里的图表色板，
+// 宝蓝（chart-1）+ 紫罗兰（chart-4）。两个色相相邻但能明确区分，
+// 比同色深浅和蓝绿搭配都更干净，浅色/深色模式各自有对应明度。
+// 图例和表头直接写出名称与百分比，颜色只做辅助。
 const MODE_TONES: Record<string, ModeTone> = {
-  generate: {
-    bar: "bg-[#2563eb] dark:bg-[#3b82f6]",
-    stroke: "stroke-[#2563eb] dark:stroke-[#3b82f6]",
-    opacity: 1,
-  },
-  edit: {
-    bar: "bg-[#0d9488] dark:bg-[#14b8a6]",
-    stroke: "stroke-[#0d9488] dark:stroke-[#14b8a6]",
-    opacity: 1,
-  },
+  generate: { bar: "bg-chart-1", stroke: "stroke-chart-1", opacity: 1 },
+  edit: { bar: "bg-chart-4", stroke: "stroke-chart-4", opacity: 1 },
 };
 // 认不出的方式走中性灰：不占分类槽位（后端目前只会给出这两种），也不会伪装成一个序列。
 const FALLBACK_TONE: ModeTone = {
