@@ -59,6 +59,9 @@ const REQUESTS_STROKE = "stroke-[#2a78d6] dark:stroke-[#3987e5]";
 const REQUESTS_FILL = "fill-[#2a78d6] dark:fill-[#3987e5]";
 const FAILED_STROKE = "stroke-[#e34948] dark:stroke-[#e66767]";
 const FAILED_FILL = "fill-[#e34948] dark:fill-[#e66767]";
+// 违反安全策略单独一条虚线：和红色失败线同处稀疏区段时，靠线型也能分开。
+const POLICY_STROKE = "stroke-[#d97706] dark:stroke-[#f0a13a]";
+const POLICY_FILL = "fill-[#d97706] dark:fill-[#f0a13a]";
 
 // 图例/提示框里的色点是 HTML <span>，不是 SVG 节点 —— fill-* 是 SVG 专用属性，
 // 套在 span 上不产生任何可见效果（色点会变成空白），必须用 bg-*。
@@ -161,7 +164,7 @@ export function WaveChart({
       .map((point, index) => `${index === 0 ? "M" : "L"} ${xAt(index).toFixed(2)} ${yAt(pick(point)).toFixed(2)}`)
       .join(" ");
 
-  // 失败是稀疏事件：整段贴着 0 的红线会被误读成坐标轴，因此只画出现过失败数的区段，
+  // 失败/安全拦截是稀疏事件：整段贴着 0 的线会被误读成坐标轴，因此只画出现过的区段，
   // 「0 还是缺数据」由 0 基线和面积填充区分。
   const toSparseLine = (pick: (point: ImageStatsPoint) => number) => {
     const subpaths: string[] = [];
@@ -187,6 +190,9 @@ export function WaveChart({
 
   const primaryLine = toLine(primaryValue);
   const failedLine = toSparseLine((point) => point.failed);
+  // 注册统计复用本组件时没有 policy_violation 字段，图例和折线都不出现。
+  const policyLine = toSparseLine((point) => point.policy_violation ?? 0);
+  const hasPolicyData = series.some((point) => (point.policy_violation ?? 0) > 0);
   const baseline = yAt(0);
   const primaryArea = pointCount
     ? `${primaryLine} L ${xAt(pointCount - 1).toFixed(2)} ${baseline.toFixed(2)} L ${xAt(0).toFixed(2)} ${baseline.toFixed(2)} Z`
@@ -223,6 +229,12 @@ export function WaveChart({
           <span className={cn("size-2.5 rounded-full", FAILED_DOT)} />
           {labels.secondary}
         </span>
+        {hasPolicyData ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className={cn("size-2.5 rounded-full", POLICY_DOT)} />
+            违反安全策略
+          </span>
+        ) : null}
       </div>
 
       <svg
@@ -230,7 +242,11 @@ export function WaveChart({
         height={CHART_HEIGHT}
         viewBox={`0 0 ${Math.max(width, 1)} ${CHART_HEIGHT}`}
         role="img"
-        aria-label={labels.ariaLabel.replace("{axis}", axisLabel)}
+        aria-label={
+          hasPolicyData
+            ? `${labels.ariaLabel.replace("{axis}", axisLabel)}（另含违反安全策略数）`
+            : labels.ariaLabel.replace("{axis}", axisLabel)
+        }
         onMouseLeave={() => setActiveIndex(null)}
       >
         {scale.ticks.map((tick) => (
@@ -344,6 +360,17 @@ export function WaveChart({
                 className={FAILED_STROKE}
               />
             ) : null}
+            {policyLine ? (
+              <path
+                d={policyLine}
+                fill="none"
+                strokeWidth={2}
+                strokeDasharray="4 3"
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                className={POLICY_STROKE}
+              />
+            ) : null}
           </>
         ) : null}
 
@@ -386,13 +413,22 @@ export function WaveChart({
               strokeWidth={2}
               className={cn(REQUESTS_FILL, "stroke-white dark:stroke-neutral-900")}
             />
-            {active.requests > 0 ? (
+            {active.failed > 0 ? (
               <circle
                 cx={activeX}
                 cy={yAt(active.failed)}
                 r={4.5}
                 strokeWidth={2}
                 className={cn(FAILED_FILL, "stroke-white dark:stroke-neutral-900")}
+              />
+            ) : null}
+            {(active.policy_violation ?? 0) > 0 ? (
+              <circle
+                cx={activeX}
+                cy={yAt(active.policy_violation ?? 0)}
+                r={4.5}
+                strokeWidth={2}
+                className={cn(POLICY_FILL, "stroke-white dark:stroke-neutral-900")}
               />
             ) : null}
           </g>
@@ -465,7 +501,10 @@ export function WaveChart({
                   <span className={cn("size-2 rounded-full", POLICY_DOT)} />
                   违反安全策略
                 </span>
-                <span className="tabular-nums">{active.policy_violation}</span>
+                <span className="tabular-nums">
+                  {active.policy_violation}
+                  {active.requests > 0 ? ` · 占请求 ${formatRate(active.policy_violation / active.requests)}` : ""}
+                </span>
               </div>
             ) : null}
             <div className="flex items-center justify-between gap-4 border-t border-neutral-100 pt-1 dark:border-white/10">

@@ -107,6 +107,7 @@ function StatsContent() {
   };
 
   const totals = data?.totals;
+  const policyRate = totals && totals.requests > 0 ? formatRate(totals.policy_violation / totals.requests) : "-";
   const range = data?.range;
   const granularity = range?.granularity ?? "hour";
   const rangeLabel = range
@@ -201,7 +202,7 @@ function StatsContent() {
         <StatTile
           label="违反安全策略"
           value={String(totals?.policy_violation ?? 0)}
-          caption="被内容审核拦截，不计入失败"
+          caption={`占请求数 ${policyRate} · 不计入失败`}
           tone={POLICY_DOT}
         />
         <StatTile
