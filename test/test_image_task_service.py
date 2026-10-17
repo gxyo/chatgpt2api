@@ -5,8 +5,11 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
-from services.image_task_service import ImageTaskService
+import services.image_task_service as image_task_service_module
+from services.image_task_service import UPSCALE_TIMEOUT_ALLOWANCE_SECS, ImageTaskService
 
 
 OWNER = {"id": "owner-1", "name": "Owner", "role": "admin"}
@@ -144,6 +147,31 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
             self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
+
+    def test_task_timeout_covers_configured_generation_retries(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", timeout_secs=60)
+            config = SimpleNamespace(
+                image_upscale_enabled=False, image_generation_retry_count=2, image_poll_timeout_secs=60,
+            )
+
+            with mock.patch.object(image_task_service_module, "config", config):
+                timeout = service._timeout_for_payload({"timeout_secs": 60, "size": "1024x1024"})
+
+            # 每次换号重试在 handler 里都续一份等长预算，外层也要按 1+重试次数放宽。
+            self.assertEqual(timeout, 180)
+
+    def test_task_timeout_adds_upscale_allowance_on_top_of_retries(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", timeout_secs=30)
+            config = SimpleNamespace(
+                image_upscale_enabled=True, image_generation_retry_count=1, image_poll_timeout_secs=30,
+            )
+
+            with mock.patch.object(image_task_service_module, "config", config):
+                timeout = service._timeout_for_payload({"timeout_secs": 30, "size": "4096x4096"})
+
+            self.assertEqual(timeout, 30 * 2 + UPSCALE_TIMEOUT_ALLOWANCE_SECS)
 
     def test_task_uses_configured_hard_timeout(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

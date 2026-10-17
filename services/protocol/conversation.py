@@ -5,7 +5,7 @@ import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Iterator
 
 import tiktoken
@@ -26,6 +26,7 @@ from utils.helper import (
     CHANNEL_BUSY_MESSAGE,
     IMAGE_MODELS,
     IMAGE_RETRY_MESSAGE,
+    SKIPPED_MAINLINE_RE,
     anonymize_token,
     extract_image_from_message_content,
     is_codex_image_model,
@@ -82,7 +83,8 @@ TRANSIENT_TEXT_RESCUE_WINDOW_SECS = 12.0
 TRANSIENT_IMAGE_RESCUE_WINDOW_SECS = 20.0
 TRANSIENT_RESCUE_SLEEP_SECS = 2.0
 IMAGE_POLL_TIMEOUT_MESSAGE = "当前生图任务处理超时，请稍后重试"
-# 「生成失败重试」只认这几类最终报错：上游普通失败、token 失效、轮询超时。
+# 「生成失败重试」只认这几类最终报错：上游普通失败、token 失效、轮询超时，
+# 以及 skipped_mainline（见 is_retryable_image_failure 里的正则判断）。
 # 内容违规（裸露/色情等）重试也不会过，换号只会白白消耗账号，必须排除在外。
 RETRYABLE_IMAGE_FAILURE_MESSAGES = frozenset({
     IMAGE_RETRY_MESSAGE,
@@ -92,7 +94,12 @@ RETRYABLE_IMAGE_FAILURE_MESSAGES = frozenset({
 
 
 def is_retryable_image_failure(message: object) -> bool:
-    return str(message or "").strip() in RETRYABLE_IMAGE_FAILURE_MESSAGES
+    text = str(message or "").strip()
+    if text in RETRYABLE_IMAGE_FAILURE_MESSAGES:
+        return True
+    # 上游 400 {"skipped_mainline":true}：这个号的 mainline/conduit 状态被别的
+    # 并发请求吃掉了。原样重试同一个号没用，但换号重建握手是安全的恢复方式。
+    return bool(SKIPPED_MAINLINE_RE.search(text))
 
 
 def public_image_error_message(message: str) -> str:
@@ -1628,6 +1635,10 @@ def _generate_single_image_attempts(
     request_budget_secs = (
         max(0.0, float(request.deadline) - time.monotonic()) if request.deadline is not None else None
     )
+    # 本次尝试实际使用的 deadline。换号重试时 schedule_generation_retry 会续一份
+    # 新的完整预算——轮询超时通常正好把原始预算吃干，不续的话重试还没开始就被
+    # deadline 拦下，设置页的「生成失败重试次数」对这类失败永远不生效。
+    attempt_deadline = request.deadline
     # 下面这几个在循环里被反复重绑，失败快照（finally 里那个闭包）读的是当前值。
     backend: OpenAIBackendAPI | None = None
     select_kwargs: dict[str, Any] = {}
@@ -1652,7 +1663,7 @@ def _generate_single_image_attempts(
         conduit = _conduit_state(backend)
         # 握手/主链路现场同时挂到这一条尝试记录上，尝试轨迹那一行才有东西可写。
         _finish_image_attempt(attempt, attempt_outcome, attempt_error, **conduit, **attempt_extra)
-        remaining = remaining_image_deadline_secs(request.deadline)
+        remaining = remaining_image_deadline_secs(attempt_deadline)
         inflight = account_service.image_inflight_count(token) if token else 0
         handshake = account_service.image_handshake_diagnostics(token) if token else {}
         pool = _pool_diagnostics(attempted_tokens, select_kwargs)
@@ -1685,16 +1696,22 @@ def _generate_single_image_attempts(
         """按设置里的重试次数决定是否换号重来。返回 True 时调用方应 `continue`。
 
         只认 RETRYABLE_IMAGE_FAILURE_MESSAGES 里的三类报错；内容违规、额度不足、
-        渠道拥堵等都不在这里重试。请求预算已经耗尽时也不再重试（重试也来不及）。
+        渠道拥堵等都不在这里重试。
+
+        每次重试都续一份与原请求等长的新预算：轮询超时往往正好把原始预算耗尽，
+        如果还按旧 deadline 判断，配置的重试次数对这类失败永远不会生效。
         """
-        nonlocal generation_retry_count
+        nonlocal generation_retry_count, attempt_deadline
         if generation_retry_limit <= 0 or generation_retry_count >= generation_retry_limit:
-            return False
-        if image_deadline_expired(request.deadline):
             return False
         if not is_retryable_image_failure(str(failure)):
             return False
         generation_retry_count += 1
+        if attempt_deadline is not None and request_budget_secs is not None:
+            renewed = time.monotonic() + request_budget_secs
+            if renewed > attempt_deadline:
+                attempt_deadline = renewed
+                diagnostics["retry_deadline_extended_secs"] = round(request_budget_secs, 1)
         logger.warning({
             "event": "image_generation_failure_retry",
             "trace_id": trace_id,
@@ -1710,14 +1727,14 @@ def _generate_single_image_attempts(
     while True:
         in_rescue = rescue_deadline > 0
         try:
-            ensure_image_deadline(request.deadline)
+            ensure_image_deadline(attempt_deadline)
         except ImageGenerationError:
             diagnostics["retry_stopped"] = "request_deadline"
             raise
         if in_rescue:
-            if not transient_rescue_wait(rescue_deadline, rescue_attempts, request.deadline):
+            if not transient_rescue_wait(rescue_deadline, rescue_attempts, attempt_deadline):
                 diagnostics["retry_stopped"] = "rescue_window_exhausted"
-                ensure_image_deadline(request.deadline)
+                ensure_image_deadline(attempt_deadline)
                 raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email)
             rescue_attempts += 1
         backend = None
@@ -1747,7 +1764,7 @@ def _generate_single_image_attempts(
                 excluded = set()
             token = account_service.get_available_access_token(
                 excluded,
-                deadline=request.deadline,
+                deadline=attempt_deadline,
                 **select_kwargs,
             )
             if not in_rescue:
@@ -1759,21 +1776,26 @@ def _generate_single_image_attempts(
             attempt = _start_image_attempt(diagnostics, "", "")
             attempt_outcome, attempt_error = "account_select_failed", str(exc)
             record_attempt_state()
-            ensure_image_deadline(request.deadline)
-            if last_transient_error or is_retriable_upstream_error(exc):
-                if not in_rescue:
-                    rescue_deadline = time.time() + TRANSIENT_IMAGE_RESCUE_WINDOW_SECS
-                    continue
-                raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email) from exc
-            if poll_timeout_retry_count > 0:
-                failure = ImageGenerationError(
+            transient = last_transient_error or is_retriable_upstream_error(exc)
+            poll_failure: ImageGenerationError | None = None
+            if poll_timeout_retry_count > 0 and not transient:
+                # 换号重试会续一份新预算，所以要在 deadline 检查之前先尝试调度，
+                # 否则第一轮轮询耗尽预算后，后面的重试全部走不到。
+                poll_failure = ImageGenerationError(
                     IMAGE_POLL_TIMEOUT_MESSAGE,
                     code="upstream_timeout",
                     account_email=account_email,
                 )
-                if schedule_generation_retry(failure):
+                if schedule_generation_retry(poll_failure):
                     continue
-                raise failure from exc
+            ensure_image_deadline(attempt_deadline)
+            if transient:
+                if not in_rescue:
+                    rescue_deadline = time.time() + TRANSIENT_IMAGE_RESCUE_WINDOW_SECS
+                    continue
+                raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email) from exc
+            if poll_failure is not None:
+                raise poll_failure from exc
             raise ImageGenerationError(
                 str(exc) or "upstream completed without returning an image result",
                 account_email=account_email,
@@ -1794,20 +1816,25 @@ def _generate_single_image_attempts(
             "index": index,
         })
         try:
-            ensure_image_deadline(request.deadline)
-            backend = OpenAIBackendAPI(access_token=token, deadline=request.deadline)
+            ensure_image_deadline(attempt_deadline)
+            backend = OpenAIBackendAPI(access_token=token, deadline=attempt_deadline)
             backend.trace_id = trace_id
             if request.progress_callback:
                 backend.progress_callback = request.progress_callback
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
+            # 续过预算后，stream 内部的 deadline 检查（轮询兜底、sleep）也要看到新值；
+            # 多图并行时线程共用同一个 request，不能直接改，复制一份传进去。
+            stream_request = request if attempt_deadline == request.deadline else replace(
+                request, deadline=attempt_deadline,
+            )
             outputs: list[ImageOutput] = []
             retry_after_output = False
-            for output in stream_fn(backend, request, index, total):
+            for output in stream_fn(backend, stream_request, index, total):
                 # result 已经产出说明上游生图完成，后面的耗时是本地后处理（4K 超分、
                 # 落盘）。把这段时间算进上游轮询预算的话，超分慢几秒就会被误判成
                 # 「当前生图任务处理超时」，还会因为 deadline 已过而不触发换号重试。
                 if output.kind != "result":
-                    ensure_image_deadline(request.deadline)
+                    ensure_image_deadline(attempt_deadline)
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:
@@ -1869,9 +1896,12 @@ def _generate_single_image_attempts(
                 setattr(exc, "account_email", account_email)
             # 轮询超时：如果还没有拿到最终消息/图片，只丢弃本账号的进度并换号重试。
             if not returned_message and not returned_result:
-                ensure_image_deadline(request.deadline)
                 poll_timeout_retry_count += 1
-                if poll_timeout_retry_count <= MAX_POLL_TIMEOUT_RETRIES:
+                # 内置的自动换号重试只能花剩余预算；预算已经耗尽时留给下面
+                # 配置的「生成失败重试」处理——那次重试会续一份新预算。
+                if poll_timeout_retry_count <= MAX_POLL_TIMEOUT_RETRIES and not image_deadline_expired(
+                    attempt_deadline,
+                ):
                     logger.warning({
                         "event": "image_poll_timeout_retry",
                         "trace_id": trace_id,
@@ -1889,6 +1919,7 @@ def _generate_single_image_attempts(
                     "account_email": account_email,
                     "retry_count": poll_timeout_retry_count,
                     "index": index,
+                    "deadline_expired": image_deadline_expired(attempt_deadline),
                 })
             failure = ImageGenerationError(
                 IMAGE_POLL_TIMEOUT_MESSAGE,
@@ -2094,7 +2125,7 @@ def _generate_single_image_attempts(
                         "index": index,
                         "error": last_error[:200],
                     })
-                    sleep_with_image_deadline(min(2.0 * tls_retry_count, 10.0), request.deadline)
+                    sleep_with_image_deadline(min(2.0 * tls_retry_count, 10.0), attempt_deadline)
                     continue
             # 连接超时错误（curl 28）：同账号短等待重试，不切换账号
             if not emitted_for_token and is_connection_timeout_error(last_error):
@@ -2111,7 +2142,7 @@ def _generate_single_image_attempts(
                         "wait_secs": wait_secs,
                         "error": last_error[:200],
                     })
-                    sleep_with_image_deadline(wait_secs, request.deadline)
+                    sleep_with_image_deadline(wait_secs, attempt_deadline)
                     continue
             if transient:
                 failure = ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email, conversation_id="")

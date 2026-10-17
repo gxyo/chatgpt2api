@@ -285,12 +285,9 @@ class ImageTaskService:
         payload_with_progress = {**payload, "progress_callback": progress_callback}
         try:
             handler = self.edit_handler if mode == "edit" else self.generation_handler
-            timeout_secs = _positive_float(payload.get("timeout_secs"), self._timeout_secs())
-            # 请求了 2K/4K 且开了超分时，本地放大要额外时间（还要排队等串行锁）。
-            upscale_target = parse_size_long_edge(payload.get("size"))
-            if config.image_upscale_enabled and upscale_target and upscale_target > 1024:
-                timeout_secs += UPSCALE_TIMEOUT_ALLOWANCE_SECS
-            result = self._run_handler_with_timeout(handler, payload_with_progress, timeout_secs)
+            result = self._run_handler_with_timeout(
+                handler, payload_with_progress, self._timeout_for_payload(payload),
+            )
             if not isinstance(result, dict):
                 raise RuntimeError("image task returned streaming result unexpectedly")
             data = result.get("data")
@@ -344,6 +341,19 @@ class ImageTaskService:
 
     def _timeout_secs(self) -> float:
         return _positive_float(self.timeout_secs_getter(), float(config.image_poll_timeout_secs))
+
+    def _timeout_for_payload(self, payload: dict[str, Any]) -> float:
+        """任务线程的等待上限：基础轮询预算 + 每次换号重试的预算 + 超分时间。"""
+        timeout_secs = _positive_float(payload.get("timeout_secs"), self._timeout_secs())
+        # 每次「生成失败重试」都会在 handler 里续一份等长的新预算，外层等待时间
+        # 不跟着放宽的话，任务线程会先判超时，重试产生的图被白白丢掉。
+        retry_count = max(0, int(getattr(config, "image_generation_retry_count", 0) or 0))
+        timeout_secs += timeout_secs * retry_count
+        # 请求了 2K/4K 且开了超分时，本地放大要额外时间（还要排队等串行锁）。
+        upscale_target = parse_size_long_edge(payload.get("size"))
+        if config.image_upscale_enabled and upscale_target and upscale_target > 1024:
+            timeout_secs += UPSCALE_TIMEOUT_ALLOWANCE_SECS
+        return timeout_secs
 
     def _run_handler_with_timeout(
         self,

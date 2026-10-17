@@ -75,6 +75,8 @@ class RetryableFailureClassifierTests(unittest.TestCase):
             IMAGE_RETRY_MESSAGE,
             "upstream authentication token is invalid",
             "当前生图任务处理超时，请稍后重试",
+            '{"skipped_mainline":true}',
+            'status_code=400, {"skipped_mainline": true}',
         ):
             with self.subTest(message=message):
                 self.assertTrue(is_retryable_image_failure(message))
@@ -84,6 +86,7 @@ class RetryableFailureClassifierTests(unittest.TestCase):
             CONTENT_POLICY_MESSAGE,
             CHANNEL_BUSY_MESSAGE,
             "no available image quota",
+            '{"skipped_mainline":false}',
             "",
             None,
         ):
@@ -216,6 +219,32 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(failure.code, "content_policy_violation")
         self.assertEqual(accounts.selected_image_tokens, ["token-a"])
 
+    def test_retry_switches_account_on_skipped_mainline(self):
+        def stream_fn(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                raise ImageGenerationError(
+                    'status_code=400, {"skipped_mainline":true}',
+                    status_code=400,
+                    code="skipped_mainline",
+                )
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        outputs, accounts = self._run(["token-a", "token-b"], stream_fn, 1)
+
+        self.assertEqual(outputs[0].kind, "result")
+        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+        self.assertEqual(accounts.image_results, [("token-a", False), ("token-b", True)])
+
+    def test_skipped_mainline_does_not_retry_when_retry_count_is_zero(self):
+        def stream_fn(backend, request, index=1, total=1):
+            raise ImageGenerationError('{"skipped_mainline":true}', status_code=400, code="skipped_mainline")
+            yield  # pragma: no cover
+
+        failure, accounts = self._run_expecting_error(["token-a", "token-b"], stream_fn, 0)
+
+        self.assertEqual(accounts.selected_image_tokens, ["token-a"])
+        self.assertIn("skipped_mainline", str(failure))
+
     def test_retry_switches_account_on_poll_timeout(self):
         def stream_fn(backend, request, index=1, total=1):
             if backend.access_token == "token-a":
@@ -228,6 +257,53 @@ class GenerationRetryTests(unittest.TestCase):
 
         self.assertEqual(outputs[0].kind, "result")
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+
+    def test_poll_timeout_after_deadline_expires_retries_with_a_fresh_budget(self):
+        # 轮询超时通常正好把原始预算耗尽。配置了「生成失败重试次数」时，
+        # 换号重试必须能拿到一份新预算，否则 deadline 检查会把它拦死。
+        import time as _time
+
+        seen_deadlines: dict[str, float] = {}
+
+        def stream_fn(backend, request, index=1, total=1):
+            seen_deadlines[backend.access_token] = request.deadline
+            if backend.access_token == "token-a":
+                _time.sleep(0.2)
+                raise ImagePollTimeoutError("poll timed out")
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        patcher, accounts = self._patches(["token-a", "token-b"], stream_fn, 1)
+        deadline = _time.monotonic() + 0.05
+        with patcher:
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="draw a cat",
+                message_as_error=True,
+                deadline=deadline,
+            )))
+
+        self.assertEqual(outputs[0].kind, "result")
+        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+        self.assertGreater(seen_deadlines["token-b"], deadline)
+
+    def test_retry_deadline_extension_is_recorded_in_diagnostics(self):
+        import time as _time
+
+        def stream_fn(backend, request, index=1, total=1):
+            _time.sleep(0.2)
+            raise ImagePollTimeoutError("poll timed out")
+
+        patcher, _ = self._patches(["token-a", "token-b"], stream_fn, 1)
+        with patcher, self.assertRaises(ImageGenerationError) as raised:
+            list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="draw a cat",
+                message_as_error=True,
+                deadline=_time.monotonic() + 0.05,
+            )))
+
+        diagnostics = raised.exception.image_diagnostics
+        self.assertIn("retry_deadline_extended_secs", diagnostics)
 
     def test_result_is_accepted_after_deadline_expires_during_postprocess(self):
         # 4K 超分在本地 CPU 上跑，可能一直跑到上游轮询预算用完。图片已经拿到手了，
