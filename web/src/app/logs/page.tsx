@@ -39,6 +39,7 @@ const typeLabels: Record<string, string> = {
 
 /** 详情弹窗里的字段名：翻译一下常用字段，其余保留原始键名。 */
 const detailLabels: Record<string, string> = {
+  account_email: "账号",
   request_text: "请求内容",
   error: "错误信息",
   upscale_target: "超分目标(px)",
@@ -52,6 +53,17 @@ const detailLabels: Record<string, string> = {
 
 /** 这两个字段单独排版，不进右侧对齐的键值网格。 */
 const trailDetailKeys = new Set(["account_trail", "attempts_summary"]);
+
+/** 调用方与请求参数属于「幕后」信息：账号置顶，其余排到键值区最后，不挡模型/耗时/状态。 */
+const topDetailKeys = new Set(["account_email"]);
+const bottomDetailKeys = new Set(["key_id", "key_name", "role", "size", "n", "quality"]);
+
+function detailFieldRank(key: string) {
+  if (topDetailKeys.has(key)) {
+    return 0;
+  }
+  return bottomDetailKeys.has(key) ? 2 : 1;
+}
 
 type AttemptOutcomeStyle = {
   label: string;
@@ -424,9 +436,10 @@ function LogsContent() {
   const detailUrls = getUrls(detailLog);
   const detailUpstreamError = getUpstreamError(detailLog);
   const detail = detailLog?.detail || {};
-  const detailFields = Object.entries(detail).filter(
-    ([key, value]) => key !== "urls" && !trailDetailKeys.has(key) && typeof value !== "object",
-  );
+  const detailFields = Object.entries(detail)
+    .filter(([key, value]) => key !== "urls" && !trailDetailKeys.has(key) && typeof value !== "object")
+    // 稳定排序：同组内保持后端原有的字段顺序。
+    .sort(([left], [right]) => detailFieldRank(left) - detailFieldRank(right));
   const accountTrail = collapseAccountTrail(splitAccountTrail(detail.account_trail));
   const attemptGroups = parseAttemptGroups(detail.attempts_summary);
   const timelineGroups = parseImageTimelines(detail.image_timeline);
