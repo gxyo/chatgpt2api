@@ -44,7 +44,7 @@ export function SegmentedControl<T extends string>({
             className={cn(
               "rounded-lg px-3.5 py-1.5 text-[13px] font-medium whitespace-nowrap transition-colors",
               active
-                ? "bg-brand text-brand-foreground shadow-sm shadow-brand/25"
+                ? "bg-brand text-brand-foreground shadow-[0_1px_2px_rgba(15,23,42,0.18),inset_0_1px_0_rgba(255,255,255,0.14)]"
                 : "text-muted-foreground hover:bg-muted hover:text-foreground",
             )}
           >

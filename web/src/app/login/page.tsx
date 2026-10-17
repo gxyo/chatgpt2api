@@ -62,7 +62,7 @@ export default function LoginPage() {
           <div className="pointer-events-none absolute -bottom-28 -left-16 size-64 rounded-full bg-[#2563eb]/20 blur-[100px]" />
 
           <div className="relative flex items-center gap-2.5 text-[15px] font-bold tracking-tight">
-            <span className="grid size-8 place-items-center rounded-[10px] bg-[#2563eb] text-white shadow-[0_6px_16px_-6px_rgba(37,99,235,0.8)]">
+            <span className="grid size-8 place-items-center rounded-[10px] bg-[#2563eb] text-white shadow-[0_6px_16px_-6px_rgba(37,99,235,0.55)]">
               <Sparkles className="size-4" />
             </span>
             chatgpt2api

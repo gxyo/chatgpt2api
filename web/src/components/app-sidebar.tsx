@@ -71,7 +71,7 @@ const brandLinkClass =
 /** 品牌标识：品牌蓝实心方块，和按钮、图表是同一套主色。 */
 function BrandMark() {
   return (
-    <span className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-[#2563eb] text-white shadow-[0_6px_16px_-6px_rgba(37,99,235,0.8)]">
+    <span className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-[#2563eb] text-white shadow-[0_6px_16px_-6px_rgba(37,99,235,0.55)]">
       <Sparkles className="size-4" />
     </span>
   );
@@ -186,7 +186,7 @@ function NavList({
                 className={cn(
                   "relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] transition-colors",
                   active
-                    ? "bg-[#2563eb] font-semibold text-white shadow-[0_10px_24px_-12px_rgba(37,99,235,0.95)]"
+                    ? "bg-[#2563eb] font-semibold text-white shadow-[0_10px_24px_-12px_rgba(37,99,235,0.6)]"
                     : "font-medium text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >

@@ -57,7 +57,7 @@
   --card-foreground: oklch(0.21 0.015 255);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.21 0.015 255);
-  --primary: oklch(0.63 0.163 245);
+  --primary: oklch(0.55 0.2 262);
   --primary-foreground: oklch(1 0 0);
   --secondary: oklch(0.965 0.006 250);
   --secondary-foreground: oklch(0.3 0.02 255);
@@ -68,25 +68,25 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.925 0.007 250);
   --input: oklch(0.925 0.007 250);
-  --ring: oklch(0.63 0.163 245);
+  --ring: oklch(0.55 0.2 262);
   /* 品牌蓝：主按钮 / 选中药丸 / 链接 / 图表主序列 */
-  --brand: oklch(0.63 0.163 245);
+  --brand: oklch(0.55 0.2 262);
   --brand-foreground: oklch(1 0 0);
   /* 选中态底色：浅一档的蓝，不刺眼 */
-  --brand-soft: oklch(0.955 0.033 243);
-  --chart-1: oklch(0.63 0.163 245);
+  --brand-soft: oklch(0.955 0.026 262);
+  --chart-1: oklch(0.55 0.2 262);
   --chart-2: oklch(0.68 0.14 195);
   --chart-3: oklch(0.75 0.16 70);
   --chart-4: oklch(0.62 0.2 300);
   --chart-5: oklch(0.7 0.15 160);
   --sidebar: oklch(1 0 0);
   --sidebar-foreground: oklch(0.21 0.015 255);
-  --sidebar-primary: oklch(0.63 0.163 245);
+  --sidebar-primary: oklch(0.55 0.2 262);
   --sidebar-primary-foreground: oklch(1 0 0);
   --sidebar-accent: oklch(0.968 0.005 250);
   --sidebar-accent-foreground: oklch(0.3 0.02 255);
   --sidebar-border: oklch(0.925 0.007 250);
-  --sidebar-ring: oklch(0.63 0.163 245);
+  --sidebar-ring: oklch(0.55 0.2 262);
 }
 
 .dark {
@@ -96,7 +96,7 @@
   --card-foreground: oklch(0.97 0.004 250);
   --popover: oklch(0.218 0.014 255);
   --popover-foreground: oklch(0.97 0.004 250);
-  --primary: oklch(0.66 0.15 245);
+  --primary: oklch(0.68 0.16 262);
   --primary-foreground: oklch(0.17 0.012 255);
   --secondary: oklch(0.27 0.014 255);
   --secondary-foreground: oklch(0.97 0.004 250);
@@ -107,18 +107,18 @@
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 9%);
   --input: oklch(1 0 0 / 13%);
-  --ring: oklch(0.7 0.15 245);
-  --brand: oklch(0.7 0.15 245);
+  --ring: oklch(0.68 0.16 262);
+  --brand: oklch(0.68 0.16 262);
   --brand-foreground: oklch(0.17 0.012 255);
-  --brand-soft: oklch(0.31 0.055 248);
-  --chart-1: oklch(0.7 0.15 245);
+  --brand-soft: oklch(0.31 0.06 262);
+  --chart-1: oklch(0.68 0.16 262);
   --chart-2: oklch(0.74 0.12 195);
   --chart-3: oklch(0.79 0.14 70);
   --chart-4: oklch(0.68 0.17 300);
   --chart-5: oklch(0.75 0.13 160);
   --sidebar: oklch(0.195 0.013 255);
   --sidebar-foreground: oklch(0.97 0.004 250);
-  --sidebar-primary: oklch(0.7 0.15 245);
+  --sidebar-primary: oklch(0.68 0.16 262);
   --sidebar-primary-foreground: oklch(0.17 0.012 255);
   --sidebar-accent: oklch(0.27 0.014 255);
   --sidebar-accent-foreground: oklch(0.97 0.004 250);

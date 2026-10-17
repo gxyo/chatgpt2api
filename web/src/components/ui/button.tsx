@@ -9,9 +9,9 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        // 主按钮 = 品牌蓝实心，参考稿里的「查询」就是这个观感
+        // 主按钮 = 品牌蓝实心；只留一层极轻的投影和顶部高光，避免彩色光晕显得廉价
         default:
-          "bg-primary text-primary-foreground shadow-sm shadow-primary/20 hover:bg-primary/90",
+          "bg-primary text-primary-foreground shadow-[0_1px_2px_rgba(15,23,42,0.18),inset_0_1px_0_rgba(255,255,255,0.14)] hover:bg-primary/90",
         destructive:
           "bg-destructive text-white shadow-sm shadow-destructive/20 hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60",
         outline:
