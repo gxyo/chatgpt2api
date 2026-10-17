@@ -17,12 +17,20 @@ type ModeTone = {
   opacity: number;
 };
 
-// 调用方式之间是「身份」而非「量级」，所以用同一主色的两档深浅区分：
-// 深蓝是主方式，浅蓝是次方式，整页仍是一套蓝色语言，不再出现黄/品红这类跳色。
-// 图例和表头都直接写出名称与百分比，颜色只做辅助，不承担唯一的信息通道。
+// 调用方式之间是「身份」而非「量级」：用两个同饱和度、互相能掰开的类别色，
+// 主色宝蓝 + 次色青绿。不用同一主色的深浅两档 —— 浅蓝挨着深蓝容易读成「同一个量的剩余部分」，
+// 也显得发灰。图例和表头直接写出名称与百分比，颜色只做辅助。
 const MODE_TONES: Record<string, ModeTone> = {
-  generate: { bar: "bg-brand", stroke: "stroke-brand", opacity: 1 },
-  edit: { bar: "bg-brand/40", stroke: "stroke-brand", opacity: 0.38 },
+  generate: {
+    bar: "bg-[#2563eb] dark:bg-[#3b82f6]",
+    stroke: "stroke-[#2563eb] dark:stroke-[#3b82f6]",
+    opacity: 1,
+  },
+  edit: {
+    bar: "bg-[#0d9488] dark:bg-[#14b8a6]",
+    stroke: "stroke-[#0d9488] dark:stroke-[#14b8a6]",
+    opacity: 1,
+  },
 };
 // 认不出的方式走中性灰：不占分类槽位（后端目前只会给出这两种），也不会伪装成一个序列。
 const FALLBACK_TONE: ModeTone = {
