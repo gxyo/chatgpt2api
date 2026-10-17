@@ -33,6 +33,7 @@ LOG_STATUS_POLICY_VIOLATION = "policy_violation"
 POLICY_VIOLATION_CODE = "content_policy_violation"
 INTERNAL_RESPONSE_KEYS = {
     "_account_email", "_conversation_id", "_account_trail", "_attempts_summary", "_postprocess",
+    "_image_timeline",
 }
 # 一键导出：默认最近 10 条，条数上界防止一次导出把浏览器拖死。
 LOG_EXPORT_DEFAULT_LIMIT = 10
@@ -322,6 +323,78 @@ def _collect_postprocess(value: object) -> list[dict[str, Any]]:
     return items
 
 
+def _collect_image_timelines(value: object) -> list[dict[str, Any]]:
+    """收集结果里的执行时间线（`_image_timeline`，每张图一份）。"""
+    groups: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        raw = value.get("_image_timeline")
+        if isinstance(raw, list):
+            groups.extend(
+                item for item in raw
+                if isinstance(item, dict) and isinstance(item.get("steps"), list) and item["steps"]
+            )
+        for key, item in value.items():
+            if key != "_image_timeline":
+                groups.extend(_collect_image_timelines(item))
+    elif isinstance(value, list):
+        for item in value:
+            groups.extend(_collect_image_timelines(item))
+    return groups
+
+
+def _diagnostics_image_timeline(diagnostics: dict[str, Any]) -> dict[str, Any] | None:
+    steps = diagnostics.get("timeline")
+    if not isinstance(steps, list) or not steps:
+        return None
+    return {
+        "index": diagnostics.get("index") or 1,
+        "steps": [step for step in steps if isinstance(step, dict)],
+    }
+
+
+def add_image_timeline_detail(
+    detail: dict[str, Any],
+    *,
+    result: object = None,
+    exc: BaseException | None = None,
+    image_timelines: list[dict[str, Any]] | None = None,
+) -> None:
+    """把「这次生图每一步做了什么、花了多久、为什么」写进同一条调用日志。
+
+    成功时时间线挂在结果的 `_image_timeline` 上（流式是每个 chunk 都带一份），
+    失败时随异常的 image_diagnostics.timeline 出去。多张图并行时每张一份，
+    按图片序号去重后存成数组，日志详情页逐条展示。
+    """
+    groups = list(image_timelines or [])
+    groups.extend(_collect_image_timelines(result))
+    if exc is not None:
+        diagnostics = _exception_image_diagnostics(exc)
+        if diagnostics is not None:
+            group = _diagnostics_image_timeline(diagnostics)
+            if group is not None:
+                groups.append(group)
+        # 多图并行全部失败时，外层异常上挂着每一张图的完整时间线。
+        groups.extend(_exception_image_timeline_groups(exc))
+    if not groups:
+        return
+    by_index: dict[int, dict[str, Any]] = {}
+    for group in groups:
+        index = group.get("index") or 1
+        steps = [step for step in (group.get("steps") or []) if isinstance(step, dict)]
+        if not steps:
+            continue
+        # 每个 chunk 都带一份完整时间线：同一张图保留步数最多的那份（最完整）。
+        current = by_index.get(index)
+        if current is None or len(steps) > len(current["steps"]):
+            by_index[index] = {
+                "index": index,
+                **({"total": group["total"]} if group.get("total") else {}),
+                "steps": steps,
+            }
+    if by_index:
+        detail["image_timeline"] = [by_index[key] for key in sorted(by_index)]
+
+
 def add_postprocess_detail(
     detail: dict[str, Any],
     *,
@@ -378,6 +451,23 @@ def _flatten_account_trail(trails: list[list[str]]) -> list[str]:
             flat.append(email)
             seen.add(email)
     return flat
+
+
+def _exception_image_timeline_groups(exc: BaseException) -> list[dict[str, Any]]:
+    """沿异常链收集多图并行失败时挂上的逐图时间线（image_timeline_groups）。"""
+    groups: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        raw = getattr(current, "image_timeline_groups", None)
+        if isinstance(raw, list):
+            groups.extend(
+                item for item in raw
+                if isinstance(item, dict) and isinstance(item.get("steps"), list) and item["steps"]
+            )
+        current = current.__cause__ or current.__context__
+    return groups
 
 
 def _exception_image_diagnostics(exc: BaseException) -> dict[str, Any] | None:
@@ -657,6 +747,7 @@ class LoggedCall:
         conversation_ids: list[str] = []
         account_trails: list[list[str]] = []
         attempts_summaries: list[str] = []
+        image_timelines: list[dict[str, Any]] = []
         postprocess: list[dict[str, Any]] = []
         failed = False
         try:
@@ -666,6 +757,7 @@ class LoggedCall:
                 conversation_ids.extend(_collect_conversation_ids(item))
                 account_trails.extend(_collect_account_trails(item))
                 attempts_summaries.extend(_collect_attempts_summaries(item))
+                image_timelines.extend(_collect_image_timelines(item))
                 postprocess.extend(_collect_postprocess(item))
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
@@ -678,6 +770,7 @@ class LoggedCall:
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
                 account_trails=account_trails,
                 attempts_summaries=attempts_summaries,
+                image_timelines=image_timelines,
                 postprocess=postprocess,
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
@@ -690,7 +783,7 @@ class LoggedCall:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
                          conversation_id=conversation_ids[0] if conversation_ids else "",
                          account_trails=account_trails, attempts_summaries=attempts_summaries,
-                         postprocess=postprocess)
+                         image_timelines=image_timelines, postprocess=postprocess)
 
     def log_failure(self, exc: BaseException, summary: str = "调用失败", error: str = "",
                     **kwargs: Any) -> None:
@@ -708,6 +801,7 @@ class LoggedCall:
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
             exc: BaseException | None = None, account_trails: list[list[str]] | None = None,
             attempts_summaries: list[str] | None = None,
+            image_timelines: list[dict[str, Any]] | None = None,
             postprocess: list[dict[str, Any]] | None = None) -> None:
         detail = {
             "key_id": self.identity.get("id"),
@@ -763,6 +857,9 @@ class LoggedCall:
         add_attempt_trail_detail(
             detail, result=result, exc=exc,
             account_trails=account_trails, attempts_summaries=attempts_summaries,
+        )
+        add_image_timeline_detail(
+            detail, result=result, exc=exc, image_timelines=image_timelines,
         )
         add_postprocess_detail(detail, result=result, postprocess=postprocess)
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)

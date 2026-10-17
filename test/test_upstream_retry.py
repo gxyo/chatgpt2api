@@ -102,6 +102,16 @@ class FakeAccountService:
         excluded = set(excluded_tokens or set())
         return any(token not in excluded for token in self.tokens)
 
+    # 选号阶段的 conduit 窗口探测：这些用例不模拟窗口争用，直接当成拿到。
+    def acquire_image_handshake(self, access_token: str, timeout: float | None = None) -> bool:
+        return True
+
+    def release_image_handshake(self, access_token: str) -> None:
+        return None
+
+    def release_image_slot(self, access_token: str) -> None:
+        return None
+
     def image_inflight_count(self, access_token: str) -> int:
         return 0
 
@@ -632,6 +642,9 @@ class UpstreamRetryTests(unittest.TestCase):
              mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs), \
              mock.patch.object(conversation, "time") as fake_time:
             fake_time.time.return_value = 1000.0
+            # 执行时间线用 monotonic 计时；不设的话每次调用都返回 MagicMock，
+            # 后面的时间相减会 TypeError。
+            fake_time.monotonic.return_value = 0.0
             fake_time.sleep.side_effect = lambda _: None
             outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
                 model="gpt-image-2",

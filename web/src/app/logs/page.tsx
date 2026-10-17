@@ -158,6 +158,83 @@ function formatAttemptDuration(milliseconds: number | null) {
   return milliseconds === null ? "—" : `${(milliseconds / 1000).toFixed(2)} s`;
 }
 
+type TimelineStep = {
+  at_ms?: number;
+  dur_ms?: number;
+  step?: string;
+  label?: string;
+  detail?: string;
+  outcome?: string;
+};
+
+type TimelineGroup = {
+  index: number;
+  total?: number;
+  steps: TimelineStep[];
+};
+
+/** 执行时间线：后端每张图一份，步骤按发生时间排好序。 */
+function parseImageTimelines(value: unknown): TimelineGroup[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const groups: TimelineGroup[] = [];
+  for (const group of value) {
+    if (!group || typeof group !== "object") {
+      continue;
+    }
+    const rawSteps = (group as Record<string, unknown>).steps;
+    if (!Array.isArray(rawSteps)) {
+      continue;
+    }
+    const steps = rawSteps.filter(
+      (step): step is TimelineStep => Boolean(step) && typeof step === "object",
+    );
+    if (!steps.length) {
+      continue;
+    }
+    const index = Number((group as Record<string, unknown>).index);
+    const total = Number((group as Record<string, unknown>).total);
+    groups.push({
+      index: Number.isFinite(index) ? index : 1,
+      total: Number.isFinite(total) ? total : undefined,
+      steps,
+    });
+  }
+  return groups.sort((a, b) => a.index - b.index);
+}
+
+function formatTimelineAt(milliseconds?: number) {
+  return typeof milliseconds === "number" ? `+${(milliseconds / 1000).toFixed(2)}s` : "—";
+}
+
+function formatTimelineDuration(milliseconds?: number) {
+  if (typeof milliseconds !== "number") {
+    return "";
+  }
+  return milliseconds >= 1000
+    ? `${(milliseconds / 1000).toFixed(2)} s`
+    : `${milliseconds} ms`;
+}
+
+/** 时间线里「需要用户注意一下」的步骤：换号、回退、失败是琥珀/红色，普通阶段是灰的。 */
+function timelineStepTone(step: TimelineStep) {
+  const outcome = step.outcome || "";
+  if (outcome === "failed") {
+    return "border-red-200 bg-red-50/70 text-red-700";
+  }
+  if (outcome === "busy_switch" || outcome === "fallback" || outcome === "wait_window") {
+    return "border-amber-200 bg-amber-50/70 text-amber-800";
+  }
+  if (step.step === "retry" || step.step === "rescue_enter" || step.step === "rescue_wait") {
+    return "border-amber-200 bg-amber-50/70 text-amber-800";
+  }
+  if (outcome === "success") {
+    return "border-emerald-200 bg-emerald-50/70 text-emerald-700";
+  }
+  return "border-neutral-200 bg-white text-neutral-700";
+}
+
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) {
     return "0 B";
@@ -294,6 +371,7 @@ function LogsContent() {
   );
   const accountTrail = collapseAccountTrail(splitAccountTrail(detail.account_trail));
   const attemptGroups = parseAttemptGroups(detail.attempts_summary);
+  const timelineGroups = parseImageTimelines(detail.image_timeline);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
@@ -810,6 +888,54 @@ function LogsContent() {
                       </div>
                     ))}
                   </div>
+                </div>
+              ) : null}
+              {timelineGroups.length ? (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
+                    <Route className="size-4 text-neutral-400" />
+                    执行时间线
+                    <span className="text-xs font-normal text-neutral-400">
+                      每一步做了什么、从请求开始算起的时间、花了多久、为什么
+                    </span>
+                  </div>
+                  {timelineGroups.map((group) => (
+                    <div key={`timeline-${group.index}`} className="space-y-1.5">
+                      {timelineGroups.length > 1 ? (
+                        <div className="px-1 text-xs font-medium text-neutral-500">
+                          第 {group.index}
+                          {group.total ? ` / ${group.total}` : ""} 张
+                        </div>
+                      ) : null}
+                      <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
+                        {group.steps.map((step, stepIndex) => (
+                          <div
+                            key={`${group.index}-${stepIndex}-${step.at_ms ?? 0}`}
+                            className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 px-3 py-2.5 text-xs ${stepIndex > 0 ? "border-t border-neutral-100" : ""}`}
+                          >
+                            <span className="w-14 shrink-0 font-mono text-[11px] tabular-nums text-neutral-400">
+                              {formatTimelineAt(step.at_ms)}
+                            </span>
+                            <span className={`shrink-0 rounded-md border px-1.5 py-0.5 font-medium ${timelineStepTone(step)}`}>
+                              {step.label || step.step || "步骤"}
+                            </span>
+                            {step.detail ? (
+                              <p className="min-w-0 flex-1 leading-5 break-words text-neutral-600">
+                                {step.detail}
+                              </p>
+                            ) : (
+                              <span className="flex-1" />
+                            )}
+                            {typeof step.dur_ms === "number" ? (
+                              <span className="shrink-0 font-mono text-[11px] tabular-nums text-neutral-500">
+                                {formatTimelineDuration(step.dur_ms)}
+                              </span>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : null}
               {detailUpstreamError.length ? (

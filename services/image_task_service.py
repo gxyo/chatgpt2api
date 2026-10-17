@@ -18,6 +18,7 @@ from services.log_service import (
     LOG_STATUS_SUCCESS,
     LOG_TYPE_CALL,
     add_attempt_trail_detail,
+    add_image_timeline_detail,
     add_postprocess_detail,
     image_request_detail,
     is_policy_violation_error,
@@ -443,6 +444,8 @@ class ImageTaskService:
             detail["urls"] = list(dict.fromkeys(urls))
         # 成功/失败都在同一条记录里带上换号轨迹（只有真的重试过才有内容）。
         add_attempt_trail_detail(detail, result=result, exc=exc)
+        # 执行时间线：每一步做了什么、花了多久、为什么（成功和失败都有）。
+        add_image_timeline_detail(detail, result=result, exc=exc)
         # 4K 超分的耗时/失败原因也平铺进这条记录。
         add_postprocess_detail(detail, result=result)
         try:

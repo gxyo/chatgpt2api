@@ -30,10 +30,15 @@ CONTENT_POLICY_MESSAGE = (
 
 
 class FakeAccountService:
-    def __init__(self, tokens: list[str]):
+    def __init__(self, tokens: list[str], conduit_busy: set[str] | None = None):
         self.tokens = tokens
         self.image_results: list[tuple[str, bool]] = []
         self.selected_image_tokens: list[str] = []
+        # 模拟「这个号的 conduit 窗口正被别的请求占着」。
+        self.conduit_busy = set(conduit_busy or set())
+        self.handshake_acquired: list[str] = []
+        self.handshake_released: list[str] = []
+        self.released_slots: list[str] = []
 
     def get_available_access_token(self, excluded_tokens=None, deadline=None, **kwargs):
         excluded = set(excluded_tokens or set())
@@ -46,6 +51,20 @@ class FakeAccountService:
     def has_available_image_account(self, excluded_tokens=None, **kwargs):
         excluded = set(excluded_tokens or set())
         return any(token not in excluded for token in self.tokens)
+
+    def acquire_image_handshake(self, access_token: str, timeout: float | None = None) -> bool:
+        if access_token in self.conduit_busy:
+            return False
+        self.handshake_acquired.append(access_token)
+        return True
+
+    def release_image_handshake(self, access_token: str) -> None:
+        if access_token:
+            self.handshake_released.append(access_token)
+
+    def release_image_slot(self, access_token: str) -> None:
+        if access_token:
+            self.released_slots.append(access_token)
 
     def image_inflight_count(self, access_token: str) -> int:
         return 0
@@ -426,6 +445,63 @@ class GenerationRetryTests(unittest.TestCase):
 
         self.assertEqual(outputs[0].kind, "result")
 
+    def test_conduit_window_busy_switches_account_immediately(self):
+        # 同号并发时 conduit 窗口（prepare→mainline）被别的请求占着：直接换号，
+        # 不排队等待，也不能把这个号记成失败（它压根没发出去请求）。
+        started = time.monotonic()
+        stream_tokens: list[str] = []
+
+        def stream_fn(backend, request, index=1, total=1):
+            stream_tokens.append(backend.access_token)
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        fake_accounts = FakeAccountService(["token-a", "token-b"], conduit_busy={"token-a"})
+        with mock.patch.multiple(
+            conversation,
+            account_service=fake_accounts,
+            config=SimpleNamespace(image_generation_retry_count=0),
+            stream_image_outputs=stream_fn,
+        ):
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True,
+            )))
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(outputs[-1].kind, "result")
+        self.assertEqual(fake_accounts.selected_image_tokens, ["token-a", "token-b"])
+        # 没有在 token-a 上起 backend，也没有把它记成失败；只把槽位还回去。
+        self.assertEqual(stream_tokens, ["token-b"])
+        self.assertEqual(fake_accounts.released_slots, ["token-a"])
+        self.assertEqual(fake_accounts.handshake_acquired, ["token-b"])
+        self.assertEqual(fake_accounts.image_results, [("token-b", True)])
+        self.assertLess(elapsed, 1.0)
+
+    def test_conduit_window_busy_everywhere_falls_back_to_waiting(self):
+        # 号池里所有可用号的窗口都忙：换一圈拿不到就别再空转，回到原来的排队行为。
+        stream_tokens: list[str] = []
+
+        def stream_fn(backend, request, index=1, total=1):
+            stream_tokens.append(backend.access_token)
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        tokens = ["token-a", "token-b", "token-c"]
+        fake_accounts = FakeAccountService(tokens, conduit_busy=set(tokens))
+        with mock.patch.multiple(
+            conversation,
+            account_service=fake_accounts,
+            config=SimpleNamespace(image_generation_retry_count=0),
+            stream_image_outputs=stream_fn,
+        ):
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True,
+            )))
+
+        self.assertEqual(outputs[-1].kind, "result")
+        # 每个号只在「换号」阶段被选中一次，之后停止探测、在其中一个号上正常尝试。
+        self.assertEqual(sorted(set(fake_accounts.selected_image_tokens)), tokens)
+        self.assertEqual(len(stream_tokens), 1)
+        self.assertEqual(len(fake_accounts.released_slots), len(tokens))
+
     def test_retry_is_bounded_by_configured_count(self):
         def stream_fn(backend, request, index=1, total=1):
             yield ImageOutput(
@@ -554,6 +630,127 @@ class AttemptTrailLogTests(unittest.TestCase):
         )
         self.assertIn("message_retry", detail["attempts_summary"])
 
+    def test_success_log_contains_step_timeline_with_durations(self):
+        """时间线要能回答：每一步干嘛了、什么时候、花了多久、为什么。"""
+
+        def stream_fn(backend, request, index=1, total=1):
+            # 模拟 backend 阶段打点：先 bootstrap 40ms，再发主链路 10ms。
+            now = time.monotonic()
+            backend.image_phases = {
+                "bootstrapping": now - 0.05,
+                "starting_generation": now - 0.01,
+            }
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        patcher = mock.patch.multiple(
+            conversation,
+            account_service=FakeAccountService(["token-a"]),
+            config=SimpleNamespace(image_generation_retry_count=0),
+            stream_image_outputs=stream_fn,
+        )
+        with patcher:
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True,
+            )))
+
+        detail = self._log_call("调用完成", conversation.collect_image_outputs(outputs))
+        groups = detail["image_timeline"]
+        self.assertEqual(len(groups), 1)
+        steps = groups[0]["steps"]
+        steps_by_name = {step["step"]: step for step in steps}
+
+        self.assertIn("request_start", steps_by_name)
+        self.assertEqual(steps_by_name["select_account"]["account_email"], "token-a@example.test")
+        self.assertEqual(steps_by_name["conduit_window"]["outcome"], "acquired")
+        # 阶段耗时来自 backend 的打点，按真实时间排在时间线里。
+        self.assertGreaterEqual(steps_by_name["phase_bootstrapping"]["dur_ms"], 30)
+        self.assertIn("at_ms", steps_by_name["phase_bootstrapping"])
+        # 每一步都有中文名，日志详情不用再看原始 key。
+        self.assertTrue(all(step.get("label") for step in steps))
+        # 时间线按发生时间排序。
+        self.assertEqual([step["at_ms"] for step in steps], sorted(step["at_ms"] for step in steps))
+        self.assertEqual(steps_by_name["attempt_end"]["outcome"], "success")
+
+    def test_failure_log_contains_step_timeline(self):
+        def stream_fn(backend, request, index=1, total=1):
+            yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=IMAGE_RETRY_MESSAGE)
+
+        patcher = mock.patch.multiple(
+            conversation,
+            account_service=FakeAccountService(["token-a", "token-b"]),
+            config=SimpleNamespace(image_generation_retry_count=1),
+            stream_image_outputs=stream_fn,
+        )
+        with patcher, self.assertRaises(ImageGenerationError) as raised:
+            list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True,
+            )))
+        failure = raised.exception
+
+        detail = self._log_call("调用失败", status="failed", error=str(failure), exc=failure)
+        steps = detail["image_timeline"][0]["steps"]
+        step_names = [step["step"] for step in steps]
+
+        self.assertIn("request_start", step_names)
+        self.assertIn("select_account", step_names)
+        self.assertIn("retry", step_names)
+        self.assertIn("attempt_end", step_names)
+        self.assertNotIn("_image_timeline", detail)
+
+    def test_conduit_busy_switch_is_visible_in_timeline(self):
+        def stream_fn(backend, request, index=1, total=1):
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        patcher = mock.patch.multiple(
+            conversation,
+            account_service=FakeAccountService(["token-a", "token-b"], conduit_busy={"token-a"}),
+            config=SimpleNamespace(image_generation_retry_count=0),
+            stream_image_outputs=stream_fn,
+        )
+        with patcher:
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True,
+            )))
+
+        detail = self._log_call("调用完成", conversation.collect_image_outputs(outputs))
+        steps = detail["image_timeline"][0]["steps"]
+        window_steps = [step for step in steps if step["step"] == "conduit_window"]
+        select_steps = [step for step in steps if step["step"] == "select_account"]
+
+        self.assertEqual([step["outcome"] for step in window_steps], ["busy_switch", "acquired"])
+        self.assertEqual(window_steps[0]["wait_ms"], 0)
+        self.assertEqual(window_steps[0]["account_email"], "token-a@example.test")
+        self.assertIn("直接换号", window_steps[0]["detail"])
+        self.assertEqual([step["account_email"] for step in select_steps],
+                         ["token-a@example.test", "token-b@example.test"])
+
+    def test_parallel_partial_failure_keeps_failed_image_timeline(self):
+        """多图并行时某张失败，失败那张也要在日志时间线里有自己的一条。"""
+
+        def stream_fn(backend, request, index=1, total=1):
+            if index == 2:
+                raise ImageGenerationError(CONTENT_POLICY_MESSAGE)
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        patcher = mock.patch.multiple(
+            conversation,
+            account_service=FakeAccountService(["token-a", "token-b"]),
+            config=SimpleNamespace(image_generation_retry_count=0, image_parallel_generation=True),
+            stream_image_outputs=stream_fn,
+        )
+        with patcher:
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True, n=2,
+            )))
+
+        detail = self._log_call("调用完成", conversation.collect_image_outputs(outputs))
+        groups = {group["index"]: group for group in detail["image_timeline"]}
+
+        self.assertEqual(sorted(groups), [1, 2])
+        self.assertEqual(groups[1]["steps"][-1]["outcome"], "success")
+        self.assertEqual(groups[2]["steps"][-1]["step"], "attempt_end")
+        self.assertEqual(groups[2]["steps"][-1]["outcome"], "generation_error")
+
     def test_stream_chunks_yield_one_record_and_hide_internal_keys(self):
         call = LoggedCall(
             {"id": "k1", "name": "管理员", "role": "admin"},
@@ -562,16 +759,21 @@ class AttemptTrailLogTests(unittest.TestCase):
         chunks = [
             {"object": "image.generation.result", "data": [{"url": "ok"}],
              "_account_trail": ["token-a@example.test", "token-b@example.test"],
+             "_image_timeline": [{"index": 1, "steps": [{"at_ms": 0, "step": "request_start"}]}],
              "_attempts_summary": "#1 token-a@example.test poll_timeout → #2 token-b@example.test success"},
         ] * 2
 
         yielded = list(call.stream(iter(chunks)))
 
         self.assertTrue(all("_account_trail" not in item for item in yielded))
+        self.assertTrue(all("_image_timeline" not in item for item in yielded))
         items = self.service.list()
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["detail"]["account_trail"],
                          "token-a@example.test → token-b@example.test")
+        self.assertEqual(
+            items[0]["detail"]["image_timeline"][0]["steps"][0]["step"], "request_start",
+        )
 
     def test_repeated_chunk_trails_collapse_to_one_round(self):
         """每个流式 chunk 都会带一份同样的轨迹，不能拼成 A → B → A → B。"""

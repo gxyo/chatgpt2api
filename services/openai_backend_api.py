@@ -285,6 +285,11 @@ class OpenAIBackendAPI:
         # window_held 那时已经是 false，排查 skipped_mainline 只能看这个。
         self.conduit_acquired: bool | None = None
         self.conduit_wait_ms = 0
+        # 窗口从拿到到释放共持有多久、因为什么释放。调用日志的时间线里直接展示，
+        # 用来看「同号请求是不是把时间耗在等窗口上」。
+        self.conduit_acquired_at: float | None = None
+        self.conduit_hold_ms = 0
+        self.conduit_release_reason = ""
         # 生图链路各阶段「首次到达」的时刻。失败诊断里折算成阶段耗时，
         # 用来回答「这条请求的时间到底花在哪一步、还剩多少预算给轮询」。
         self.image_phases: Dict[str, float] = {}
@@ -3067,6 +3072,17 @@ class OpenAIBackendAPI:
             result["mainline_retries"] = self.image_mainline_retries
         return result
 
+    def adopt_conduit_window(self) -> None:
+        """接管调用方（选号阶段）已经抢到的 conduit 窗口。
+
+        同一线程里重复 acquire 不可重入的 Lock 会把自己锁死，所以调用方预抢之后
+        必须走这里，让 `_stream_picture_conversation` 跳过等待、直接用这把锁。
+        """
+        self.conduit_window_held = True
+        self.conduit_acquired = True
+        self.conduit_wait_ms = 0
+        self.conduit_acquired_at = time.monotonic()
+
     def _acquire_conduit_window(self) -> bool:
         """占用本账号的 conduit 握手窗口（prepare → mainline）。
 
@@ -3084,6 +3100,8 @@ class OpenAIBackendAPI:
         self.conduit_wait_ms = int((time.monotonic() - started) * 1000)
         self.conduit_window_held = bool(held)
         self.conduit_acquired = bool(held)
+        if held:
+            self.conduit_acquired_at = time.monotonic()
         if not held:
             logger.warning({
                 "event": "conduit_window_timeout",
@@ -3096,9 +3114,13 @@ class OpenAIBackendAPI:
             })
         return self.conduit_window_held
 
-    def _release_conduit_window(self) -> None:
+    def _release_conduit_window(self, reason: str = "") -> None:
         if getattr(self, "conduit_window_held", False):
             self.conduit_window_held = False
+            acquired_at = getattr(self, "conduit_acquired_at", None)
+            if acquired_at is not None:
+                self.conduit_hold_ms = int(max(0.0, time.monotonic() - acquired_at) * 1000)
+            self.conduit_release_reason = reason or "released"
             account_service.release_image_handshake(self.access_token)
 
     def _conduit_window_releaser(self) -> Callable[[], None]:
@@ -3131,7 +3153,10 @@ class OpenAIBackendAPI:
         # 这里只把「conduit 握手窗口」（get_chat_requirements → prepare → mainline，
         # 约 1-2 秒）按账号串行化，生图阶段（几十秒）仍然是
         # image_account_concurrency 路并行。
-        handshake_held = self._acquire_conduit_window()
+        # 选号阶段已经预抢过窗口就直接用：同号并发时等窗口只会把预算耗在排队上，
+        # 调用方已经按「拿不到就换号」处理过了。没预抢（换号次数用尽/直接调用的
+        # 链路）才回到原来的排队行为。
+        handshake_held = self.conduit_window_held or self._acquire_conduit_window()
         handshake_wait_ms = self.conduit_wait_ms
         try:
             for attempt in range(1, max_mainline_retries + 1):
@@ -3194,7 +3219,11 @@ class OpenAIBackendAPI:
                 break
         finally:
             if handshake_held:
-                self._release_conduit_window()
+                # response 有值说明主链路 POST 已被上游接受，窗口按正常路径释放；
+                # 否则是在 prepare/mainline 期间失败，也算这次持窗结束。
+                self._release_conduit_window(
+                    "mainline_sent" if response is not None else "mainline_error",
+                )
         if response is None:
             raise ImageMainlineStateError("image generation did not start")
         self._report_progress("generating")

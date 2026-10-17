@@ -15,6 +15,7 @@ from services.config import config
 from services.image_storage_service import image_storage_service
 from services.image_upscale_service import parse_size_long_edge, upscale_png
 from services.openai_backend_api import (
+    CONDUIT_WINDOW_TIMEOUT_SECS,
     ImageContentPolicyError,
     ImageMainlineStateError,
     ImagePollTimeoutError,
@@ -85,6 +86,11 @@ MAX_POLL_TIMEOUT_RETRIES = 4
 # 模型回正文而非出图时自动换号重试的次数。文本回复往往在预算快耗尽时才对上游拿完流，
 # 每次重试都会续一份预算，任务线程的等待上限（image_task_service）也要按它放宽。
 MAX_TEXT_REPLY_RETRIES = 3
+# 同一账号的 conduit 窗口（prepare→mainline）被占时，最多连换几个号，不做等待。
+# 窗口正常只占 1 秒出头；同号并发时排队等窗口会把几十秒预算耗在「等别人」上，
+# 换到别的号成功率更高。连换这么多次还拿不到，说明整个号池都在握手，再换也
+# 只是空转，回退到原来的排队行为。
+MAX_CONDUIT_BUSY_SWITCHES = 5
 TRANSIENT_TEXT_RESCUE_WINDOW_SECS = 12.0
 TRANSIENT_IMAGE_RESCUE_WINDOW_SECS = 20.0
 TRANSIENT_RESCUE_SLEEP_SECS = 2.0
@@ -467,6 +473,12 @@ class ImageOutput:
     # 调用日志据此把「第 1 个号 → 第 2 个号」写进同一条记录，而不是一次尝试一条。
     account_trail: list[str] = field(default_factory=list)
     attempts_summary: str = ""
+    # 本次图片生成的执行时间线：每一步做了什么、什么时候开始、花了多久、为什么。
+    # 只进调用日志（日志详情里逐条展示），不返回给客户端。
+    image_timeline: list[dict[str, Any]] = field(default_factory=list)
+    # 多图并行时没出结果的那几张图的时间线（每张一份 group）。成功图片的 chunk 顺带
+    # 把这些带上，调用日志才能同时看到「哪张成功了、哪张失败在哪一步」，而不是只留成功的那份。
+    failed_image_timelines: list[dict[str, Any]] = field(default_factory=list)
     # 这条 message 是不是「上游回了正文、没有出图」。只有这种才按文本回复处理
     # （可用于换号重试）；blocked/任务错误等真正的报错文案走内容策略分支。
     text_reply: bool = False
@@ -495,6 +507,16 @@ class ImageOutput:
             chunk["_account_trail"] = list(self.account_trail)
         if self.attempts_summary:
             chunk["_attempts_summary"] = self.attempts_summary
+        if self.image_timeline or self.failed_image_timelines:
+            groups: list[dict[str, Any]] = []
+            if self.image_timeline:
+                groups.append({
+                    "index": self.index,
+                    "total": self.total,
+                    "steps": list(self.image_timeline),
+                })
+            groups.extend(self.failed_image_timelines)
+            chunk["_image_timeline"] = groups
         if self.postprocess:
             chunk["_postprocess"] = dict(self.postprocess)
         if self.kind == "message":
@@ -1503,6 +1525,12 @@ def _conduit_state(backend: Any) -> dict[str, Any]:
     wait_ms = getattr(backend, "conduit_wait_ms", None)
     if isinstance(wait_ms, int):
         state["conduit_wait_ms"] = wait_ms
+    hold_ms = getattr(backend, "conduit_hold_ms", 0)
+    if hold_ms:
+        state["conduit_hold_ms"] = int(hold_ms)
+    release_reason = getattr(backend, "conduit_release_reason", "")
+    if release_reason:
+        state["conduit_release_reason"] = str(release_reason)
     retries = getattr(backend, "image_mainline_retries", 0)
     if retries:
         state["mainline_retries"] = retries
@@ -1523,6 +1551,46 @@ def _pool_diagnostics(attempted_tokens: set[str], select_kwargs: dict[str, Any])
     except Exception:
         return {}
     return pool if isinstance(pool, dict) else {}
+
+
+# 生图链路各阶段的中文名 + 「这一步在干嘛」。日志详情按阶段逐条展示，
+# 用户能直接看出时间花在哪一步，不用再拿 phase_*_ms 去猜。
+IMAGE_PHASE_TEXT: dict[str, tuple[str, str]] = {
+    "uploading": ("上传参考图", "把图生图的参考图上传到上游"),
+    "bootstrapping": ("预热会话", "请求会话首页、解析 PoW 脚本；每个 backend 只做一次"),
+    "getting_token": ("获取 sentinel token", "上游 chat-requirements 的 prepare/finalize 两步"),
+    "preparing_conversation": ("申请 conduit token", "POST conversation/prepare，领取一次性主链路凭据"),
+    "starting_generation": ("发送主链路", "POST conversation；上游在这里回 skipped_mainline 或开始生成"),
+    "generating": ("等待上游生成", "主链路已被接收，读 SSE 等图（通常是最长的一段）"),
+    "stream_done": ("SSE 读取结束", "主链路流结束，开始解析结果"),
+    "conversation_start": ("解析对话事件", "从 SSE 事件里提取图片文件和对话状态"),
+    "conversation_done": ("解析对话完成", "对话事件解析结束"),
+    "poll_start": ("开始轮询取图", "SSE 没直接给出图片，改为查询上游任务结果"),
+    "poll_done": ("轮询取图结束", "轮询拿到（或放弃）图片结果"),
+    "download_start": ("下载图片", "从上游取回图片字节"),
+    "download_done": ("下载完成", "图片字节已取回"),
+}
+
+
+def _append_phase_timeline(mark: Any, backend: Any) -> None:
+    """把 backend 记下的阶段打点按真实时间插进执行时间线。
+
+    `image_phases` 里每个阶段只存首次到达的 monotonic 时刻；相邻两个打点之差
+    就是上一段的耗时。最后一段算到「现在」（这次尝试收尾的时刻），
+    这样卡在某个阶段中间的失败也能看到那一段花了多久。
+    """
+    phases = getattr(backend, "image_phases", None)
+    if not isinstance(phases, dict) or not phases:
+        return
+    ordered = sorted(phases.items(), key=lambda item: item[1])
+    now = time.monotonic()
+    for position, (name, at) in enumerate(ordered):
+        end = ordered[position + 1][1] if position + 1 < len(ordered) else now
+        label, detail = IMAGE_PHASE_TEXT.get(name, (name, ""))
+        mark(
+            f"phase_{name}", label, detail,
+            started=at, duration_ms=int(max(0.0, end - at) * 1000),
+        )
 
 
 def _image_phases(backend: Any) -> dict[str, Any]:
@@ -1746,6 +1814,40 @@ def _attach_attempt_trail(outputs: list[ImageOutput], diagnostics: dict[str, Any
         output.attempts_summary = summary
 
 
+def _attach_image_timeline(outputs: list[ImageOutput], diagnostics: dict[str, Any]) -> None:
+    """成功返回时把执行时间线挂到结果上（失败时由异常带着 diagnostics 出去）。
+
+    和换号轨迹不同，时间线每次生图都要有：用户要能看到每一步做了什么、
+    花了多久、因为什么花了这么久，哪怕一次就成功。
+    """
+    steps = diagnostics.get("timeline")
+    if not isinstance(steps, list) or not steps:
+        return
+    for output in outputs:
+        output.image_timeline = list(steps)
+
+
+def _exception_image_timeline_group(exc: BaseException, index: int) -> dict[str, Any] | None:
+    """从失败异常上取回这张图的时间线，多图并行收尾时并进成功 chunck 的日志。
+
+    异常可能被外层包过一层，所以沿 __cause__/__context__ 链找第一份 image_diagnostics。
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        diagnostics = getattr(current, "image_diagnostics", None)
+        if isinstance(diagnostics, dict):
+            steps = diagnostics.get("timeline")
+            if isinstance(steps, list) and steps:
+                return {
+                    "index": diagnostics.get("index") or index,
+                    "steps": [step for step in steps if isinstance(step, dict)],
+                }
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _generate_single_image(
         request: ConversationRequest,
         index: int,
@@ -1770,8 +1872,9 @@ def _generate_single_image(
         if diagnostics and not getattr(exc, "image_diagnostics", None):
             setattr(exc, "image_diagnostics", dict(diagnostics))
         raise
-    # 成功返回没有异常可以承载诊断，轨迹直接挂在结果上给调用日志看。
+    # 成功返回没有异常可以承载诊断，轨迹和时间线直接挂在结果上给调用日志看。
     _attach_attempt_trail(outputs, diagnostics)
+    _attach_image_timeline(outputs, diagnostics)
     return outputs
 
 
@@ -1797,6 +1900,13 @@ def _generate_single_image_attempts(
     generation_retry_count = 0
     account_email = ""
     attempted_tokens: set[str] = set()
+    # 选号时发现 conduit 窗口正被占的账号：本次请求里先别再选它，直接换号。
+    # 只在「窗口忙」期间排除，不写进 attempted_tokens（这个号并没有失败）。
+    conduit_busy_tokens: set[str] = set()
+    conduit_busy_switches = 0
+    # 号池整体都在握手时关掉探测，避免在「换号 → 还是忙」之间空转。
+    conduit_probe_enabled = True
+    conduit_probe_skip_logged = False
     last_transient_error = False
     transient_attempts = 0
     rescue_deadline = 0.0
@@ -1819,6 +1929,48 @@ def _generate_single_image_attempts(
     attempt_outcome = "unknown"
     attempt_error = ""
     attempt_extra: dict[str, Any] = {}
+    # 执行时间线：每一步「做了什么、什么时候开始、花了多久、为什么」。
+    # 成功时挂到结果上、失败时随 diagnostics 进异常，最终都写进调用日志详情。
+    request_started = time.monotonic()
+    timeline: list[dict[str, Any]] = []
+    diagnostics["timeline"] = timeline
+
+    def mark_timeline(
+            step: str,
+            label: str,
+            detail: str = "",
+            *,
+            started: float | None = None,
+            duration_ms: int | None = None,
+            **fields: Any,
+    ) -> None:
+        at = time.monotonic() if started is None else started
+        entry: dict[str, Any] = {
+            "at_ms": int(max(0.0, at - request_started) * 1000),
+            "step": step,
+            "label": label,
+        }
+        if duration_ms is not None:
+            entry["dur_ms"] = int(max(0, duration_ms))
+        if detail:
+            entry["detail"] = str(detail)[:400]
+        for key, value in fields.items():
+            if value is not None and value != "":
+                entry[key] = value
+        timeline.append(entry)
+
+    mark_timeline(
+        "request_start",
+        "请求开始",
+        (
+            f"预算 {request_budget_secs:.0f}s；配置重试 {generation_retry_limit} 次；第 {index}/{total} 张"
+            if request_budget_secs is not None
+            else f"未设置预算；配置重试 {generation_retry_limit} 次；第 {index}/{total} 张"
+        ),
+        budget_secs=round(request_budget_secs, 1) if request_budget_secs is not None else None,
+        index=index,
+        total=total,
+    )
 
     def record_attempt_state() -> None:
         """把「刚失败/刚结束的是哪一次尝试、卡在哪、号池当时什么状况」写进 diagnostics。
@@ -1865,6 +2017,9 @@ def _generate_single_image_attempts(
             "image_peers": max(0, inflight - 1),
             "rescue": rescue_deadline > 0,
             "poll_timeout_retries": poll_timeout_retry_count,
+            # 这次尝试前因为「同号握手窗口被占」直接换掉的号数。>0 说明同号并发
+            # 确实在抢窗口，但这些换号是瞬时的，不花预算。
+            "conduit_busy_switches": conduit_busy_switches,
             "generation_retry_count": generation_retry_count,
             "generation_retry_limit": generation_retry_limit,
             "attempts": list(diagnostics.get("attempts") or []),
@@ -1920,6 +2075,18 @@ def _generate_single_image_attempts(
             "index": index,
             "error": str(failure)[:200],
         })
+        mark_timeline(
+            "retry",
+            "换号重试",
+            (
+                f"上游返回可重试错误（{str(failure)[:80]}）；"
+                f"按设置换号重试第 {generation_retry_count}/{generation_retry_limit} 次"
+                + (f"，预算续期 {request_budget_secs:.0f}s" if request_budget_secs else "")
+            ),
+            retry_count=generation_retry_count,
+            retry_limit=generation_retry_limit,
+            error=str(failure)[:200],
+        )
         return True
 
     while True:
@@ -1930,11 +2097,19 @@ def _generate_single_image_attempts(
             diagnostics["retry_stopped"] = "request_deadline"
             raise
         if in_rescue:
+            rescue_started = time.monotonic()
             if not transient_rescue_wait(rescue_deadline, rescue_attempts, attempt_deadline):
                 diagnostics["retry_stopped"] = "rescue_window_exhausted"
                 ensure_image_deadline(attempt_deadline)
                 raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email)
             rescue_attempts += 1
+            mark_timeline(
+                "rescue_wait",
+                "抢救窗口等待",
+                f"上游连续抖动，第 {rescue_attempts} 次抢救：短暂等待后换号再试",
+                started=rescue_started,
+                duration_ms=int((time.monotonic() - rescue_started) * 1000),
+            )
         backend = None
         attempt = None
         attempt_outcome = "unknown"
@@ -1943,6 +2118,8 @@ def _generate_single_image_attempts(
         # token 一起清空：选号失败时若留着上一轮的 token，快照会把上一个号的
         # 并发数/握手状态算到这一次头上。
         token = ""
+        select_started = time.monotonic()
+        selected_email = ""
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1955,16 +2132,114 @@ def _generate_single_image_attempts(
             }
             # 抢救窗口里优先避开已经失败过的账号；只有当别的账号一个都接不了
             # （号池全忙/全被排除）才放开排除，退化成原来的行为。
-            excluded = attempted_tokens
-            if in_rescue and attempted_tokens and not account_service.has_available_image_account(
-                attempted_tokens, **select_kwargs,
-            ):
-                excluded = set()
+            # 另外避开「刚才 conduit 窗口被占」的号——它们没有失败，只是这一刻发不出去。
+            select_started = time.monotonic()
+            excluded = attempted_tokens | conduit_busy_tokens
+            if excluded and not account_service.has_available_image_account(excluded, **select_kwargs):
+                if in_rescue:
+                    excluded = set()
+                elif conduit_busy_tokens:
+                    # 别的号都失败过/没额度了，只剩窗口忙的号：再换也是空转，
+                    # 清掉窗口忙的排除，回到「创建 backend 后等窗口」的行为。
+                    conduit_busy_tokens.clear()
+                    conduit_probe_enabled = False
+                    excluded = attempted_tokens
+                    diagnostics["conduit_busy_fallback"] = "no_other_account"
+                    mark_timeline(
+                        "conduit_window", "握手窗口",
+                        f"排除后已经选不出别的号了：停止换号，回到排队等窗口的行为"
+                        f"（最多等 min(剩余预算, {CONDUIT_WINDOW_TIMEOUT_SECS:.0f}s)）",
+                        outcome="fallback", reason="no_other_account",
+                    )
             token = account_service.get_available_access_token(
                 excluded,
                 deadline=attempt_deadline,
                 **select_kwargs,
             )
+            selected_account = account_service.get_account(token) or {}
+            selected_email = str(selected_account.get("email") or "").strip()
+            selected_inflight = account_service.image_inflight_count(token)
+            select_bits = []
+            if attempted_tokens:
+                select_bits.append(f"跳过 {len(attempted_tokens)} 个已失败号")
+            if conduit_busy_tokens:
+                select_bits.append(f"跳过 {len(conduit_busy_tokens)} 个窗口忙的号")
+            if in_rescue:
+                select_bits.append("抢救窗口")
+            mark_timeline(
+                "select_account", "选号",
+                f"选中 {selected_email or anonymize_token(token)}"
+                + (f"（{'，'.join(select_bits)}）" if select_bits else "")
+                + f"；该号在途 {selected_inflight} 条",
+                started=select_started,
+                duration_ms=int((time.monotonic() - select_started) * 1000),
+                account_email=selected_email,
+                image_inflight=selected_inflight,
+                peers=max(0, selected_inflight - 1),
+            )
+            # 选号之后立刻非阻塞地探一下这个号的 conduit 窗口（prepare→mainline 的
+            # 串行窗口）。同号并发时窗口被占是常态，排队等窗口只会把几十秒预算耗在
+            # 「等别人」上；直接把本号从本次请求的候选里排除、换下一个号，失败也一样
+            # 要换号，不如当场换。窗口正常只占 1 秒出头，换号后大概率能立刻发出去。
+            conduit_preacquired = False
+            probe_started = time.monotonic()
+            if conduit_probe_enabled and not codex_model:
+                if account_service.acquire_image_handshake(token, timeout=0):
+                    conduit_preacquired = True
+                    mark_timeline(
+                        "conduit_window", "握手窗口", "拿到窗口（零等待），选号阶段已预占",
+                        started=probe_started,
+                        duration_ms=int((time.monotonic() - probe_started) * 1000),
+                        outcome="acquired",
+                    )
+                else:
+                    conduit_busy_switches += 1
+                    conduit_busy_tokens.add(token)
+                    busy_inflight = account_service.image_inflight_count(token)
+                    account_service.release_image_slot(token)
+                    logger.warning({
+                        "event": "image_conduit_busy_switch",
+                        "trace_id": trace_id,
+                        "account_email": str((account_service.get_account(token) or {}).get("email") or ""),
+                        "request_token": anonymize_token(token),
+                        "switch_count": conduit_busy_switches,
+                        "image_inflight": busy_inflight,
+                        "index": index,
+                    })
+                    mark_timeline(
+                        "conduit_window", "握手窗口",
+                        f"{selected_email or anonymize_token(token)} 的窗口正被同号其它请求占着"
+                        f"（该号在途 {busy_inflight} 条）：不等待，直接换号"
+                        f"（第 {conduit_busy_switches}/{MAX_CONDUIT_BUSY_SWITCHES} 次）",
+                        started=probe_started,
+                        duration_ms=int((time.monotonic() - probe_started) * 1000),
+                        outcome="busy_switch",
+                        wait_ms=0,
+                        switch_count=conduit_busy_switches,
+                        image_inflight=busy_inflight,
+                        account_email=selected_email,
+                    )
+                    if conduit_busy_switches >= MAX_CONDUIT_BUSY_SWITCHES:
+                        # 换了一圈都拿不到窗口，说明整个号池都在握手。再换只是空转，
+                        # 停止探测、清掉排除集，后续尝试按原来的排队行为慢慢等。
+                        conduit_probe_enabled = False
+                        conduit_busy_tokens.clear()
+                        diagnostics["conduit_busy_fallback"] = "wait_window"
+                        mark_timeline(
+                            "conduit_window", "握手窗口",
+                            f"连续 {conduit_busy_switches} 个号的窗口都忙，说明整个号池都在握手："
+                            f"停止探测，后续尝试回到排队等窗口（最多等 "
+                            f"min(剩余预算, {CONDUIT_WINDOW_TIMEOUT_SECS:.0f}s)）",
+                            outcome="fallback", reason="wait_window",
+                        )
+                    continue
+            elif codex_model and not conduit_probe_skip_logged:
+                conduit_probe_skip_logged = True
+                mark_timeline(
+                    "conduit_window", "握手窗口",
+                    "codex 图片模型不走 conduit 窗口，跳过探测（不会出现同号握手等待）",
+                    outcome="skipped", reason="codex_model",
+                )
             if not in_rescue:
                 attempted_tokens.add(token)
         except RuntimeError as exc:
@@ -1973,6 +2248,13 @@ def _generate_single_image_attempts(
             # 账号留空：这一步压根没选出号，写上一轮的号反而误导。
             attempt = _start_image_attempt(diagnostics, "", "")
             attempt_outcome, attempt_error = "account_select_failed", str(exc)
+            mark_timeline(
+                "select_account", "选号",
+                f"没有可用的号：{exc}",
+                started=select_started,
+                duration_ms=int((time.monotonic() - select_started) * 1000),
+                outcome="failed",
+            )
             record_attempt_state()
             transient = last_transient_error or is_retriable_upstream_error(exc)
             poll_failure: ImageGenerationError | None = None
@@ -2022,6 +2304,10 @@ def _generate_single_image_attempts(
             ensure_image_deadline(attempt_deadline)
             backend = OpenAIBackendAPI(access_token=token, deadline=attempt_deadline)
             backend.trace_id = trace_id
+            if conduit_preacquired:
+                # 窗口在选号时就拿到了，交给 backend 接管；流里再抢一次会把自己锁死
+                # （Lock 不可重入），也会把换号省下的时间又还回去。
+                backend.adopt_conduit_window()
             if request.progress_callback:
                 backend.progress_callback = request.progress_callback
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
@@ -2182,6 +2468,16 @@ def _generate_single_image_attempts(
                         "index": index,
                         "error": str(exc)[:200],
                     })
+                    mark_timeline(
+                        "retry", "轮询超时换号",
+                        f"轮询 {poll_context.get('poll_elapsed_secs', '?')}s 没等到图"
+                        f"（查询 {poll_context.get('poll_attempts', '?')} 次，原因 "
+                        f"{poll_context.get('poll_reason', '?')}）；"
+                        f"内置换号重试第 {poll_timeout_retry_count}/{MAX_POLL_TIMEOUT_RETRIES} 次，不续预算",
+                        retry_count=poll_timeout_retry_count,
+                        retry_limit=MAX_POLL_TIMEOUT_RETRIES,
+                        reason=str(poll_context.get("poll_reason") or ""),
+                    )
                     continue
                 logger.warning({
                     "event": "image_poll_timeout_exhausted_retries",
@@ -2253,6 +2549,11 @@ def _generate_single_image_attempts(
                         "account_email": account_email,
                         "index": index,
                     })
+                    mark_timeline(
+                        "retry", "刷新 token 重试",
+                        "上游返回 token 失效，已强制刷新 access token，同号重试（不消耗换号次数）",
+                        reason="token_refreshed",
+                    )
                     continue
                 account_service.remove_invalid_token(token, "image_stream")
                 logger.warning({
@@ -2263,6 +2564,11 @@ def _generate_single_image_attempts(
                     "index": index,
                     "error": error_text[:200],
                 })
+                mark_timeline(
+                    "retry", "token 失效换号",
+                    "token 刷新后仍然失效，已把该号标记失效并立即换号（不消耗配置重试次数）",
+                    reason="invalid_token",
+                )
                 continue
             # 如果是模型返回文本而非图片，尝试换账号重试。
             # 文本回复有两种识别方式：正文里带工具参数 JSON（旧逻辑），或上游
@@ -2300,6 +2606,14 @@ def _generate_single_image_attempts(
                         "error_preview": (upstream_text or error_text)[:300],
                         "index": index,
                     })
+                    mark_timeline(
+                        "retry", "文本回复换号",
+                        f"上游回了正文而不是图（code={getattr(exc, 'code', '')}，"
+                        f"{len(upstream_text or error_text)} 字）；"
+                        f"换号重试第 {text_reply_retry_count}/{MAX_TEXT_REPLY_RETRIES} 次，预算续期",
+                        retry_count=text_reply_retry_count,
+                        retry_limit=MAX_TEXT_REPLY_RETRIES,
+                    )
                     continue
                 logger.warning({
                     "event": "image_model_text_reply_exhausted_retries",
@@ -2392,6 +2706,11 @@ def _generate_single_image_attempts(
                         "account_email": account_email,
                         "index": index,
                     })
+                    mark_timeline(
+                        "retry", "刷新 token 重试",
+                        "上游返回 token 失效，已强制刷新 access token，同号重试（不消耗换号次数）",
+                        reason="token_refreshed",
+                    )
                     continue
                 account_service.remove_invalid_token(token, "image_stream")
                 logger.warning({
@@ -2402,13 +2721,36 @@ def _generate_single_image_attempts(
                     "index": index,
                     "error": last_error[:200],
                 })
+                mark_timeline(
+                    "retry", "token 失效换号",
+                    "token 刷新后仍然失效，已把该号标记失效并立即换号（不消耗配置重试次数）",
+                    reason="invalid_token",
+                )
                 continue
             if not emitted_for_token and transient:
                 if in_rescue:
+                    mark_timeline(
+                        "retry", "抢救窗口内换号",
+                        f"上游抖动（{last_error[:80]}）；继续换号再试",
+                        reason="transient_rescue",
+                    )
                     continue
                 if transient_attempts >= MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS:
                     rescue_deadline = time.time() + TRANSIENT_IMAGE_RESCUE_WINDOW_SECS
+                    mark_timeline(
+                        "rescue_enter", "进入抢救窗口",
+                        f"连续 {transient_attempts} 次上游抖动；接下来 "
+                        f"{TRANSIENT_IMAGE_RESCUE_WINDOW_SECS:.0f}s 内持续换号重试",
+                        reason="transient_upstream",
+                    )
                     continue
+                mark_timeline(
+                    "retry", "上游抖动换号",
+                    f"上游抖动（{last_error[:80]}）；换号重试第 {transient_attempts}/"
+                    f"{MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS} 次",
+                    retry_count=transient_attempts,
+                    reason="transient_upstream",
+                )
                 continue
             # TLS/SSL 连接错误：自动重试
             if not emitted_for_token and is_tls_connection_error(last_error):
@@ -2423,7 +2765,16 @@ def _generate_single_image_attempts(
                         "index": index,
                         "error": last_error[:200],
                     })
-                    sleep_with_image_deadline(min(2.0 * tls_retry_count, 10.0), attempt_deadline)
+                    wait_secs = min(2.0 * tls_retry_count, 10.0)
+                    mark_timeline(
+                        "retry", "TLS 错误重试",
+                        f"TLS/SSL 连接错误；等待 {wait_secs:.1f}s 后同号重试第 "
+                        f"{tls_retry_count}/{MAX_TLS_RETRIES} 次",
+                        dur_hint_ms=int(wait_secs * 1000),
+                        retry_count=tls_retry_count,
+                        reason="tls_error",
+                    )
+                    sleep_with_image_deadline(wait_secs, attempt_deadline)
                     continue
             # 连接超时错误（curl 28）：同账号短等待重试，不切换账号
             if not emitted_for_token and is_connection_timeout_error(last_error):
@@ -2440,6 +2791,14 @@ def _generate_single_image_attempts(
                         "wait_secs": wait_secs,
                         "error": last_error[:200],
                     })
+                    mark_timeline(
+                        "retry", "连接超时重试",
+                        f"连接上游超时；等待 {wait_secs:.1f}s 后同号重试第 "
+                        f"{conn_timeout_retry_count}/{MAX_CONN_TIMEOUT_RETRIES} 次",
+                        dur_hint_ms=int(wait_secs * 1000),
+                        retry_count=conn_timeout_retry_count,
+                        reason="connection_timeout",
+                    )
                     sleep_with_image_deadline(wait_secs, attempt_deadline)
                     continue
             if transient:
@@ -2456,6 +2815,72 @@ def _generate_single_image_attempts(
             # 之前只在大异常分支里刷新，所以导出的 image_diagnostics 经常停留在
             # 上一次尝试、上一个账号上。
             record_attempt_state()
+            conduit_hold = _conduit_state(backend) if backend is not None else {}
+            if backend is not None:
+                # 阶段事件的时间戳早于「当前」，先追加再统一按 at_ms 排序。
+                _append_phase_timeline(mark_timeline, backend)
+            if conduit_hold.get("conduit_hold_ms"):
+                reason_text = {
+                    "mainline_sent": "主链路已发出后正常释放",
+                    "mainline_error": "主链路没发出，异常释放",
+                }.get(str(conduit_hold.get("conduit_release_reason") or ""), "已释放")
+                mark_timeline(
+                    "conduit_release", "释放握手窗口",
+                    f"窗口共持有 {conduit_hold['conduit_hold_ms']}ms（{reason_text}）；"
+                    f"其余同号请求看到窗口忙会立刻换号，不会排队等",
+                    duration_ms=conduit_hold["conduit_hold_ms"],
+                    outcome=conduit_hold.get("conduit_release_reason") or "",
+                )
+            if attempt_extra:
+                poll_elapsed = attempt_extra.get("poll_elapsed_secs")
+                mark_timeline(
+                    "poll", "轮询取图",
+                    f"上游没直接给出图片，回退轮询：查询 "
+                    f"{attempt_extra.get('poll_attempts', '?')} 次，耗时 "
+                    f"{poll_elapsed if poll_elapsed is not None else '?'}s，原因 "
+                    f"{attempt_extra.get('poll_reason', '?')}",
+                    duration_ms=(
+                        int(float(poll_elapsed) * 1000)
+                        if isinstance(poll_elapsed, (int, float)) else None
+                    ),
+                    reason=str(attempt_extra.get("poll_reason") or ""),
+                    attempts=attempt_extra.get("poll_attempts"),
+                )
+            if backend is not None:
+                resolve_diag = _image_resolve_diagnostics(backend)
+                if resolve_diag.get("resolve_poll"):
+                    resolve_state = {
+                        "hit": "命中", "empty": "没查到结果", "timeout": "超时", "error": "出错",
+                    }.get(str(resolve_diag["resolve_poll"]), str(resolve_diag["resolve_poll"]))
+                    mark_timeline(
+                        "resolve_poll", "回退轮询取图",
+                        f"SSE 没直接给出图片，查上游任务结果：{resolve_state}，耗时 "
+                        f"{resolve_diag.get('resolve_poll_elapsed_ms', 0)}ms",
+                        duration_ms=resolve_diag.get("resolve_poll_elapsed_ms"),
+                        outcome=str(resolve_diag["resolve_poll"]),
+                    )
+            if attempt is not None:
+                end_bits = [f"结局 {attempt_outcome or 'unknown'}"]
+                remaining_secs = remaining_image_deadline_secs(attempt_deadline)
+                if remaining_secs is not None:
+                    end_bits.append(f"预算剩余 {remaining_secs:.1f}s")
+                if attempt_error:
+                    end_bits.append(f"原因 {str(attempt_error)[:160]}")
+                mark_timeline(
+                    "attempt_end", "尝试结束", "；".join(end_bits),
+                    duration_ms=attempt.get("dur_ms"),
+                    outcome=attempt_outcome or "unknown",
+                    account_email=attempt.get("account_email") or "",
+                    error=str(attempt_error)[:200],
+                    **({"conduit_hold_ms": conduit_hold["conduit_hold_ms"]}
+                       if conduit_hold.get("conduit_hold_ms") else {}),
+                )
+            timeline.sort(key=lambda item: item.get("at_ms", 0))
+            # 选号时预抢的 conduit 窗口若还没在流里释放（比如建 backend、上传参考图
+            # 之前就失败了），这里兜底放掉。正常路径在主链路发出去时已经释放，
+            # 本方法只放「本线程持有的那把锁」，重复调用是空操作。
+            if token:
+                account_service.release_image_handshake(token)
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
@@ -2512,6 +2937,14 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     "error": str(exc)[:300],
                 })
 
+    # 失败的图也各有自己的执行现场：把时间线取出来，等会随成功的 chunk 一起进调用日志，
+    # 否则多图部分失败时日志里只剩成功那几张，失败那张卡在哪一步完全看不到。
+    failed_timelines: list[dict[str, Any]] = []
+    for index, exc in sorted(errors.items()):
+        group = _exception_image_timeline_group(exc, index)
+        if group is not None:
+            failed_timelines.append(group)
+
     # yield 结果：跳过索引顺序限制，不再让低索引失败阻塞高索引成功结果
     emitted = False
     last_error = ""
@@ -2521,6 +2954,8 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
         if index in results:
             for output in results[index]:
                 emitted = True
+                if failed_timelines and not output.failed_image_timelines:
+                    output.failed_image_timelines = list(failed_timelines)
                 yield output
         elif index in errors:
             last_error = str(errors[index])
@@ -2547,7 +2982,11 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
         if not last_error:
             last_error = "no account in the pool could generate images — check account quota and rate-limit status"
         # 这里把文案洗成了用户看得懂的说法，原始异常挂到 cause 上，日志才排得动。
-        raise ImageGenerationError(image_stream_error_message(last_error), conversation_id="") from first_error
+        error = ImageGenerationError(image_stream_error_message(last_error), conversation_id="")
+        # 全部失败时每张图的时间线都要进调用日志（异常链只能带第一张的诊断）。
+        if failed_timelines:
+            error.image_timeline_groups = failed_timelines
+        raise error from first_error
 
 
 def stream_image_chunks(outputs: Iterable[ImageOutput]) -> Iterator[dict[str, Any]]:
@@ -2563,9 +3002,18 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     account_email = ""
     account_trail: list[str] = []
     attempts_summaries: list[str] = []
+    image_timelines: list[dict[str, Any]] = []
     postprocess: dict[str, Any] = {}
     for output in outputs:
         created = created or output.created
+        if output.image_timeline:
+            image_timelines.append({
+                "index": output.index,
+                "total": output.total,
+                "steps": list(output.image_timeline),
+            })
+        # 多图并行部分失败：失败那几张的时间线跟着成功结果一起进日志。
+        image_timelines.extend(output.failed_image_timelines)
         if output.account_email and not account_email:
             account_email = output.account_email
         for email in output.account_trail:
@@ -2593,6 +3041,8 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         result["_account_trail"] = account_trail
     if attempts_summaries:
         result["_attempts_summary"] = " | ".join(attempts_summaries)
+    if image_timelines:
+        result["_image_timeline"] = image_timelines
     if postprocess:
         result["_postprocess"] = postprocess
     return result
