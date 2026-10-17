@@ -681,18 +681,16 @@ def _next_item(items):
 def is_policy_violation_error(exc: BaseException | None) -> bool:
     """沿异常链判断这次调用是否被内容安全策略拦下。
 
-    上游拦截会被 conversation 包装成 ImageGenerationError(code=content_policy_violation)，
-    本地敏感词/AI 审核则是 ContentPolicyViolation；多图并行时外层还可能再包一层，
-    所以必须顺着 __cause__/__context__ 找。
+    上游拦截会被 conversation 包装成 ImageGenerationError(code=content_policy_violation)；
+    多图并行时外层还可能再包一层，所以必须顺着 __cause__/__context__ 找。
     """
-    from services.content_filter import ContentPolicyViolation
     from services.openai_backend_api import ImageContentPolicyError, is_content_policy_error
 
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (ImageContentPolicyError, ContentPolicyViolation)):
+        if isinstance(current, ImageContentPolicyError):
             return True
         # conversation 会把「上游返回了一段文本而不是图片」统一标成
         # content_policy_violation，其中也包括普通的「本次生图失败」；只有

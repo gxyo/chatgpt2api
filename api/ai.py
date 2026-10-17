@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
-from services.content_filter import check_request, request_shape, request_text
+from services.content_filter import request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
 from services.log_service import LoggedCall, image_input_detail, image_request_detail
 from services.protocol import (
@@ -70,15 +70,6 @@ class EditableFileTaskRequest(BaseModel):
     client_task_id: str | None = None
 
 
-async def filter_or_log(call: LoggedCall, text: str) -> None:
-    try:
-        await run_in_threadpool(check_request, text)
-    except HTTPException as exc:
-        # 本地敏感词/AI 审核拒绝会被记成「违反安全策略」，其余 HTTP 错误仍是失败。
-        call.log_failure(exc, error=str(exc.detail))
-        raise
-
-
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -101,7 +92,6 @@ def create_router() -> APIRouter:
         payload["base_url"] = resolve_image_base_url(request)
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt,
                           extra_detail=image_request_detail(payload))
-        await filter_or_log(call, body.prompt)
         return await call.run(openai_v1_image_generations.handle, payload)
 
     @router.post("/v1/images/edits")
@@ -115,7 +105,6 @@ def create_router() -> APIRouter:
         model = str(payload["model"])
         call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt,
                           extra_detail=image_request_detail(payload))
-        await filter_or_log(call, prompt)
         payload["images"] = await read_image_sources(image_sources)
         if mask_sources:
             payload["mask"] = await read_image_sources(mask_sources)
@@ -140,7 +129,6 @@ def create_router() -> APIRouter:
             request_text=request_preview,
             request_shape=request_shape(payload.get("messages")),
         )
-        await filter_or_log(call, request_preview)
         return await call.run(openai_v1_chat_complete.handle, payload)
 
     @router.post("/v1/responses")
@@ -157,7 +145,6 @@ def create_router() -> APIRouter:
             request_text=request_preview,
             request_shape=request_shape(payload.get("input")),
         )
-        await filter_or_log(call, request_preview)
         return await call.run(openai_v1_response.handle, payload)
 
     @router.post("/v1/messages")
@@ -172,14 +159,12 @@ def create_router() -> APIRouter:
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("system"), payload.get("messages"), payload.get("tools"))
         call = LoggedCall(identity, "/v1/messages", model, "Messages", request_text=request_preview)
-        await filter_or_log(call, request_preview)
         return await call.run(anthropic_v1_messages.handle, payload, sse="anthropic")
 
     @router.post("/v1/search")
     async def search(body: SearchRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         call = LoggedCall(identity, "/v1/search", openai_search.MODEL, "搜索", request_text=body.prompt)
-        await filter_or_log(call, body.prompt)
         return await call.run(openai_search.handle, body.model_dump(mode="python"))
 
     @router.get("/v1/editable-file-tasks")
@@ -199,7 +184,6 @@ def create_router() -> APIRouter:
     @router.post("/v1/ppt/generations")
     async def create_ppt_task(body: EditableFileTaskRequest, request: Request, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        await filter_or_log(LoggedCall(identity, "/v1/ppt/generations", "gpt-5-5-thinking", "PPT生成任务", request_text=body.prompt), body.prompt)
         return await run_in_threadpool(
             editable_file_task_service.submit_ppt,
             identity,
@@ -212,7 +196,6 @@ def create_router() -> APIRouter:
     @router.post("/v1/psd/generations")
     async def create_psd_task(body: EditableFileTaskRequest, request: Request, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        await filter_or_log(LoggedCall(identity, "/v1/psd/generations", "gpt-5-5-thinking", "PSD生成任务", request_text=body.prompt), body.prompt)
         return await run_in_threadpool(
             editable_file_task_service.submit_psd,
             identity,

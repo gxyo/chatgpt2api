@@ -441,20 +441,6 @@ class ConfigStore:
         return [level for item in levels if (level := str(item or "").strip().lower()) in allowed]
 
     @property
-    def sensitive_words(self) -> list[str]:
-        words = self.data.get("sensitive_words")
-        return [word for item in words if (word := str(item or "").strip())] if isinstance(words, list) else []
-
-    @property
-    def ai_review(self) -> dict[str, object]:
-        value = self.data.get("ai_review")
-        return value if isinstance(value, dict) else {}
-
-    @property
-    def global_system_prompt(self) -> str:
-        return str(self.data.get("global_system_prompt") or "").strip()
-
-    @property
     def default_upstream_model_name(self) -> str:
         return _normalize_upstream_model_name(self.data.get("default_upstream_model_name"))
 
@@ -535,9 +521,6 @@ class ConfigStore:
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels
-        data["sensitive_words"] = self.sensitive_words
-        data["ai_review"] = self.ai_review
-        data["global_system_prompt"] = self.global_system_prompt
         data["default_upstream_model_name"] = self.default_upstream_model_name
         data["default_thinking_effort"] = self.default_thinking_effort
         data["model_pricing"] = self.model_pricing

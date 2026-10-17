@@ -275,8 +275,6 @@ def message_text(content: Any) -> str:
 
 def normalize_messages(messages: object, system: Any = None) -> list[dict[str, Any]]:
     normalized = []
-    if config.global_system_prompt:
-        normalized.append({"role": "system", "content": config.global_system_prompt})
     system_text = message_text(system)
     if system_text:
         normalized.append({"role": "system", "content": system_text})
@@ -307,10 +305,6 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
             else:
                 normalized.append({"role": role, "content": text})
     return normalized
-
-
-def prompt_with_global_system(prompt: str) -> str:
-    return f"{config.global_system_prompt}\n\n{prompt}" if config.global_system_prompt else prompt
 
 
 def assistant_history_text(messages: list[dict[str, Any]]) -> str:
@@ -832,7 +826,7 @@ def conversation_events(
     image_model = is_supported_image_model(model)
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
-    final_prompt = prompt_with_global_system(build_image_prompt(prompt, size, quality)) if image_model else prompt
+    final_prompt = build_image_prompt(prompt, size, quality) if image_model else prompt
     payloads = backend.stream_conversation(
         messages=normalized,
         model=model,

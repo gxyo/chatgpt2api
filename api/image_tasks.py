@@ -6,9 +6,7 @@ from pydantic import BaseModel, Field
 
 from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
-from services.content_filter import check_request
 from services.image_task_service import image_task_service
-from services.log_service import LoggedCall
 
 
 class ImageGenerationTaskRequest(BaseModel):
@@ -21,15 +19,6 @@ class ImageGenerationTaskRequest(BaseModel):
 
 def _parse_task_ids(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
-
-
-async def filter_or_log(call: LoggedCall, text: str) -> None:
-    try:
-        await run_in_threadpool(check_request, text)
-    except HTTPException as exc:
-        # 本地敏感词/AI 审核拒绝会被记成「违反安全策略」，其余 HTTP 错误仍是失败。
-        call.log_failure(exc, error=str(exc.detail))
-        raise
 
 
 def create_router() -> APIRouter:
@@ -50,7 +39,6 @@ def create_router() -> APIRouter:
         authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
-        await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
         try:
             return await run_in_threadpool(
                 image_task_service.submit_generation,
@@ -77,7 +65,6 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail={"error": "client_task_id is required"})
         prompt = str(payload["prompt"])
         model = str(payload["model"])
-        await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
         images = await read_image_sources(image_sources)
         masks = await read_image_sources(mask_sources) if mask_sources else None
         try:
