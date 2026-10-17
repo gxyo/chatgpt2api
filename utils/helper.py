@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
 from curl_cffi import requests
@@ -425,8 +425,19 @@ def anthropic_sse_stream(items) -> Iterator[str]:
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
 
-def iter_sse_payloads(response: requests.Response) -> Iterator[str]:
+def iter_sse_payloads(
+        response: requests.Response,
+        on_line: Callable[[], None] | None = None,
+) -> Iterator[str]:
+    """逐个产出 SSE 的 data payload。
+
+    `on_line` 在每读到一行（包括心跳注释行、空行）时回调一次：生图主链路等待
+    上游出图时经常几十秒只发 `: ping` 之类的保活行，如果只在 data 行上检查
+    预算，这段时间就完全不受 deadline 约束，50s 的预算能拖到 80s 以上。
+    """
     for raw_line in response.iter_lines():
+        if on_line is not None:
+            on_line()
         if not raw_line:
             continue
         line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)

@@ -3024,9 +3024,9 @@ class OpenAIBackendAPI:
             stream=True,
         )
         try:
-            for payload in iter_sse_payloads(response):
-                self._remaining_deadline_secs()
-                yield payload
+            # 每一行都检查预算：文本流的上游保活也可能只发注释行，不能只在
+            # data payload 上检查。
+            yield from iter_sse_payloads(response, on_line=self._remaining_deadline_secs)
         finally:
             response.close()
 
@@ -3228,7 +3228,10 @@ class OpenAIBackendAPI:
             raise ImageMainlineStateError("image generation did not start")
         self._report_progress("generating")
         try:
-            yield from iter_sse_payloads(response)
+            # 生图主链路：上游出图期间可能只发保活注释行，真正带图的 data 事件
+            # 迟迟不来。必须逐行检查 deadline，否则 50s 的预算会被一条慢流
+            # 卡到 80s+ 才在下一个 data 事件上发现超时。
+            yield from iter_sse_payloads(response, on_line=self._remaining_deadline_secs)
         finally:
             # 主链路 SSE 读到这儿结束，后面就是轮询了：两段耗时分开记，才看得出
             # 时间是被「上游出图」吃掉的还是被「轮询」吃掉的。

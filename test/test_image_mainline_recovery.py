@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 from queue import Queue
 from unittest import mock
@@ -142,6 +143,45 @@ class ImageMainlineRecoveryTests(unittest.TestCase):
         upload.assert_called_once()
         self.assertEqual(requirements.call_count, 2)
         self.assertTrue(all(call.args[4] == [reference] for call in start.call_args_list))
+
+    def test_picture_stream_enforces_deadline_on_keepalive_lines(self):
+        """上游出图期间只发保活注释行时，预算也不能被突破。
+
+        保活行不是 data 行，旧逻辑只在产出 payload 后检查 deadline，于是一条
+        50s 预算的慢流能一直读到 80s+；这里断言下一行保活到达时就立刻超时。
+        """
+
+        class KeepaliveStream:
+            status_code = 200
+            headers = {"content-type": "text/event-stream"}
+
+            def __init__(self):
+                self.closed = False
+
+            def iter_lines(self):
+                yield b""
+                yield b": ping"
+                time.sleep(0.6)
+                yield b": ping"
+                # 若只在 data 行上检查，这里会先卡满 5 秒才会发现超时。
+                time.sleep(5)
+                yield b'data: {"conversation_id":"late"}'
+
+            def close(self):
+                self.closed = True
+
+        api = OpenAIBackendAPI("token-a", deadline=time.monotonic() + 0.5)
+        response = KeepaliveStream()
+        with mock.patch.object(api, "_bootstrap"), \
+             mock.patch.object(api, "_get_chat_requirements", return_value=ChatRequirements("req")), \
+             mock.patch.object(api, "_prepare_image_conversation", return_value="conduit"), \
+             mock.patch.object(api, "_start_image_generation", return_value=response):
+            started = time.monotonic()
+            with self.assertRaises(ImageRequestTimeoutError):
+                list(api._stream_picture_conversation("draw", "gpt-image-2", []))
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 2.0)
+        self.assertTrue(response.closed)
 
     def test_mainline_recovery_stops_at_request_deadline(self):
         api = OpenAIBackendAPI("token-a")
