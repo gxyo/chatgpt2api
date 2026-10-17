@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Tag, Trash2, X } from "lucide-react";
+import { CalendarClock, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Save, Search, Tag, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
@@ -17,11 +17,15 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageStorage, fetchImageTags, fetchManagedImages, setImageTags, type ImageStorageStats, type ManagedImage } from "@/lib/api";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageStorage, fetchImageTags, fetchManagedImages, fetchSettingsConfig, setImageTags, updateSettingsConfig, type ImageStorageStats, type ManagedImage } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
 const IMAGE_MANAGER_CHECKBOX_CLASS = "border-neutral-300 bg-white/80 dark:border-white/35 dark:bg-white/5 data-[state=checked]:border-brand dark:data-[state=checked]:border-brand";
+/** 定时清理的按天周期选项，与后端归一化白名单保持一致。 */
+const CLEANUP_DAY_OPTIONS = [1, 3, 5, 7] as const;
+type CleanupUnit = "days" | "minutes";
 
 function formatSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
@@ -89,6 +93,60 @@ function ImageManagerContent() {
   }, []);
 
   useEffect(() => { void loadStorage(); }, [loadStorage]);
+
+  // 定时清理配置：只加载/提交与图片清理相关的几个键，接口按合并处理，不影响其他设置。
+  const [cleanupUnit, setCleanupUnit] = useState<CleanupUnit>("days");
+  const [cleanupDays, setCleanupDays] = useState(1);
+  const [cleanupMinutes, setCleanupMinutes] = useState("60");
+  const [cleanupTime, setCleanupTime] = useState("03:00");
+  const [cleanupKeepToday, setCleanupKeepToday] = useState(false);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [isSavingCleanup, setIsSavingCleanup] = useState(false);
+
+  const loadCleanupSettings = useCallback(async () => {
+    try {
+      setCleanupLoading(true);
+      const { config } = await fetchSettingsConfig();
+      const days = Number(config.image_cleanup_interval_days);
+      setCleanupUnit(config.image_cleanup_interval_unit === "minutes" ? "minutes" : "days");
+      setCleanupDays(CLEANUP_DAY_OPTIONS.includes(days as (typeof CLEANUP_DAY_OPTIONS)[number]) ? days : 1);
+      setCleanupMinutes(String(config.image_cleanup_interval_minutes ?? 60));
+      setCleanupTime(/^([01]\d|2[0-3]):[0-5]\d$/.test(String(config.image_cleanup_time || "")) ? String(config.image_cleanup_time) : "03:00");
+      setCleanupKeepToday(Boolean(config.image_cleanup_keep_today));
+    } catch {
+      // 读取失败时保留默认值，不影响图片库本身。
+    } finally {
+      setCleanupLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadCleanupSettings(); }, [loadCleanupSettings]);
+
+  const saveCleanupSettings = async () => {
+    // 与设置页保存时的归一化保持一致，非法输入回落到安全默认值。
+    const days = CLEANUP_DAY_OPTIONS.includes(cleanupDays as (typeof CLEANUP_DAY_OPTIONS)[number]) ? cleanupDays : 1;
+    const minutes = Math.min(10080, Math.max(1, Math.floor(Number(cleanupMinutes) || 60)));
+    const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(cleanupTime) ? cleanupTime : "03:00";
+    setIsSavingCleanup(true);
+    try {
+      await updateSettingsConfig({
+        image_cleanup_interval_unit: cleanupUnit,
+        image_cleanup_interval_days: days,
+        image_cleanup_interval_minutes: minutes,
+        image_cleanup_time: time,
+        image_cleanup_keep_today: cleanupKeepToday,
+      });
+      setCleanupDays(days);
+      setCleanupMinutes(String(minutes));
+      setCleanupTime(time);
+      toast.success("定时清理设置已保存");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存定时清理设置失败");
+    } finally {
+      setIsSavingCleanup(false);
+    }
+  };
+
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagEditTarget, setTagEditTarget] = useState<ManagedImage | null>(null);
   const [tagInput, setTagInput] = useState("");
@@ -435,6 +493,101 @@ function ImageManagerContent() {
             {storageLoading ? "加载存储信息..." : "存储信息加载失败"}
           </div>
         )}
+      </Card>
+
+      {/* 定时清理：从设置页移到存储概览和图片库之间，清理规则和图片放在一起更好找。 */}
+      <Card>
+        <CardContent className="space-y-4 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2 text-[15px] font-semibold tracking-tight">
+                <CalendarClock className="size-4 text-neutral-500" />
+                定时清理
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                按北京时间（UTC+8）执行；只删图片和缩略图，不影响统计。
+              </div>
+            </div>
+            <Button
+              className="h-9 px-4"
+              onClick={() => void saveCleanupSettings()}
+              disabled={isSavingCleanup || cleanupLoading}
+            >
+              {isSavingCleanup ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
+              保存设置
+            </Button>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="space-y-2">
+              <label className="text-sm text-neutral-700">清理周期</label>
+              <Select
+                value={cleanupUnit === "minutes" ? "minutes" : String(cleanupDays)}
+                onValueChange={(value) => {
+                  if (value === "minutes") {
+                    setCleanupUnit("minutes");
+                    return;
+                  }
+                  setCleanupUnit("days");
+                  setCleanupDays(Number(value) || 1);
+                }}
+              >
+                <SelectTrigger className="h-10 w-full rounded-xl border-neutral-200 bg-white">
+                  <SelectValue placeholder="选择清理周期" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1">每天</SelectItem>
+                  <SelectItem value="3">每三天</SelectItem>
+                  <SelectItem value="5">每五天</SelectItem>
+                  <SelectItem value="7">每七天</SelectItem>
+                  <SelectItem value="minutes">按分钟</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs leading-5 text-neutral-500">按「每 N 天」时在固定时刻清理。</p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-neutral-700">清理间隔（分钟）</label>
+              <Input
+                value={cleanupMinutes}
+                onChange={(event) => setCleanupMinutes(event.target.value)}
+                disabled={cleanupUnit !== "minutes"}
+                inputMode="numeric"
+                placeholder="60"
+                className="h-10 rounded-xl border-neutral-200 bg-white disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
+              />
+              <p className="text-xs leading-5 text-neutral-500">仅在清理周期选「按分钟」时可填，范围 1-10080。</p>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-neutral-700">清理时间</label>
+              <Input
+                type="time"
+                step={60}
+                value={cleanupTime}
+                onChange={(event) => setCleanupTime(event.target.value)}
+                disabled={cleanupUnit === "minutes"}
+                className="h-10 rounded-xl border-neutral-200 bg-white disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
+              />
+              <p className="text-xs leading-5 text-neutral-500">
+                {cleanupUnit === "minutes" ? "按分钟间隔清理时此项不生效。" : "默认删除执行日期及之前的全部图片。"}
+              </p>
+            </div>
+            <div className="space-y-2">
+              <label className="flex items-center gap-3 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-700">
+                <Checkbox
+                  checked={cleanupKeepToday}
+                  onCheckedChange={(checked) => setCleanupKeepToday(Boolean(checked))}
+                  disabled={cleanupUnit === "minutes"}
+                />
+                保留当天图片
+              </label>
+              <p className="text-xs leading-5 text-neutral-500">
+                {cleanupUnit === "minutes"
+                  ? "按分钟间隔清理时此项不生效。"
+                  : "勾选后只删除昨天及更早的图片：例如 05:00 清理会保留今天 00:00-05:00 生成的图片。"}
+              </p>
+            </div>
+          </div>
+        </CardContent>
       </Card>
 
       {/* Delete by date dialog */}

@@ -153,11 +153,6 @@ type SettingsStore = {
   saveConfig: () => Promise<boolean>;
   setRefreshAccountIntervalMinute: (value: string) => void;
   setRefreshAllAccountsIntervalMinute: (value: string) => void;
-  setImageCleanupIntervalDays: (value: string) => void;
-  setImageCleanupIntervalUnit: (value: string) => void;
-  setImageCleanupIntervalMinutes: (value: string) => void;
-  setImageCleanupTime: (value: string) => void;
-  setImageCleanupKeepToday: (value: boolean) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageGenerationRetryCount: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
@@ -300,26 +295,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         },
       };
     });
-  },
-
-  setImageCleanupIntervalDays: (value) => {
-    set((state) => state.config ? { config: { ...state.config, image_cleanup_interval_days: Number(value) } } : {});
-  },
-
-  setImageCleanupIntervalUnit: (value) => {
-    set((state) => state.config ? { config: { ...state.config, image_cleanup_interval_unit: value === "minutes" ? "minutes" : "days" } } : {});
-  },
-
-  setImageCleanupIntervalMinutes: (value) => {
-    set((state) => state.config ? { config: { ...state.config, image_cleanup_interval_minutes: value } } : {});
-  },
-
-  setImageCleanupTime: (value) => {
-    set((state) => state.config ? { config: { ...state.config, image_cleanup_time: value } } : {});
-  },
-
-  setImageCleanupKeepToday: (value) => {
-    set((state) => state.config ? { config: { ...state.config, image_cleanup_keep_today: value } } : {});
   },
 
   setImagePollTimeoutSecs: (value) => {

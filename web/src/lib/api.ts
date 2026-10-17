@@ -498,7 +498,7 @@ export async function fetchSettingsConfig() {
   return httpRequest<{ config: SettingsConfig }>("/api/settings");
 }
 
-export async function updateSettingsConfig(settings: SettingsConfig) {
+export async function updateSettingsConfig(settings: Partial<SettingsConfig>) {
   return httpRequest<{ config: SettingsConfig }>("/api/settings", {
     method: "POST",
     body: settings,
