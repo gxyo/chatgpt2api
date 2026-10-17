@@ -292,9 +292,11 @@ function AccountsPageContent() {
     }
   };
 
-  const rawModelMeta = useMemo(() => {
+  // 上游 payload.models 才是有效模型清单：slug 去空、去重，title 只作说明。
+  const upstreamModelView = useMemo(() => {
+    const empty = { channel: "", endpoint: "", models: [] as Array<{ slug: string; title: string }> };
     if (!modelsRaw) {
-      return { count: 0, channel: "", endpoint: "" };
+      return empty;
     }
     try {
       const parsed = JSON.parse(modelsRaw) as {
@@ -302,18 +304,37 @@ function AccountsPageContent() {
         endpoint?: string;
         payload?: { models?: unknown; data?: unknown };
       };
-      const models = Array.isArray(parsed.payload?.models)
+      const rawModels = Array.isArray(parsed.payload?.models)
         ? parsed.payload.models
         : Array.isArray(parsed.payload?.data)
           ? parsed.payload.data
           : [];
+      const seen = new Set<string>();
+      const models: Array<{ slug: string; title: string }> = [];
+      for (const item of rawModels) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+        const record = item as { slug?: unknown; id?: unknown; title?: unknown };
+        const slug =
+          typeof record.slug === "string"
+            ? record.slug.trim()
+            : typeof record.id === "string"
+              ? record.id.trim()
+              : "";
+        if (!slug || seen.has(slug)) {
+          continue;
+        }
+        seen.add(slug);
+        models.push({ slug, title: typeof record.title === "string" ? record.title.trim() : "" });
+      }
       return {
-        count: models.length,
         channel: parsed.channel === "authenticated" ? "登录通道" : "匿名通道",
         endpoint: parsed.endpoint || "",
+        models,
       };
     } catch {
-      return { count: 0, channel: "", endpoint: "" };
+      return empty;
     }
   }, [modelsRaw]);
 
@@ -914,18 +935,38 @@ function AccountsPageContent() {
           ) : modelsRaw ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2 text-xs text-neutral-500">
-                <span className="min-w-0 truncate" title={rawModelMeta.endpoint}>
-                  {rawModelMeta.channel ? `${rawModelMeta.channel} · ` : ""}
-                  {rawModelMeta.endpoint || "上游"} · 共 {rawModelMeta.count} 个模型
+                <span className="min-w-0 truncate" title={upstreamModelView.endpoint}>
+                  {upstreamModelView.channel ? `${upstreamModelView.channel} · ` : ""}
+                  {upstreamModelView.endpoint || "上游"} · 共 {upstreamModelView.models.length} 个模型
                 </span>
                 <Button variant="outline" size="sm" onClick={() => void copyModelsRaw()}>
                   <Copy className="size-3.5" />
                   复制 JSON
                 </Button>
               </div>
-              <pre className="max-h-[55vh] overflow-auto rounded-xl border border-border bg-muted/40 p-4 font-mono text-[11px] leading-5 whitespace-pre-wrap break-all">
-                {modelsRaw}
-              </pre>
+              <ul className="max-h-[40vh] divide-y divide-border overflow-auto rounded-xl border border-border">
+                {upstreamModelView.models.length > 0 ? (
+                  upstreamModelView.models.map((item) => (
+                    <li key={item.slug} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                      <code className="font-mono text-xs font-medium text-foreground">{item.slug}</code>
+                      {item.title ? (
+                        <span className="truncate text-xs text-muted-foreground">{item.title}</span>
+                      ) : null}
+                    </li>
+                  ))
+                ) : (
+                  <li className="px-4 py-3 text-xs text-neutral-500">上游没有返回有效的模型名</li>
+                )}
+              </ul>
+              <details className="group rounded-xl border border-border">
+                <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-medium text-neutral-600 transition-colors hover:bg-muted/40 [&::-webkit-details-marker]:hidden dark:text-neutral-400">
+                  <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
+                  原始 JSON
+                </summary>
+                <pre className="max-h-[45vh] overflow-auto border-t border-border bg-muted/40 p-4 font-mono text-[11px] leading-5 whitespace-pre-wrap break-all">
+                  {modelsRaw}
+                </pre>
+              </details>
             </div>
           ) : null}
           <DialogFooter>
