@@ -125,6 +125,7 @@ export function RegisterCard() {
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
   const setRefreshBatchSize = useSettingsStore((state) => state.setRegisterRefreshBatchSize);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
+  const setDomainCooldown = useSettingsStore((state) => state.setRegisterDomainCooldown);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
   const addProvider = useSettingsStore((state) => state.addRegisterProvider);
   const updateProvider = useSettingsStore((state) => state.updateRegisterProvider);
@@ -314,6 +315,17 @@ export function RegisterCard() {
                       onChange={(event) => setCheckInterval(event.target.value)}
                       className={FIELD_CLASS}
                       disabled={locked || config.mode === "total"}
+                    />
+                  </Field>
+                  <Field label="域名注册冷却（秒）" hint="单个域名注册成功后，需等待这么久才能再次使用；0 表示不限制">
+                    <Input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={String(config.domain_cooldown ?? 0)}
+                      onChange={(event) => setDomainCooldown(event.target.value)}
+                      className={`${FIELD_CLASS} tabular-nums`}
+                      disabled={locked}
                     />
                   </Field>
                 </div>

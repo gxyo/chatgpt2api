@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import imaplib
 import json
+import math
 import os
 import random
 import re
@@ -41,6 +42,17 @@ _rotation_state_lock = Lock()
 OUTLOOK_TOKEN_USED_FILE = DATA_DIR / "outlook_token_used.json"
 OUTLOOK_TOKEN_USED_LOCK_FILE = DATA_DIR / "outlook_token_used.lock"
 _outlook_token_state_lock = Lock()
+
+# 单个域名的注册冷却：某域名注册成功后，多少秒内不再用它注册。0 表示不限制。
+# 配置在注册机主进程（基础配置页），但选域名发生在一次性注册子进程里，
+# 所以 task_process.main 启动时会把配置值同步到这里。
+domain_cooldown_seconds: float = 0
+# 冷却相关的提示要出现在注册机控制台日志里。子进程里由 task_process 接到协议 stdout，
+# 主进程里由 register_service 接到日志面板；都没接就不打印。
+mail_log_sink: Callable[[str, str], None] | None = None
+DOMAIN_COOLDOWN_STATE_FILE = DATA_DIR / "domain_cooldowns.json"
+DOMAIN_COOLDOWN_LOCK_FILE = DATA_DIR / "domain_cooldowns.lock"
+_domain_cooldown_lock = Lock()
 # in_use 超过该秒数视为陈旧（注册进程崩溃残留），可被重新领用
 OUTLOOK_IN_USE_STALE_SECONDS = 3600
 OUTLOOK_RECORDED_STATES = {"used", "in_use", "token_invalid", "failed"}
@@ -120,6 +132,17 @@ def _load_rotation_state() -> dict[str, str]:
     return {str(key): str(value) for key, value in data.items() if isinstance(value, str) and value}
 
 
+def _save_rotation_state(state: dict[str, str]) -> None:
+    try:
+        _atomic_write_text(
+            ROTATION_STATE_FILE,
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+        )
+    except OSError:
+        # 写不进去就退化成"这次仍用第一个"，不该让注册直接失败。
+        pass
+
+
 def _next_rotation_index(key: str, identities: list[str]) -> int:
     """取本次该用的轮询位置：接上次用过的那个往下走，到末尾回到开头。
 
@@ -136,14 +159,7 @@ def _next_rotation_index(key: str, identities: list[str]) -> int:
         # 上次用的那个还在列表里，就取它的下一个；已被删掉（或从没跑过）就从第一个开始。
         index = (identities.index(last) + 1) % len(identities) if last in identities else 0
         state[key] = identities[index]
-        try:
-            _atomic_write_text(
-                ROTATION_STATE_FILE,
-                json.dumps(state, ensure_ascii=False, indent=2) + "\n",
-            )
-        except OSError:
-            # 写不进去就退化成"这次仍用第一个"，不该让注册直接失败。
-            pass
+        _save_rotation_state(state)
     return index
 
 
@@ -330,13 +346,129 @@ def _random_subdomain_label() -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(4, 10)))
 
 
+def _mailbox_domain(address: str) -> str:
+    _, separator, domain = str(address or "").strip().rpartition("@")
+    return domain.strip().lower().rstrip(".") if separator else ""
+
+
+def _load_domain_cooldowns() -> dict[str, float]:
+    """读取 {域名: 最近一次注册成功的时间戳}。读不出来就当没有冷却，不能挡住注册。"""
+    try:
+        data = json.loads(DOMAIN_COOLDOWN_STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    state: dict[str, float] = {}
+    for key, value in data.items():
+        domain = str(key or "").strip().lower().rstrip(".")
+        try:
+            if domain:
+                state[domain] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return state
+
+
+def _cooldown_remaining(domain: str, cooldowns: dict[str, float], cooldown_seconds: float, now: float) -> float:
+    last_success = cooldowns.get(domain)
+    if not last_success:
+        return 0.0
+    return max(0.0, cooldown_seconds - (now - last_success))
+
+
+def _log_mail(text: str, color: str = "yellow") -> None:
+    sink = mail_log_sink
+    if sink is None:
+        return
+    try:
+        sink(text, color)
+    except Exception:
+        pass
+
+
+def _record_domain_cooldown(address: str) -> None:
+    """注册成功后记下该域名的冷却起点。只在启用冷却时落盘，不开功能就不留文件。
+
+    这个函数挂在「注册成功」的收尾路径上，任何异常都不能往外冒，否则已成功的
+    注册会被 worker 当成失败处理。
+    """
+    try:
+        if float(domain_cooldown_seconds or 0) <= 0:
+            return
+        domain = _mailbox_domain(address)
+        if not domain:
+            return
+        now = time.time()
+        with _state_file_lock(_domain_cooldown_lock, DOMAIN_COOLDOWN_LOCK_FILE):
+            state = _load_domain_cooldowns()
+            state[domain] = now
+            # 冷却早就过期的条目没有保留价值，顺手清掉，文件不会无限增长。
+            cutoff = now - 7 * 86400
+            state = {key: value for key, value in state.items() if value >= cutoff}
+            _atomic_write_text(
+                DOMAIN_COOLDOWN_STATE_FILE,
+                json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            )
+    except Exception:
+        # 记录失败只影响下一轮能不能用这个域名，不该反过来把已成功的注册判失败。
+        pass
+
+
+def _next_domain_round_robin(domains: list[str], cooldown: float) -> str:
+    """按轮询顺序取第一个不在冷却中的域名；全都在冷却就等最早结束的那个。
+
+    冷却中的域名会被跳过并把剩余时间写进控制台日志，运维能直接看出为什么换域名。
+    """
+    with _state_file_lock(_rotation_state_lock, ROTATION_STATE_LOCK_FILE):
+        state = _load_rotation_state()
+        last = state.get("domain_last") or ""
+        start = (domains.index(last) + 1) % len(domains) if last in domains else 0
+        cooldowns = _load_domain_cooldowns()
+        now = time.time()
+        selected = ""
+        wait_domain = ""
+        wait_seconds = 0.0
+        for offset in range(len(domains)):
+            domain = domains[(start + offset) % len(domains)]
+            remaining = _cooldown_remaining(domain, cooldowns, cooldown, now)
+            if remaining <= 0:
+                selected = domain
+                break
+            _log_mail(f"域名 {domain} 注册冷却中，剩余 {math.ceil(remaining)}s，跳过")
+            if not wait_domain or remaining < wait_seconds:
+                wait_domain, wait_seconds = domain, remaining
+        if selected:
+            state["domain_last"] = selected
+            _save_rotation_state(state)
+            return selected
+    # 等冷却必须跳出文件锁，否则别的任务连选域名都会被堵住整个冷却时长。
+    _log_mail(f"所有域名都在注册冷却中，等待 {math.ceil(wait_seconds)}s 后使用域名 {wait_domain}")
+    time.sleep(wait_seconds + 0.05)
+    with _state_file_lock(_rotation_state_lock, ROTATION_STATE_LOCK_FILE):
+        state = _load_rotation_state()
+        state["domain_last"] = wait_domain
+        _save_rotation_state(state)
+    return wait_domain
+
+
 def _next_domain(domains: list[str]) -> str:
     domains = [str(item).strip() for item in domains if str(item).strip()]
     if not domains:
         raise RuntimeError("mail.domain 不能为空")
+    cooldown = max(0.0, float(domain_cooldown_seconds or 0))
+    if cooldown <= 0:
+        # 没开冷却保持原行为：单域名直接返回，且不产生轮询状态文件。
+        if len(domains) == 1:
+            return domains[0]
+        return domains[_next_rotation_index("domain_last", domains)]
     if len(domains) == 1:
+        remaining = _cooldown_remaining(domains[0], _load_domain_cooldowns(), cooldown, time.time())
+        if remaining > 0:
+            _log_mail(f"域名 {domains[0]} 注册冷却中，剩余 {math.ceil(remaining)}s，等待冷却结束")
+            time.sleep(remaining + 0.05)
         return domains[0]
-    return domains[_next_rotation_index("domain_last", domains)]
+    return _next_domain_round_robin(domains, cooldown)
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -1553,6 +1685,9 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
     仅对 outlook_token 邮箱生效：成功标记 used；失败时若是 token 失效标记 token_invalid，
     其余失败标记 failed（保留邮箱占用以便排查，可通过重置释放）。
     """
+    if success:
+        # 冷却按「该域名最近一次注册成功」计时，失败不占用冷却。
+        _record_domain_cooldown(str(mailbox.get("address") or ""))
     if mailbox_result_sink:
         try:
             mailbox_result_sink(mailbox, success=success, error=error)

@@ -39,11 +39,12 @@ config = {
     "total": 10,
     "threads": 3,
     "engine": "playwright",
+    "domain_cooldown": 0,
 }
 register_config_file = base_dir.parents[1] / "data" / "register.json"
 try:
     saved_config = json.loads(register_config_file.read_text(encoding="utf-8"))
-    config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads", "engine") if key in saved_config})
+    config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads", "engine", "domain_cooldown") if key in saved_config})
 except Exception:
     pass
 
@@ -732,7 +733,7 @@ def _worker(index: int) -> dict:
     try:
         outcome = task_process.run_registration_task(
             index,
-            {key: config[key] for key in ("mail", "proxy", "total", "threads", "engine")},
+            {key: config[key] for key in ("mail", "proxy", "total", "threads", "engine", "domain_cooldown")},
             on_log=_forward_child_log,
             on_mailbox_result=_forward_child_mailbox_result,
         )

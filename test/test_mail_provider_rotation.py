@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -161,6 +162,75 @@ class RotationCursorTests(unittest.TestCase):
                 mail_provider, "ROTATION_STATE_LOCK_FILE", lock_file
             ), patch.object(mail_provider, "_atomic_write_text", side_effect=OSError("read-only")):
                 self.assertEqual(mail_provider._next_domain(DOMAINS), "a.example")
+
+
+class DomainCooldownTests(unittest.TestCase):
+    """域名注册冷却：成功注册过的域名，冷却期内不再被选中，并把剩余时间写进日志。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.logs: list[str] = []
+        patches = [
+            patch.object(mail_provider, "ROTATION_STATE_FILE", self.root / "rotation_state.json"),
+            patch.object(mail_provider, "ROTATION_STATE_LOCK_FILE", self.root / "rotation_state.lock"),
+            patch.object(mail_provider, "DOMAIN_COOLDOWN_STATE_FILE", self.root / "domain_cooldowns.json"),
+            patch.object(mail_provider, "DOMAIN_COOLDOWN_LOCK_FILE", self.root / "domain_cooldowns.lock"),
+            patch.object(mail_provider, "domain_cooldown_seconds", 60),
+            patch.object(mail_provider, "mail_log_sink", lambda text, color="": self.logs.append(text)),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def _write_cooldowns(self, data: dict[str, float]) -> None:
+        mail_provider.DOMAIN_COOLDOWN_STATE_FILE.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_domain_in_cooldown_is_skipped_and_remaining_time_is_logged(self) -> None:
+        self._write_cooldowns({"a.example": time.time()})
+
+        self.assertEqual(mail_provider._next_domain(DOMAINS), "b.example")
+        self.assertTrue(
+            any("a.example" in line and "剩余 60s" in line and "跳过" in line for line in self.logs),
+            self.logs,
+        )
+
+    def test_domain_becomes_available_after_cooldown(self) -> None:
+        self._write_cooldowns({"a.example": time.time() - 120})
+
+        self.assertEqual(mail_provider._next_domain(DOMAINS), "a.example")
+        self.assertFalse(any("冷却中" in line for line in self.logs), self.logs)
+
+    def test_successful_registration_records_cooldown_and_failure_does_not(self) -> None:
+        mail_provider.mark_mailbox_result(
+            {"provider": "cloudflare_temp_email", "address": "User@A.Example."}, success=True
+        )
+        mail_provider.mark_mailbox_result(
+            {"provider": "cloudflare_temp_email", "address": "user@b.example"}, success=False
+        )
+
+        state = json.loads(mail_provider.DOMAIN_COOLDOWN_STATE_FILE.read_text(encoding="utf-8"))
+        self.assertIn("a.example", state)
+        self.assertNotIn("b.example", state)
+
+    def test_all_domains_cooling_waits_for_the_earliest_to_expire(self) -> None:
+        now = time.time()
+        with patch.object(mail_provider, "domain_cooldown_seconds", 0.2):
+            self._write_cooldowns({"a.example": now - 0.15, "b.example": now, "c.example": now})
+            started = time.monotonic()
+            chosen = mail_provider._next_domain(DOMAINS)
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(chosen, "a.example")
+        self.assertGreaterEqual(elapsed, 0.04)
+        self.assertTrue(any("所有域名都在注册冷却中" in line for line in self.logs), self.logs)
+
+    def test_zero_cooldown_disables_the_limit(self) -> None:
+        with patch.object(mail_provider, "domain_cooldown_seconds", 0):
+            self._write_cooldowns({"a.example": time.time()})
+            self.assertEqual(mail_provider._next_domain(DOMAINS), "a.example")
+        self.assertEqual(self.logs, [])
 
 
 if __name__ == "__main__":

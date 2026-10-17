@@ -86,7 +86,7 @@ def _normalize_cloudflare_domain_stats(value: object) -> list[dict]:
 
 
 def _default_config() -> dict:
-    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "refresh_batch_size": 5, "check_interval": 5, "enabled": False, "cloudflare_domain_stats": [], "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
+    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "refresh_batch_size": 5, "check_interval": 5, "domain_cooldown": 0, "enabled": False, "cloudflare_domain_stats": [], "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
 
 
 def _normalize(raw: dict) -> dict:
@@ -99,6 +99,8 @@ def _normalize(raw: dict) -> dict:
     cfg["target_available"] = max(1, int(cfg.get("target_available") or 1))
     cfg["refresh_batch_size"] = max(1, int(cfg.get("refresh_batch_size") or 5))
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
+    # 0 表示不限制；冷却时长以秒为单位，不设下限。
+    cfg["domain_cooldown"] = max(0, int(cfg.get("domain_cooldown") or 0))
     cfg["proxy"] = str(cfg.get("proxy") or "").strip()
     cfg["engine"] = str(cfg.get("engine") or "playwright").strip() if str(cfg.get("engine") or "playwright").strip() in {"playwright", "http"} else "playwright"
     if isinstance(cfg.get("mail"), dict):
@@ -121,6 +123,8 @@ class RegisterService:
         # 它不该进 get() 的快照，否则会被 SSE 每 0.5 秒全量广播一遍。
         self._stats_store = RegisterStatsStore(store_file.parent / "register_stats.json")
         openai_register.register_log_sink = self._append_log
+        # 主进程里一般不会选域名（注册在子进程跑），接上是为了将来有进程内调用时日志也不丢。
+        mail_provider.mail_log_sink = self._append_log
         mail_provider.mailbox_result_sink = self._record_mailbox_result
         self._config = self._load()
         if self._config["enabled"]:
@@ -135,6 +139,13 @@ class RegisterService:
     def _save(self) -> None:
         self._store_file.parent.mkdir(parents=True, exist_ok=True)
         self._store_file.write_text(json.dumps(self._config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _sync_engine_config(self) -> None:
+        """把面板配置同步给注册引擎：子进程的配置载荷也取自 openai_register.config。"""
+        for key in ("mail", "proxy", "total", "threads", "engine", "domain_cooldown"):
+            openai_register.config[key] = self._config[key]
+        # 域名冷却由邮箱层执行；进程内调用时也保持同一份值。
+        mail_provider.domain_cooldown_seconds = float(self._config.get("domain_cooldown") or 0)
 
     def get(self) -> dict:
         with self._lock:
@@ -308,7 +319,7 @@ class RegisterService:
             self._merge_outlook_pools(updates)
             self._config = _normalize({**self._config, **updates})
             self._drop_mail_proxy()
-            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "engine")})
+            self._sync_engine_config()
             self._save()
             return self.get()
 
@@ -323,7 +334,7 @@ class RegisterService:
             self._logs = []
             metrics = self._pool_metrics()
             self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
-            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "engine")})
+            self._sync_engine_config()
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
             self._save()
@@ -356,7 +367,7 @@ class RegisterService:
         if scope == "unused":
             with self._lock:
                 removed = self._prune_unused_outlook_pools()
-                openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "engine")})
+                self._sync_engine_config()
                 self._save()
                 self._append_log(f"已清空 Outlook 邮箱池未使用邮箱，移除 {removed} 个", "yellow")
             return self.get()

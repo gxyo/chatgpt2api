@@ -105,6 +105,7 @@ type SettingsStore = {
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterRefreshBatchSize: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
+  setRegisterDomainCooldown: (value: string) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
@@ -371,6 +372,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, check_interval: Number(value) || 0 } } : {});
   },
 
+  setRegisterDomainCooldown: (value) => {
+    set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, domain_cooldown: Number(value) || 0 } } : {});
+  },
+
   setRegisterMailField: (key, value) => {
     set((state) => state.registerConfig ? {
       registerConfig: {
@@ -432,6 +437,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         target_available: Math.max(1, Number(registerConfig.target_available) || 1),
         refresh_batch_size: Math.max(1, Number(registerConfig.refresh_batch_size) || 5),
         check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+        domain_cooldown: Math.max(0, Number(registerConfig.domain_cooldown) || 0),
       });
       set({ registerConfig: data.register });
       toast.success("注册配置已保存");
@@ -459,6 +465,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           target_available: Math.max(1, Number(registerConfig.target_available) || 1),
           refresh_batch_size: Math.max(1, Number(registerConfig.refresh_batch_size) || 5),
           check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+          domain_cooldown: Math.max(0, Number(registerConfig.domain_cooldown) || 0),
         });
       }
       const data = registerConfig.enabled ? await stopRegister() : await startRegister();

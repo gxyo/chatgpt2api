@@ -35,7 +35,7 @@ TASK_TIMEOUT_SECONDS = 600
 KILL_REAP_TIMEOUT_SECONDS = 30
 # 父进程留存的输出尾部行数：超时和崩溃时子进程没机会回传 detail，这些就是唯一线索。
 TASK_LOG_TAIL_LINES = 200
-_CONFIG_KEYS = ("mail", "proxy", "total", "threads", "engine")
+_CONFIG_KEYS = ("mail", "proxy", "total", "threads", "engine", "domain_cooldown")
 
 # 子进程里指向真正的 stdout（fd 1）。模块级是因为日志 sink 是个回调。
 _protocol_stream: Any = None
@@ -284,6 +284,10 @@ def _install_child_protocol() -> None:
             "success": bool(success),
         }
     )
+    # 域名冷却等邮箱层的提示也要进注册机控制台日志。
+    mail_provider.mail_log_sink = lambda text, color="": _emit(
+        {"type": "log", "text": str(text), "color": color}
+    )
 
 
 def _run_registration(index: int) -> dict[str, Any]:
@@ -307,6 +311,8 @@ def main() -> int:
     config_payload = payload.get("config") if isinstance(payload.get("config"), dict) else {}
     # 子进程是独立进程，拿不到主进程里那份 config 全局，必须由父进程显式传进来。
     openai_register.config.update({key: config_payload[key] for key in _CONFIG_KEYS if key in config_payload})
+    # 选域名发生在子进程里，冷却配置必须同步到邮箱层才生效。
+    mail_provider.domain_cooldown_seconds = float(openai_register.config.get("domain_cooldown") or 0)
     _install_child_protocol()
     try:
         result = _run_registration(index)

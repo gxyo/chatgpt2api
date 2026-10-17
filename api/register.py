@@ -21,6 +21,7 @@ class RegisterConfigRequest(BaseModel):
     target_available: int | None = None
     refresh_batch_size: int | None = None
     check_interval: int | None = None
+    domain_cooldown: int | None = None
 
 
 class OutlookPoolResetRequest(BaseModel):

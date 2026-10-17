@@ -221,6 +221,8 @@ export type RegisterConfig = {
   target_available: number;
   refresh_batch_size: number;
   check_interval: number;
+  /** 单个域名注册成功后的冷却秒数；0 表示不限制。 */
+  domain_cooldown: number;
   cloudflare_domain_stats?: CloudflareDomainStat[];
   stats: {
     job_id?: string;
