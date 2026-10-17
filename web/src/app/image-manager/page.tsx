@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Tag, Trash2, X } from "lucide-react";
+import { CalendarDays, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Tag, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
@@ -69,7 +69,9 @@ function ImageManagerContent() {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(8);
-  const [isLoading, setIsLoading] = useState(true);
+  // 图片库默认折叠：进页面不发列表/标签请求，点开才第一次加载。
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [deleteStartDate, setDeleteStartDate] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<ManagedImage | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -270,9 +272,14 @@ function ImageManagerContent() {
     await downloadSingleImage(item.rel);
   };
 
+  // 展开图片库或改动日期时才加载；折叠状态下一张图、一个请求都不发。
   useEffect(() => {
+    if (!libraryOpen) {
+      return;
+    }
     void loadImages();
-  }, [startDate, endDate]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [libraryOpen, startDate, endDate]);
 
   return (
     <section className="space-y-5">
@@ -293,7 +300,18 @@ function ImageManagerContent() {
             <Trash2 className="size-4" />
             删除匹配日期
           </Button>
-          <Button onClick={() => void loadImages()} disabled={isLoading} className="h-10 px-5">
+          <Button
+            onClick={() => {
+              // 折叠状态下点查询 = 展开；加载由展开触发的 effect 负责，避免重复请求。
+              if (libraryOpen) {
+                void loadImages();
+              } else {
+                setLibraryOpen(true);
+              }
+            }}
+            disabled={isLoading}
+            className="h-10 px-5"
+          >
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
@@ -455,10 +473,21 @@ function ImageManagerContent() {
 
       <Card>
         <CardContent className="p-0">
+          {libraryOpen ? (
+          <>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
             <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-              <ImageIcon className="size-4" />
-              <span className="text-[15px] font-semibold tracking-tight text-foreground">图片库</span>
+              <button
+                type="button"
+                aria-expanded
+                onClick={() => setLibraryOpen(false)}
+                title="收起图片库"
+                className="inline-flex items-center gap-2 rounded-lg pr-1 text-muted-foreground transition-colors hover:text-foreground"
+              >
+                <ImageIcon className="size-4" />
+                <span className="text-[15px] font-semibold tracking-tight text-foreground">图片库</span>
+                <ChevronDown className="size-4 rotate-180 transition-transform" />
+              </button>
               <span className="rounded-full bg-brand-soft px-2 py-0.5 text-[11px] font-semibold text-brand tabular-nums">
                 {filteredItems.length}
               </span>
@@ -659,6 +688,31 @@ function ImageManagerContent() {
             </Button>
           </div>
           {!isLoading && filteredItems.length === 0 ? <div className="px-6 py-14 text-center text-sm text-neutral-500">没有找到图片</div> : null}
+          </>
+          ) : (
+            <button
+              type="button"
+              aria-expanded={false}
+              onClick={() => setLibraryOpen(true)}
+              className="group flex w-full items-center gap-3.5 px-5 py-4 text-left transition-colors hover:bg-muted/40"
+            >
+              <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-brand-soft text-brand">
+                <ImageIcon className="size-[18px]" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2">
+                  <span className="text-[15px] font-semibold tracking-tight text-foreground">图片库</span>
+                  <ChevronDown className="size-4 text-muted-foreground transition-transform group-hover:translate-y-0.5" />
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  默认不加载，展开后按上方时间范围加载图片
+                </span>
+              </span>
+              <span className="hidden shrink-0 items-center rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors group-hover:border-brand/30 group-hover:text-foreground sm:inline-flex">
+                展开加载
+              </span>
+            </button>
+          )}
         </CardContent>
       </Card>
 
