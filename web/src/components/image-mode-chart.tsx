@@ -9,16 +9,15 @@ type ImageModeChartProps = {
   modes: ImageStatsBreakdown[];
 };
 
-// 调用方式之间是「身份」而非「量级」，所以用分类色，按固定的 mode -> 槽位映射，不随排序变色。
-// 这两个槽位（黄 / 品红）是在本页已经占用蓝（请求数、成功）的前提下，拿校验器对着卡片真实
-// 表面（亮 #ffffff / 暗 #1c1917）跑出来的：两套主题都过 CVD 与常色觉分离度门槛。亮色下
-// 两者对比度低于 3:1，按 relief 规则靠直标兜底 —— 每段旁边都写着名称与百分比，颜色只是辅助。
+// 调用方式之间是「身份」而非「量级」，所以用同一主色的两档深浅区分：
+// 深蓝是主方式，浅蓝是次方式，整页仍是一套蓝色语言，不再出现黄/品红这类跳色。
+// 图例和表头都直接写出名称与百分比，颜色只做辅助，不承担唯一的信息通道。
 const MODE_BAR: Record<string, string> = {
-  generate: "bg-[#eda100] dark:bg-[#c98500]",
-  edit: "bg-[#e87ba4] dark:bg-[#d55181]",
+  generate: "bg-brand",
+  edit: "bg-brand/40",
 };
 // 认不出的方式走中性灰：不占分类槽位（后端目前只会给出这两种），也不会伪装成一个序列。
-const MODE_FALLBACK_BAR = "bg-neutral-400 dark:bg-neutral-500";
+const MODE_FALLBACK_BAR = "bg-muted-foreground/40";
 
 // 成功率是「一个比值对一个上限」，画成 meter：填充是蓝，轨道是同一色阶更浅的一档，
 // 这样整条都在讲同一件事，不是两个独立序列。
@@ -50,16 +49,16 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
   const segments = modes.filter((item) => item.images > 0);
 
   if (total === 0) {
-    return <div className="py-10 text-center text-sm text-neutral-400">该时间段没有成功生成的图片</div>;
+    return <div className="py-10 text-center text-sm text-muted-foreground">该时间段没有成功生成的图片</div>;
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex h-3 w-full overflow-hidden rounded-full bg-neutral-100">
+      <div className="flex h-3 w-full overflow-hidden rounded-full bg-muted">
         {segments.map((item, index) => (
           <Fragment key={item.mode}>
             {/* 2px 的表面色缝隙分开两段，不额外描边。 */}
-            {index > 0 ? <div className="h-full w-0.5 shrink-0 bg-white" /> : null}
+            {index > 0 ? <div className="h-full w-0.5 shrink-0 bg-card" /> : null}
             <div
               // flexGrow 按成功图片数分配，flexBasis 归零，缝隙的宽度就不会让总长溢出。
               style={{ flexGrow: item.images, flexBasis: 0 }}
@@ -71,31 +70,31 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
       </div>
 
       {/* 这条既是图例也是直标：身份不靠颜色单独承担。 */}
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-neutral-500 dark:text-neutral-400">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-muted-foreground">
         {segments.map((item) => (
           <span key={item.mode} className="inline-flex items-center gap-1.5">
             <span className={cn("size-2.5 rounded-full", barClass(item.mode))} />
-            <span className="text-neutral-600 dark:text-neutral-300">{item.label}</span>
+            <span className="text-foreground/80">{item.label}</span>
             <span className="tabular-nums">{formatRate(item.images / total)}</span>
           </span>
         ))}
         <span className="ml-auto tabular-nums">共 {formatCount(total)} 张</span>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[440px] text-sm">
-          <thead>
-            <tr className="border-b border-neutral-100 text-xs text-neutral-500 dark:border-white/10 dark:text-neutral-400">
-              <th scope="col" className="py-2 pr-3 text-left font-medium">
+      <div className="overflow-x-auto rounded-xl border border-border">
+        <table className="w-full min-w-[440px] caption-bottom text-sm">
+          <thead className="border-b border-border bg-muted/40 text-xs font-medium text-muted-foreground">
+            <tr>
+              <th scope="col" className="h-10 px-4 text-left align-middle font-medium whitespace-nowrap">
                 调用方式
               </th>
-              <th scope="col" className="px-3 py-2 text-right font-medium">
+              <th scope="col" className="h-10 px-4 text-right align-middle font-medium whitespace-nowrap">
                 成功图片
               </th>
-              <th scope="col" className="px-3 py-2 text-right font-medium">
+              <th scope="col" className="h-10 px-4 text-right align-middle font-medium whitespace-nowrap">
                 占比
               </th>
-              <th scope="col" className="px-3 py-2 text-left font-medium">
+              <th scope="col" className="h-10 px-4 text-left align-middle font-medium whitespace-nowrap">
                 成功率
               </th>
             </tr>
@@ -110,21 +109,21 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
               return (
                 <tr
                   key={item.mode}
-                  className="border-b border-neutral-100 transition-colors last:border-0 hover:bg-neutral-50/70 dark:border-white/10 dark:hover:bg-white/5"
+                  className="border-b border-border/70 transition-colors last:border-0 hover:bg-muted/40"
                 >
-                  <td className="py-3 pr-3">
-                    <span className="inline-flex items-center gap-2 font-medium text-neutral-700 dark:text-neutral-200">
+                  <td className="px-4 py-3.5 align-middle">
+                    <span className="inline-flex items-center gap-2 font-medium text-foreground">
                       <span className={cn("size-2.5 rounded-full", barClass(item.mode))} />
                       {item.label}
                     </span>
                   </td>
-                  <td className="px-3 py-3 text-right font-semibold tabular-nums text-neutral-900 dark:text-neutral-50">
+                  <td className="px-4 py-3.5 text-right align-middle font-semibold tabular-nums text-foreground">
                     {formatCount(item.images)}
                   </td>
-                  <td className="px-3 py-3 text-right tabular-nums text-neutral-500 dark:text-neutral-400">
+                  <td className="px-4 py-3.5 text-right align-middle tabular-nums text-muted-foreground">
                     {formatRate(item.images / total)}
                   </td>
-                  <td className="px-3 py-3">
+                  <td className="px-4 py-3.5 align-middle">
                     <div className="flex items-center gap-2.5">
                       <span className={cn("h-1.5 w-full max-w-[140px] overflow-hidden rounded-full", RATE_TRACK)}>
                         <span
@@ -132,9 +131,7 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
                           style={{ width: `${rate * 100}%` }}
                         />
                       </span>
-                      <span className="w-12 shrink-0 tabular-nums text-neutral-700 dark:text-neutral-200">
-                        {rateBase > 0 ? formatRate(rate) : "-"}
-                      </span>
+                      <span className="w-12 shrink-0 tabular-nums text-foreground">{rateBase > 0 ? formatRate(rate) : "-"}</span>
                     </div>
                   </td>
                 </tr>
