@@ -226,6 +226,16 @@ class GenerationRetryTests(unittest.TestCase):
             ["a1@example.test", "b1@example.test", "a2@example.test", "b2@example.test"],
         )
 
+    def test_collect_image_outputs_keeps_upstream_model_slug(self):
+        outputs = [conversation.ImageOutput(
+            kind="result", model="gpt-image-2", index=1, total=1, data=[{"url": "ok"}],
+            upstream_model_slug="i-mini-m",
+        )]
+
+        result = conversation.collect_image_outputs(outputs)
+
+        self.assertEqual(result["_upstream_model_slug"], "i-mini-m")
+
     def test_collect_image_outputs_keeps_upscale_postprocess(self):
         outputs = [conversation.ImageOutput(
             kind="result", model="gpt-image-2", index=1, total=1, data=[{"url": "ok"}],

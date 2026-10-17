@@ -42,6 +42,7 @@ const typeLabels: Record<string, string> = {
 /** 详情弹窗里的字段名：翻译一下常用字段，其余保留原始键名。 */
 const detailLabels: Record<string, string> = {
   account_email: "账号",
+  upstream_model_slug: "上游实际模型",
   request_text: "请求内容",
   error: "错误信息",
   upscale_target: "超分目标(px)",

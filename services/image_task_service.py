@@ -448,6 +448,10 @@ class ImageTaskService:
         add_image_timeline_detail(detail, result=result, exc=exc)
         # 4K 超分的耗时/失败原因也平铺进这条记录。
         add_postprocess_detail(detail, result=result)
+        # 上游 SSE 汇报的实际调度模型，和配置里请求的模型分开记录。
+        upstream_model_slug = _clean((result or {}).get("_upstream_model_slug"))
+        if upstream_model_slug:
+            detail["upstream_model_slug"] = upstream_model_slug
         try:
             log_service.add(LOG_TYPE_CALL, f"{summary_prefix}{suffix}", detail)
         except Exception:

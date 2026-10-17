@@ -33,7 +33,7 @@ LOG_STATUS_POLICY_VIOLATION = "policy_violation"
 POLICY_VIOLATION_CODE = "content_policy_violation"
 INTERNAL_RESPONSE_KEYS = {
     "_account_email", "_conversation_id", "_account_trail", "_attempts_summary", "_postprocess",
-    "_image_timeline",
+    "_image_timeline", "_upstream_model_slug",
 }
 # 一键导出：默认最近 10 条，条数上界防止一次导出把浏览器拖死。
 LOG_EXPORT_DEFAULT_LIMIT = 10
@@ -763,6 +763,7 @@ class LoggedCall:
         attempts_summaries: list[str] = []
         image_timelines: list[dict[str, Any]] = []
         postprocess: list[dict[str, Any]] = []
+        upstream_model_slug = ""
         failed = False
         try:
             for item in items:
@@ -773,6 +774,10 @@ class LoggedCall:
                 attempts_summaries.extend(_collect_attempts_summaries(item))
                 image_timelines.extend(_collect_image_timelines(item))
                 postprocess.extend(_collect_postprocess(item))
+                if isinstance(item, dict):
+                    upstream_model_slug = upstream_model_slug or str(
+                        item.get("_upstream_model_slug") or ""
+                    ).strip()
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
             failed = True
@@ -786,6 +791,7 @@ class LoggedCall:
                 attempts_summaries=attempts_summaries,
                 image_timelines=image_timelines,
                 postprocess=postprocess,
+                upstream_model_slug=upstream_model_slug,
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
                 from services.protocol.conversation import ImageGenerationError, public_image_error_message
@@ -797,7 +803,8 @@ class LoggedCall:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
                          conversation_id=conversation_ids[0] if conversation_ids else "",
                          account_trails=account_trails, attempts_summaries=attempts_summaries,
-                         image_timelines=image_timelines, postprocess=postprocess)
+                         image_timelines=image_timelines, postprocess=postprocess,
+                         upstream_model_slug=upstream_model_slug)
 
     def log_failure(self, exc: BaseException, summary: str = "调用失败", error: str = "",
                     **kwargs: Any) -> None:
@@ -816,7 +823,8 @@ class LoggedCall:
             exc: BaseException | None = None, account_trails: list[list[str]] | None = None,
             attempts_summaries: list[str] | None = None,
             image_timelines: list[dict[str, Any]] | None = None,
-            postprocess: list[dict[str, Any]] | None = None) -> None:
+            postprocess: list[dict[str, Any]] | None = None,
+            upstream_model_slug: str = "") -> None:
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -876,4 +884,10 @@ class LoggedCall:
             detail, result=result, exc=exc, image_timelines=image_timelines,
         )
         add_postprocess_detail(detail, result=result, postprocess=postprocess)
+        # 上游 SSE 汇报的实际调度模型：和请求里写的 model 往往不是一回事。
+        effective_model = upstream_model_slug.strip()
+        if not effective_model and isinstance(result, dict):
+            effective_model = str(result.get("_upstream_model_slug") or "").strip()
+        if effective_model:
+            detail["upstream_model_slug"] = effective_model
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)

@@ -226,6 +226,24 @@ class ChatCompletionCacheTests(unittest.TestCase):
         self.assertEqual("".join(deltas), "Repo: chatgpt2api done.")
         self.assertFalse(any("\ue200" in delta or "\ue202" in delta or "\ue201" in delta for delta in deltas))
 
+    def test_server_ste_metadata_model_slug_is_carried_to_events(self) -> None:
+        events = [
+            {
+                "type": "server_ste_metadata",
+                "metadata": {"tool_invoked": True, "turn_use_case": "image gen", "model_slug": "i-mini-m"},
+            },
+            "[DONE]",
+        ]
+        payloads = [json.dumps(event, ensure_ascii=False) if isinstance(event, dict) else event for event in events]
+
+        done = [
+            event
+            for event in iter_conversation_payloads(iter(payloads))
+            if event.get("type") == "conversation.done"
+        ][0]
+
+        self.assertEqual(done["model_slug"], "i-mini-m")
+
     def test_responses_tools_add_honest_no_tool_guard(self) -> None:
         model, messages = openai_v1_response.text_response_parts({
             "model": "auto",

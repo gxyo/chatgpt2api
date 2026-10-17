@@ -455,6 +455,8 @@ class ConversationState:
     blocked: bool = False
     tool_invoked: bool | None = None
     turn_use_case: str = ""
+    # server_ste_metadata 里上游汇报的实际调度模型，可能和请求里写的 slug 不同。
+    model_slug: str = ""
 
 
 @dataclass
@@ -469,6 +471,8 @@ class ImageOutput:
     data: list[dict[str, Any]] = field(default_factory=list)
     account_email: str = ""
     conversation_id: str = ""
+    # 上游 SSE 汇报的实际调度模型（server_ste_metadata.model_slug）。只进调用日志。
+    upstream_model_slug: str = ""
     # 本次图片生成实际试过的账号（按顺序）。只有换号重试过才有值，
     # 调用日志据此把「第 1 个号 → 第 2 个号」写进同一条记录，而不是一次尝试一条。
     account_trail: list[str] = field(default_factory=list)
@@ -503,6 +507,8 @@ class ImageOutput:
             chunk["_account_email"] = self.account_email
         if self.conversation_id:
             chunk["_conversation_id"] = self.conversation_id
+        if self.upstream_model_slug:
+            chunk["_upstream_model_slug"] = self.upstream_model_slug
         if self.account_trail:
             chunk["_account_trail"] = list(self.account_trail)
         if self.attempts_summary:
@@ -765,6 +771,7 @@ def update_conversation_state(state: ConversationState, payload: str, event: dic
             if isinstance(metadata.get("tool_invoked"), bool):
                 state.tool_invoked = metadata["tool_invoked"]
             state.turn_use_case = str(metadata.get("turn_use_case") or state.turn_use_case)
+            state.model_slug = str(metadata.get("model_slug") or state.model_slug).strip()
 
 
 def conversation_base_event(event_type: str, state: ConversationState, **extra: Any) -> dict[str, Any]:
@@ -777,6 +784,7 @@ def conversation_base_event(event_type: str, state: ConversationState, **extra: 
         "blocked": state.blocked,
         "tool_invoked": state.tool_invoked,
         "turn_use_case": state.turn_use_case,
+        "model_slug": state.model_slug,
         **extra,
     }
 
@@ -1022,6 +1030,7 @@ def stream_image_outputs(
 
     _mark_phase(backend, "conversation_done")
     conversation_id = str(last.get("conversation_id") or "")
+    upstream_model_slug = str(last.get("model_slug") or "").strip()
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
@@ -1055,12 +1064,14 @@ def stream_image_outputs(
         detailed_error = _get_detailed_error_from_tasks(backend, conversation_id)
         error_text = detailed_error or message or "Image generation was rejected by upstream policy."
         yield ImageOutput(kind="message", model=request.model, index=index, total=total,
-                          text=sanitize_image_error_text(error_text), conversation_id=conversation_id)
+                          text=sanitize_image_error_text(error_text), conversation_id=conversation_id,
+                          upstream_model_slug=upstream_model_slug)
         return
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
     if message and not file_ids and not sediment_ids and not should_poll_for_image:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total,
-                          text=sanitize_image_error_text(message), conversation_id=conversation_id)
+                          text=sanitize_image_error_text(message), conversation_id=conversation_id,
+                          upstream_model_slug=upstream_model_slug)
         return
 
     # 检测模型是否返回了文本描述（含 referenced_image_ids）而非实际生成图片
@@ -1112,7 +1123,8 @@ def stream_image_outputs(
                 "error": detailed_error,
             })
             yield ImageOutput(kind="message", model=request.model, index=index, total=total,
-                              text=sanitize_image_error_text(detailed_error), conversation_id=conversation_id)
+                              text=sanitize_image_error_text(detailed_error), conversation_id=conversation_id,
+                              upstream_model_slug=upstream_model_slug)
             return
         if detailed_error and (should_poll_for_image or is_text_reply):
             logger.info({
@@ -1182,7 +1194,8 @@ def stream_image_outputs(
         data = formatted["data"]
         if data:
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data,
-                              conversation_id=conversation_id, postprocess=formatted.get("_postprocess") or {})
+                              conversation_id=conversation_id, upstream_model_slug=upstream_model_slug,
+                              postprocess=formatted.get("_postprocess") or {})
         return
 
     if message:
@@ -1282,6 +1295,7 @@ def stream_image_outputs(
                     if data:
                         yield ImageOutput(kind="result", model=request.model, index=index, total=total,
                                           data=data, conversation_id=conversation_id,
+                                          upstream_model_slug=upstream_model_slug,
                                           postprocess=formatted.get("_postprocess") or {})
                         return
         elif is_text_reply:
@@ -1307,7 +1321,8 @@ def stream_image_outputs(
         })
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message,
                           conversation_id=conversation_id, text_reply=plumbing_body is None,
-                          plumbing_error=plumbing_body is not None)
+                          plumbing_error=plumbing_body is not None,
+                          upstream_model_slug=upstream_model_slug)
         return
 
     # 兜底：当 message 为空且图片 URL 解析失败时，先尝试一次短延迟重试轮询
@@ -1417,6 +1432,7 @@ def stream_image_outputs(
                 if data:
                     yield ImageOutput(kind="result", model=request.model, index=index, total=total,
                                       data=data, conversation_id=conversation_id,
+                                      upstream_model_slug=upstream_model_slug,
                                       postprocess=formatted.get("_postprocess") or {})
                     return
 
@@ -1424,7 +1440,8 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total,
                           text="Image generation completed upstream but the result could not be retrieved. "
                                "The image may still be processing. Please try again in a moment.",
-                          conversation_id=conversation_id)
+                          conversation_id=conversation_id,
+                          upstream_model_slug=upstream_model_slug)
     elif message:
         plumbing_body = _plumbing_message_body(message)
         logger.warning({
@@ -1435,7 +1452,8 @@ def stream_image_outputs(
             "stream_tail": _image_stream_tail(backend, IMAGE_STREAM_TAIL_IN_BODY),
         })
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message,
-                          conversation_id=conversation_id, plumbing_error=plumbing_body is not None)
+                          conversation_id=conversation_id, plumbing_error=plumbing_body is not None,
+                          upstream_model_slug=upstream_model_slug)
     else:
         # conversation_id 也为空时（SSE 流极短、未捕获到会话 ID），
         # 仍然 yield 一条消息，避免 stream_image_outputs_with_pool 产生
@@ -1443,7 +1461,8 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total,
                           text="Image generation started upstream but the response was incomplete. "
                                "Please try again.",
-                          conversation_id=conversation_id)
+                          conversation_id=conversation_id,
+                          upstream_model_slug=upstream_model_slug)
 
 
 def _codex_response_images(value: Any) -> list[str]:
@@ -3040,6 +3059,7 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     attempts_summaries: list[str] = []
     image_timelines: list[dict[str, Any]] = []
     postprocess: dict[str, Any] = {}
+    upstream_model_slug = ""
     for output in outputs:
         created = created or output.created
         if output.image_timeline:
@@ -3052,6 +3072,8 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         image_timelines.extend(output.failed_image_timelines)
         if output.account_email and not account_email:
             account_email = output.account_email
+        if output.upstream_model_slug and not upstream_model_slug:
+            upstream_model_slug = output.upstream_model_slug
         # 每个 chunk 都带一份完整的换号轨迹（progress 也算），多图并行时还是
         # A→B、B→A 交替出现。只留第一次出现的账号，否则日志里会拼出
         # A→B→A→B… 几十个「账号」，看着像换了几十个号。
@@ -3084,4 +3106,6 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         result["_image_timeline"] = image_timelines
     if postprocess:
         result["_postprocess"] = postprocess
+    if upstream_model_slug:
+        result["_upstream_model_slug"] = upstream_model_slug
     return result
