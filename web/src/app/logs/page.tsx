@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Check, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
@@ -278,19 +278,18 @@ function isAccountRetry(item: SystemLog) {
   );
 }
 
-/** 重试列的小卡片：失败=红色（同一行的状态也是红的），否则是=琥珀色、否=绿色。 */
-function RetryCard({ retried, failed }: { retried: boolean; failed: boolean }) {
-  const tone = failed
-    ? "border-red-200 bg-red-50 text-red-700"
-    : retried
-      ? "border-amber-200 bg-amber-50 text-amber-700"
-      : "border-emerald-200 bg-emerald-50 text-emerald-700";
+/**
+ * 重试列只标异常：绝大多数请求没有换号，留空最安静；
+ * 真正重试过的行才显示琥珀色「已重试」，一眼就能扫出来。
+ */
+function RetryText({ retried }: { retried: boolean }) {
+  if (!retried) {
+    return null;
+  }
   return (
-    <span
-      className={`inline-flex w-14 items-center justify-center gap-1.5 rounded-lg border px-2 py-1 text-xs font-medium shadow-sm ${tone}`}
-    >
-      {retried ? <RotateCcw className="size-3.5" /> : <Check className="size-3.5" />}
-      {retried ? "是" : "否"}
+    <span className="inline-flex items-center gap-1 font-medium text-amber-600">
+      <RotateCcw className="size-3.5" />
+      已重试
     </span>
   );
 }
@@ -834,10 +833,7 @@ function LogsContent() {
                       ) : null}
                       {isCallLog ? (
                         <TableCell>
-                          <RetryCard
-                            retried={isAccountRetry(item)}
-                            failed={item.detail?.status === "failed"}
-                          />
+                          <RetryText retried={isAccountRetry(item)} />
                         </TableCell>
                       ) : null}
                       {isCallLog ? (
