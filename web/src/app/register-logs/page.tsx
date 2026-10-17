@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
 import { DateRangeFilter } from "@/components/date-range-filter";
+import { PageSizeSelect } from "@/components/page-size-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -64,7 +65,7 @@ function RegisterLogsContent() {
   const [exportLimit, setExportLimit] = useState("10");
   const [isExporting, setIsExporting] = useState(false);
   const [page, setPage] = useState(1);
-  const pageSize = 10;
+  const [pageSize, setPageSize] = useState(10);
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.min(page, pageCount);
   const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
@@ -277,14 +278,24 @@ function RegisterLogsContent() {
               </TableBody>
             </Table>
           </div>
-          <div className="flex items-center justify-end gap-2 border-t border-neutral-100 px-4 py-3 text-sm text-neutral-500">
-            <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
-              <ChevronLeft className="size-4" />
-            </Button>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
-              <ChevronRight className="size-4" />
-            </Button>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-neutral-100 px-4 py-3 text-sm text-neutral-500">
+            <PageSizeSelect
+              value={pageSize}
+              options={[10, 20, 30, 40, 50, 100]}
+              onChange={(size) => {
+                setPageSize(size);
+                setPage(1);
+              }}
+            />
+            <div className="flex items-center gap-2">
+              <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
+              <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+                <ChevronLeft className="size-4" />
+              </Button>
+              <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
+                <ChevronRight className="size-4" />
+              </Button>
+            </div>
           </div>
           {!isLoading && items.length === 0 ? (
             <div className="px-6 py-14 text-center text-sm text-neutral-500">

@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { ContentLoading } from "@/components/content-loading";
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
+import { PageSizeSelect } from "@/components/page-size-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -65,6 +66,7 @@ function ImageManagerContent() {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(8);
   const [isLoading, setIsLoading] = useState(true);
   const [deleteStartDate, setDeleteStartDate] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<ManagedImage | null>(null);
@@ -102,7 +104,6 @@ function ImageManagerContent() {
     sizeLabel: formatSize(item.size),
     dimensions: item.width && item.height ? `${item.width} x ${item.height}` : undefined,
   }));
-  const pageSize = 12;
   const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
   const safePage = Math.min(page, pageCount);
   const currentRows = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
@@ -598,14 +599,25 @@ function ImageManagerContent() {
               </div>
             )})}
           </div>
-          <div className="flex items-center justify-end gap-2 border-t border-neutral-100 px-4 py-3 text-sm text-neutral-500">
-            <span>第 {safePage} / {pageCount} 页，共 {filteredItems.length} 张</span>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
-              <ChevronLeft className="size-4" />
-            </Button>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
-              <ChevronRight className="size-4" />
-            </Button>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-neutral-100 px-4 py-3 text-sm text-neutral-500">
+            <PageSizeSelect
+              value={pageSize}
+              options={[8, 12, 16, 20]}
+              unit="张"
+              onChange={(size) => {
+                setPageSize(size);
+                setPage(1);
+              }}
+            />
+            <div className="flex items-center gap-2">
+              <span>第 {safePage} / {pageCount} 页，共 {filteredItems.length} 张</span>
+              <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+                <ChevronLeft className="size-4" />
+              </Button>
+              <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
+                <ChevronRight className="size-4" />
+              </Button>
+            </div>
           </div>
           {!isLoading && filteredItems.length === 0 ? <div className="px-6 py-14 text-center text-sm text-neutral-500">没有找到图片</div> : null}
         </CardContent>
