@@ -126,12 +126,36 @@ class LogService:
         count = self._normalize_export_limit(limit)
         items = self.list(type=type, status=status, start_date=start_date, end_date=end_date, limit=count)
         items.reverse()
+        condition = (
+            f"类型={type or '全部'}，状态={status or '全部'}，"
+            f"日期={f'{start_date} ~ {end_date}' if (start_date or end_date) else '不限'}"
+        )
+        return self._render_export(items, condition, f"最多 {count} 条，按时间由旧到新排列")
+
+    def build_export_by_ids(self, ids: list[str]) -> tuple[str, int]:
+        """只导出勾选的那几条日志，格式和「导出最近 N 条」完全一致。
+
+        勾选来自当前列表页的筛选结果，所以这里不再按类型/状态过滤，只认 id。
+        文件本身按时间追加，按行序收集就是由旧到新。
+        """
+        target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
+        if not target_ids or not self.path.exists():
+            return self._render_export([], "勾选的日志", "按时间由旧到新排列")
+        items: list[dict[str, Any]] = []
+        for line_number, raw_line in enumerate(self.path.read_text(encoding="utf-8").splitlines()):
+            item = self._parse_line(raw_line, line_number)
+            if item is None:
+                continue
+            if str(item.get("id") or "") in target_ids:
+                items.append(item)
+        return self._render_export(items, "勾选的日志", "按时间由旧到新排列")
+
+    def _render_export(self, items: list[dict[str, Any]], condition: str, note: str) -> tuple[str, int]:
         lines = [
             "ChatGPT2API 日志导出",
             f"导出时间：{beijing_now_text()}",
-            f"筛选条件：类型={type or '全部'}，状态={status or '全部'}，"
-            f"日期={f'{start_date} ~ {end_date}' if (start_date or end_date) else '不限'}",
-            f"条数：{len(items)} 条（最多 {count} 条，按时间由旧到新排列）",
+            f"筛选条件：{condition}",
+            f"条数：{len(items)} 条（{note}）",
         ]
         if not items:
             lines.append("没有符合条件的日志。")

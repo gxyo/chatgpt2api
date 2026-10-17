@@ -16,7 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { cleanupSystemLogs, deleteSystemLogs, exportSystemLogs, fetchLogRetention, fetchSystemLogs, saveLogRetention, type LogRetentionInfo, type SystemLog } from "@/lib/api";
+import { cleanupSystemLogs, deleteSystemLogs, exportSelectedSystemLogs, exportSystemLogs, fetchLogRetention, fetchSystemLogs, saveLogRetention, type LogRetentionInfo, type SystemLog } from "@/lib/api";
 import { formatBeijingClock, getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
@@ -363,6 +363,7 @@ function LogsContent() {
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [exportLimit, setExportLimit] = useState("10");
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingSelected, setIsExportingSelected] = useState(false);
   const detailUrls = getUrls(detailLog);
   const detailUpstreamError = getUpstreamError(detailLog);
   const detail = detailLog?.detail || {};
@@ -490,6 +491,26 @@ function LogsContent() {
       toast.error(error instanceof Error ? error.message : "导出日志失败");
     } finally {
       setIsExporting(false);
+    }
+  };
+
+  // 只导勾选的那几条，txt 格式和「导出日志」完全一致，方便精确发某次失败现场。
+  const exportSelectedLogs = async () => {
+    if (selectedIds.length === 0) return;
+    setIsExportingSelected(true);
+    try {
+      const count = await exportSelectedSystemLogs(selectedIds);
+      if (count === null) {
+        toast.success("已导出所选日志");
+      } else if (count > 0) {
+        toast.success(`已导出 ${count} 条所选日志`);
+      } else {
+        toast.success("已导出日志文件（所选日志已不存在）");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导出所选日志失败");
+    } finally {
+      setIsExportingSelected(false);
     }
   };
 
@@ -696,7 +717,17 @@ function LogsContent() {
               <button type="button" className="text-sm text-neutral-500 hover:text-neutral-900 disabled:text-neutral-300" onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0 || isDeleting}>
                 取消选择
               </button>
-              <Button variant="outline" className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50" onClick={() => setDeletingItems(items.filter((item) => selectedSet.has(item.id)))} disabled={selectedIds.length === 0 || isDeleting}>
+              <Button
+                variant="outline"
+                className="h-8 rounded-lg border-neutral-200 bg-white px-3 text-neutral-700 hover:bg-neutral-50"
+                onClick={() => void exportSelectedLogs()}
+                disabled={selectedIds.length === 0 || isExportingSelected}
+                title="只导出勾选的日志（txt，报文完整），格式和「导出日志」一致"
+              >
+                {isExportingSelected ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+                导出所选
+              </Button>
+              <Button variant="outline" className="h-8 rounded-lg border-rose-200 bg-white text-rose-600 hover:bg-rose-50 px-3" onClick={() => setDeletingItems(items.filter((item) => selectedSet.has(item.id)))} disabled={selectedIds.length === 0 || isDeleting}>
                 <Trash2 className="size-4" />
                 删除所选
               </Button>

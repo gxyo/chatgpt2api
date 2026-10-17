@@ -377,6 +377,34 @@ class LogExportApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["x-exported-count"], "3")
 
+    def test_export_selected_logs_requires_an_admin_key(self):
+        response = self.client.post("/api/logs/export", json={"ids": ["call-2026-09-01-success"]})
+        self.assertEqual(response.status_code, 401)
+
+    def test_export_selected_logs_only_contains_the_selected_ids(self):
+        ids = ["call-2026-09-09-success", "call-2026-09-12-success"]
+        with mock.patch.object(system_module, "require_admin", lambda authorization=None: {"role": "admin"}):
+            response = self.client.post("/api/logs/export", json={"ids": ids})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.headers["content-type"].startswith("text/plain"))
+        self.assertIn("attachment", response.headers["content-disposition"])
+        self.assertEqual(response.headers["x-exported-count"], "2")
+        self.assertIn("2026-09-09", response.text)
+        self.assertIn("2026-09-12", response.text)
+        # 没有勾选的日志不能混进来。
+        self.assertNotIn("2026-09-11", response.text)
+        # 和 GET 版一样按时间由旧到新排列。
+        self.assertLess(response.text.index("2026-09-09"), response.text.index("2026-09-12"))
+
+    def test_export_selected_logs_with_unknown_ids_is_an_empty_file(self):
+        with mock.patch.object(system_module, "require_admin", lambda authorization=None: {"role": "admin"}):
+            response = self.client.post("/api/logs/export", json={"ids": ["no-such-id"]})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["x-exported-count"], "0")
+        self.assertIn("没有符合条件的日志", response.text)
+
 
 class DescribeExceptionTests(unittest.TestCase):
     """失败日志要留下上游原始报错，而不是只有一句转译后的文案。"""

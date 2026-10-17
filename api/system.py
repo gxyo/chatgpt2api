@@ -48,8 +48,23 @@ class ImageTagsRequest(BaseModel):
 
 class LogDeleteRequest(BaseModel):
     ids: list[str] = []
+class LogExportRequest(BaseModel):
+    ids: list[str] = []
 class LogCleanupRequest(BaseModel):
     days: int | None = None
+
+
+def _log_export_response(text: str, count: int) -> Response:
+    stamp = beijing_now_text().replace(" ", "-").replace(":", "")
+    return Response(
+        content=text,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="logs-{stamp}.txt"',
+            # 前端用来提示导出了几条；拿不到也不影响下载。
+            "X-Exported-Count": str(count),
+        },
+    )
 
 
 def create_router(app_version: str) -> APIRouter:
@@ -136,16 +151,14 @@ def create_router(app_version: str) -> APIRouter:
         text, count = await run_in_threadpool(
             log_service.build_export, type.strip(), status.strip(), start_date.strip(), end_date.strip(), limit,
         )
-        stamp = beijing_now_text().replace(" ", "-").replace(":", "")
-        return Response(
-            content=text,
-            media_type="text/plain; charset=utf-8",
-            headers={
-                "Content-Disposition": f'attachment; filename="logs-{stamp}.txt"',
-                # 前端用来提示导出了几条；拿不到也不影响下载。
-                "X-Exported-Count": str(count),
-            },
-        )
+        return _log_export_response(text, count)
+
+    @router.post("/api/logs/export")
+    async def export_selected_logs(body: LogExportRequest, authorization: str | None = Header(default=None)):
+        """只导出勾选的那几条日志，txt 格式和 GET 版导出完全一致。"""
+        require_admin(authorization)
+        text, count = await run_in_threadpool(log_service.build_export_by_ids, body.ids)
+        return _log_export_response(text, count)
 
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):

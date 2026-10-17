@@ -536,6 +536,20 @@ function filenameFromDisposition(disposition: string | undefined, fallback: stri
   return match ? match[1].trim() : fallback;
 }
 
+/** 把导出的 txt 触发下载，返回文件里的条数；拿不到条数时返回 null。 */
+function saveLogExport(blob: Blob, disposition: string | undefined, rawCount: unknown) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filenameFromDisposition(disposition, "logs.txt");
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  const exported = Number(rawCount ?? "");
+  return rawCount === undefined || rawCount === "" || !Number.isFinite(exported) ? null : exported;
+}
+
 /** 导出最近 N 条日志为 txt（报文完整），返回实际导出的条数；拿不到条数时返回 null。 */
 export async function exportSystemLogs(filters: {
   type?: string;
@@ -553,21 +567,21 @@ export async function exportSystemLogs(filters: {
   const response = await request.get(`/api/logs/export${params.toString() ? `?${params.toString()}` : ""}`, {
     responseType: "blob",
   });
-  const blob = response.data as Blob;
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filenameFromDisposition(
+  return saveLogExport(
+    response.data as Blob,
     response.headers?.["content-disposition"] as string | undefined,
-    "logs.txt",
+    response.headers?.["x-exported-count"],
   );
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  const rawCount = response.headers?.["x-exported-count"];
-  const exported = Number(rawCount ?? "");
-  return rawCount === undefined || rawCount === "" || !Number.isFinite(exported) ? null : exported;
+}
+
+/** 只导出勾选的日志，格式和 exportSystemLogs 一致；返回实际导出的条数。 */
+export async function exportSelectedSystemLogs(ids: string[]) {
+  const response = await request.post("/api/logs/export", { ids }, { responseType: "blob" });
+  return saveLogExport(
+    response.data as Blob,
+    response.headers?.["content-disposition"] as string | undefined,
+    response.headers?.["x-exported-count"],
+  );
 }
 
 export type ImageStatsPoint = {
