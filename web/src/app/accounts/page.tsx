@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import {
   Ban,
+  Braces,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -189,6 +190,11 @@ function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [availableModels, setAvailableModels] = useState<Model[]>([]);
+  // 「获取模型列表」弹窗：展示 GET /v1/models 的原样响应，方便排查上游到底给了什么。
+  const [isModelsDialogOpen, setIsModelsDialogOpen] = useState(false);
+  const [isFetchingModelList, setIsFetchingModelList] = useState(false);
+  const [modelsRaw, setModelsRaw] = useState<string | null>(null);
+  const [modelsError, setModelsError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -252,6 +258,50 @@ function AccountsPageContent() {
       setIsLoadingModels(false);
     }
   };
+
+  const loadModelListSnapshot = async () => {
+    setIsFetchingModelList(true);
+    setModelsError(null);
+    try {
+      const data = await fetchModels();
+      // 不裁剪字段：弹窗要展示接口原样返回的内容。
+      setModelsRaw(JSON.stringify(data, null, 2));
+    } catch (error) {
+      setModelsRaw(null);
+      setModelsError(error instanceof Error ? error.message : "获取模型列表失败");
+    } finally {
+      setIsFetchingModelList(false);
+    }
+  };
+
+  const openModelListDialog = () => {
+    setIsModelsDialogOpen(true);
+    void loadModelListSnapshot();
+  };
+
+  const copyModelsRaw = async () => {
+    if (!modelsRaw) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(modelsRaw);
+      toast.success("模型列表 JSON 已复制");
+    } catch {
+      toast.error("复制失败");
+    }
+  };
+
+  const rawModelCount = useMemo(() => {
+    if (!modelsRaw) {
+      return 0;
+    }
+    try {
+      const parsed = JSON.parse(modelsRaw) as { data?: unknown };
+      return Array.isArray(parsed.data) ? parsed.data.length : 0;
+    } catch {
+      return 0;
+    }
+  }, [modelsRaw]);
 
   useEffect(() => {
     if (didLoadRef.current) {
@@ -828,6 +878,49 @@ function AccountsPageContent() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={isModelsDialogOpen} onOpenChange={setIsModelsDialogOpen}>
+        <DialogContent className="w-[min(92vw,720px)] rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>获取模型列表</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              直接请求{" "}
+              <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">GET /v1/models</code>
+              ，下面是接口原样返回的内容。
+            </DialogDescription>
+          </DialogHeader>
+          {isFetchingModelList ? (
+            <div className="flex items-center justify-center gap-2 py-12 text-sm text-neutral-500">
+              <LoaderCircle className="size-4 animate-spin" />
+              正在向接口请求模型列表…
+            </div>
+          ) : modelsError ? (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">
+              {modelsError}
+            </div>
+          ) : modelsRaw ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2 text-xs text-neutral-500">
+                <span>共 {rawModelCount} 个模型</span>
+                <Button variant="outline" size="sm" onClick={() => void copyModelsRaw()}>
+                  <Copy className="size-3.5" />
+                  复制 JSON
+                </Button>
+              </div>
+              <pre className="max-h-[55vh] overflow-auto rounded-xl border border-border bg-muted/40 p-4 font-mono text-[11px] leading-5 whitespace-pre-wrap break-all">
+                {modelsRaw}
+              </pre>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => void loadModelListSnapshot()} disabled={isFetchingModelList}>
+              <RefreshCw className={cn("size-4", isFetchingModelList ? "animate-spin" : "")} />
+              重新获取
+            </Button>
+            <Button onClick={() => setIsModelsDialogOpen(false)}>关闭</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <section className="space-y-3">
         {/* 六项指标共享一张卡，用发丝线切成六格——参考稿的概览区就是这么组织的。 */}
         <Card className="overflow-hidden">
@@ -857,11 +950,17 @@ function AccountsPageContent() {
         </Card>
         <Card>
           <CardContent className="p-5">
-            <div className="mb-3 flex items-center gap-2">
-              <span className="text-[15px] font-semibold tracking-tight">系统可用模型</span>
-              <span className="rounded-full bg-brand-soft px-2 py-0.5 text-[11px] font-semibold text-brand tabular-nums">
-                {availableModels.length}
-              </span>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[15px] font-semibold tracking-tight">系统可用模型</span>
+                <span className="rounded-full bg-brand-soft px-2 py-0.5 text-[11px] font-semibold text-brand tabular-nums">
+                  {availableModels.length}
+                </span>
+              </div>
+              <Button variant="outline" size="sm" onClick={openModelListDialog}>
+                <Braces className="size-3.5" />
+                获取模型列表
+              </Button>
             </div>
             <div className="flex flex-wrap gap-2">
               {availableModels.length > 0 ? (
