@@ -786,6 +786,8 @@ export type LogCleanupResult = {
   cutoff_day: string;
   /** 本次是否保留了当天已写入的日志。 */
   keep_today: boolean;
+  /** 限定清理的日志类型；空串表示全部类型。 */
+  log_type?: string;
   removed: number;
   kept: number;
   size_bytes: number;
@@ -808,12 +810,13 @@ export async function saveLogRetention(settings: {
   });
 }
 
-export async function cleanupSystemLogs(days?: number, keepToday?: boolean) {
+export async function cleanupSystemLogs(days?: number, keepToday?: boolean, type?: string) {
   return httpRequest<LogCleanupResult>("/api/logs/cleanup", {
     method: "POST",
     body: {
       ...(days === undefined ? {} : { days }),
       ...(keepToday === undefined ? {} : { keep_today: keepToday }),
+      ...(type ? { type } : {}),
     },
   });
 }

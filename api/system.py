@@ -54,6 +54,8 @@ class LogCleanupRequest(BaseModel):
     days: int | None = None
     # None 表示沿用配置里的「保留当天日志」开关。
     keep_today: bool | None = None
+    # 留空清理全部类型；register 只在注册日志页使用。
+    type: str | None = None
 
 
 def _log_export_response(text: str, count: int) -> Response:
@@ -182,7 +184,10 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         if body.days is not None and body.days < 1:
             raise HTTPException(status_code=400, detail={"error": "保留天数至少为 1"})
-        return await run_in_threadpool(cleanup_logs, body.days, body.keep_today)
+        log_type = str(body.type or "").strip()
+        if log_type not in {"", "call", "account", "register"}:
+            raise HTTPException(status_code=400, detail={"error": "不支持的日志类型"})
+        return await run_in_threadpool(cleanup_logs, body.days, body.keep_today, None, log_type)
 
     @router.get("/api/stats/images")
     async def get_image_stats(

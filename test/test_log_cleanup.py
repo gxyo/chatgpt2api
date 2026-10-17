@@ -81,6 +81,24 @@ class LogServiceCleanupTests(unittest.TestCase):
             self.assertEqual(self.remaining_days(service), ["2026-10-18"])
             self.assertIn("06:00:00", service.path.read_text(encoding="utf-8"))
 
+    def test_cleanup_can_be_scoped_to_one_log_type(self):
+        """注册日志页清理只动 register，调用日志原样保留。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-27 10:00:00", "call"),
+                log_line("2026-09-27 11:00:00", "register"),
+                log_line("2026-09-29 10:00:00", "register"),
+            ])
+
+            result = service.cleanup_before("2026-09-29", log_type="register")
+
+            self.assertEqual(result, {"removed": 1, "kept": 2})
+            remaining = [json.loads(raw) for raw in service.path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(
+                [(item["time"][:10], item["type"]) for item in remaining],
+                [("2026-09-27", "call"), ("2026-09-29", "register")],
+            )
+
     def test_cleanup_keeps_unparseable_lines(self):
         """读不懂的行一律留着，宁可少删也不丢内容。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -245,6 +263,23 @@ class CleanupReportTests(unittest.TestCase):
         self.assertIn("2026-10-17 10:00:00", remaining)
         self.assertIn("2026-10-18 06:00:00", remaining)
         self.assertNotIn("2026-10-18 03:00:00", remaining)
+
+    def test_cleanup_reports_the_scoped_log_type(self):
+        self.log_path.write_text(
+            "\n".join([
+                log_line("2020-01-01 10:00:00", "call"),
+                log_line("2020-01-01 11:00:00", "register"),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        result = cleanup_logs(7, log_type="register")
+
+        self.assertEqual(result["log_type"], "register")
+        self.assertEqual(result["removed"], 1)
+        remaining = self.log_path.read_text(encoding="utf-8")
+        self.assertIn('"type":"call"', remaining)
+        self.assertNotIn('"type":"register"', remaining)
 
     def test_cleanup_keeps_today_by_default(self):
         self.log_path.write_text(

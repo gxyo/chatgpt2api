@@ -12,10 +12,12 @@ import { PageSizeSelect } from "@/components/page-size-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { deleteSystemLogs, exportSystemLogs, fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { cleanupSystemLogs, deleteSystemLogs, exportSystemLogs, fetchLogRetention, fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 /** 注册机失败日志的类型标识，与后端 services/log_service.py 的 LOG_TYPE_REGISTER 一致。 */
@@ -44,6 +46,11 @@ function stringList(value: unknown): string[] {
 function formatDuration(item: SystemLog) {
   const value = item.detail?.duration_ms;
   return typeof value === "number" ? `${(value / 1000).toFixed(1)} s` : "-";
+}
+
+/** 保留最近 days 天时，会被删掉的是这一天之前（不含）的日志。 */
+function cleanupCutoffDay(days: number) {
+  return shiftDate(getBeijingToday(), -(Math.max(1, days) - 1));
 }
 
 /** 上游报错链：第一条是抛给用户的异常，越往后越接近上游原始响应。 */
@@ -82,6 +89,47 @@ function RegisterLogsContent() {
       toast.error(error instanceof Error ? error.message : "加载注册日志失败");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // 注册日志清理：默认沿用日志管理页的保留天数与「保留当天」设置。
+  const [retentionDays, setRetentionDays] = useState("30");
+  const [keepToday, setKeepToday] = useState(true);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const parsedRetentionDays = Number.parseInt(retentionDays, 10);
+  const retentionValid = Number.isFinite(parsedRetentionDays) && parsedRetentionDays >= 1;
+
+  useEffect(() => {
+    fetchLogRetention()
+      .then((data) => {
+        setRetentionDays(String(data.days));
+        setKeepToday(data.keep_today !== false);
+      })
+      .catch(() => {
+        // 读取失败时保留默认值，手动清理仍可用。
+      });
+  }, []);
+
+  const confirmCleanup = async () => {
+    if (!retentionValid) {
+      toast.error("保留天数至少为 1");
+      return;
+    }
+    setIsCleaning(true);
+    try {
+      const data = await cleanupSystemLogs(parsedRetentionDays, keepToday, REGISTER_LOG_TYPE);
+      toast.success(
+        data.removed > 0
+          ? `已清理 ${data.removed} 条注册日志，保留 ${data.kept} 条`
+          : "没有需要清理的注册日志",
+      );
+      setCleanupOpen(false);
+      await loadLogs();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清理注册日志失败");
+    } finally {
+      setIsCleaning(false);
     }
   };
 
@@ -211,6 +259,48 @@ function RegisterLogsContent() {
           </Button>
         </div>
       </FilterCard>
+
+      <Card>
+        <CardContent className="flex flex-col gap-4 p-5 xl:flex-row xl:items-center xl:justify-between">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-[15px] font-semibold tracking-tight">
+              <Trash2 className="size-4 text-neutral-400" />
+              注册日志清理
+            </div>
+            <p className="text-xs leading-5 text-muted-foreground">
+              只清理注册失败日志，不影响调用日志和统计。这里的天数仅用于本次清理；每天自动清理沿用日志管理页的设置，也会一并处理注册日志。
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-neutral-600">
+              保留最近
+              <Input
+                value={retentionDays}
+                onChange={(event) => setRetentionDays(event.target.value)}
+                inputMode="numeric"
+                className="h-10 w-20 rounded-xl border-neutral-200 bg-white text-center"
+              />
+              天
+            </label>
+            <label
+              className="flex items-center gap-2 text-sm text-neutral-600"
+              title="勾选后清理不会删除当天已产生的日志；取消勾选后，清理还会删掉当天当前时刻之前写入的日志。"
+            >
+              <Checkbox checked={keepToday} onCheckedChange={(checked) => setKeepToday(Boolean(checked))} />
+              保留当天日志
+            </label>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50"
+              onClick={() => setCleanupOpen(true)}
+              disabled={isCleaning || !retentionValid}
+            >
+              <Trash2 className="size-4" />
+              立即清理
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card className="overflow-hidden">
         <CardContent className="p-0">
@@ -371,6 +461,28 @@ function RegisterLogsContent() {
               </pre>
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={cleanupOpen} onOpenChange={setCleanupOpen}>
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>清理注册日志</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              将删除 {retentionValid ? cleanupCutoffDay(parsedRetentionDays) : "—"} 之前的注册日志，保留最近 {retentionValid ? parsedRetentionDays : "—"} 天
+              {keepToday ? "，今天已产生的日志会保留。" : "，并删除今天 00:00 至当前时刻的日志。"}
+              调用日志与统计不受影响，删除后无法恢复。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-xl" onClick={() => setCleanupOpen(false)} disabled={isCleaning}>
+              取消
+            </Button>
+            <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmCleanup()} disabled={isCleaning || !retentionValid}>
+              {isCleaning ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+              确认清理
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

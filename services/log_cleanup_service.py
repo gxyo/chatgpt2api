@@ -62,11 +62,13 @@ def cleanup_logs(
     days: int | None = None,
     keep_today: bool | None = None,
     now: datetime | None = None,
+    log_type: str = "",
 ) -> dict[str, object]:
     """按保留期清理日志，返回删了多少条、还剩多少条。
 
     keep_today 为 False 时，还会删除当天清理时刻之前已写入的日志（例如每天 05:00
     清理会把当天 00:00-05:00 的日志一并删掉）；为 None 时读取配置，默认保留当天。
+    log_type 非空时只清理该类型（注册日志页传 register），其余类型原样保留。
 
     只删日志，不动统计：统计服务已经把这些请求聚合到自己的快照里了，
     日志被截断后它只会把增量游标往前挪，不会重新计数。
@@ -79,6 +81,7 @@ def cleanup_logs(
     result = log_service.cleanup_before(
         cutoff_day,
         include_today_before="" if keep_today else current.strftime("%Y-%m-%d %H:%M:%S"),
+        log_type=log_type,
     )
     try:
         size_bytes = log_service.path.stat().st_size
@@ -88,6 +91,7 @@ def cleanup_logs(
         "event": "log_cleanup_done",
         "cutoff_day": cutoff_day,
         "keep_today": keep_today,
+        "log_type": log_type,
         "removed": result["removed"],
         "kept": result["kept"],
     })
@@ -95,6 +99,7 @@ def cleanup_logs(
         "days": retention,
         "cutoff_day": cutoff_day,
         "keep_today": keep_today,
+        "log_type": log_type,
         "removed": result["removed"],
         "kept": result["kept"],
         "size_bytes": size_bytes,
