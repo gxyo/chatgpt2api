@@ -19,6 +19,7 @@ from services.openai_backend_api import (
     ImageMainlineStateError,
     ImagePollTimeoutError,
     OpenAIBackendAPI,
+    is_content_policy_error,
     is_skipped_mainline_error,
     poll_timeout_diagnostics,
 )
@@ -461,6 +462,9 @@ class ImageOutput:
     # 调用日志据此把「第 1 个号 → 第 2 个号」写进同一条记录，而不是一次尝试一条。
     account_trail: list[str] = field(default_factory=list)
     attempts_summary: str = ""
+    # 这条 message 是不是「上游回了正文、没有出图」。只有这种才按文本回复处理
+    # （可用于换号重试）；blocked/任务错误等真正的报错文案走内容策略分支。
+    text_reply: bool = False
     # 本地后处理（4K 超分）的耗时与失败原因，只进调用日志，不返回给客户端。
     postprocess: dict[str, Any] = field(default_factory=dict)
 
@@ -1240,7 +1244,20 @@ def stream_image_outputs(
                 "conversation_id": conversation_id,
                 "message_preview": message[:200],
             })
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
+        # 走到这里 = 上游回了正文，但轮询（含直接解析）始终没拿到图片。
+        # 正文本身通常就是模型「已完成」的解说词，不能当错误文案直接用，
+        # 所以标记成 text_reply，交给上层按「文本回复而非图片」分类/重试。
+        logger.warning({
+            "event": "image_text_reply_no_image",
+            "conversation_id": conversation_id,
+            "stream_file_ids": len(file_ids),
+            "stream_sediment_ids": len(sediment_ids),
+            "is_text_reply_pattern": is_text_reply,
+            "message_chars": len(message),
+            "message_preview": message[:300],
+        })
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message,
+                          conversation_id=conversation_id, text_reply=True)
         return
 
     # 兜底：当 message 为空且图片 URL 解析失败时，先尝试一次短延迟重试轮询
@@ -1488,6 +1505,20 @@ def _image_phases(backend: Any) -> dict[str, Any]:
     return phases if isinstance(phases, dict) else {}
 
 
+def _image_resolve_diagnostics(backend: Any) -> dict[str, Any]:
+    """取图阶段的现场：SSE 给了哪些 id、直接解析是否落空、回退轮询等了多久。
+
+    失败时这一份会随 image_diagnostics 一起进调用日志，导出就能看到
+    「图到底是没生成，还是生成了但没取回来」。
+    """
+    if backend is None:
+        return {}
+    data = getattr(backend, "image_resolve_diagnostics", None)
+    if not isinstance(data, dict) or not data:
+        return {}
+    return dict(data)
+
+
 def _start_image_attempt(diagnostics: dict[str, Any], token: str, account_email: str) -> dict[str, Any]:
     """开一条尝试记录：这次用的是哪个号、同账号在途多少条。
 
@@ -1667,6 +1698,14 @@ def _generate_single_image_attempts(
         inflight = account_service.image_inflight_count(token) if token else 0
         handshake = account_service.image_handshake_diagnostics(token) if token else {}
         pool = _pool_diagnostics(attempted_tokens, select_kwargs)
+        # 取图现场属于「这一次 backend 实例」。换号重试时新 backend 还没走到取图，
+        # 要清掉上一轮的 resolve_* 字段，否则导出的会对不上号。
+        resolve_diag = _image_resolve_diagnostics(backend)
+        if resolve_diag:
+            resolve_diag["resolve_attempt_n"] = (attempt or {}).get("n")
+        else:
+            for key in [key for key in diagnostics if key.startswith("resolve_")]:
+                diagnostics.pop(key, None)
         diagnostics.update({
             "trace_id": trace_id,
             "index": index,
@@ -1684,6 +1723,7 @@ def _generate_single_image_attempts(
             "attempts_summary": _attempts_summary(diagnostics.get("attempts") or []),
             **conduit,
             **_image_phases(backend),
+            **resolve_diag,
             **handshake,
             **pool,
         })
@@ -1838,16 +1878,53 @@ def _generate_single_image_attempts(
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:
-                    # message 输出既可能是内容违规，也可能是上游普通失败（已 sanitize 成
-                    # 「本次生图失败，请重试。」）。后者按设置换号重试，前者直接返回。
-                    failure = ImageGenerationError(
-                        output.text or "Image generation was rejected by upstream policy.",
-                        status_code=400,
-                        error_type="invalid_request_error",
-                        code="content_policy_violation",
-                        account_email=account_email,
-                        conversation_id=output.conversation_id,
-                    )
+                    # message 输出有三种来源：
+                    #   1) text_reply：上游回了正文、没出图。正文往往就是“已完成”的解说词，
+                    #      不能直接当 error 返回，按文本回复分类并允许换号重试；
+                    #   2) 内容策略拒绝（blocked / 对话里检测到 policy 文案）；
+                    #   3) 其它上游报错（已 sanitize 成「本次生图失败，请重试。」）。
+                    text = output.text or ""
+                    text_reply = bool(output.text_reply) and not is_content_policy_error(text)
+                    policy_violation = not text_reply and is_content_policy_error(text)
+                    if text_reply:
+                        failure = ImageGenerationError(
+                            "Image generation failed: the upstream model returned text instead of "
+                            "an image. Please try again later.",
+                            status_code=502,
+                            error_type="server_error",
+                            code="upstream_text_reply",
+                            account_email=account_email,
+                            conversation_id=output.conversation_id,
+                        )
+                        # 模型原文只进日志（upstream_error[].body），不当作面向用户的错误文案。
+                        failure.body = {"upstream_text": text[:1000]}
+                        logger.warning({
+                            "event": "image_upstream_text_reply",
+                            "trace_id": trace_id,
+                            "conversation_id": output.conversation_id,
+                            "account_email": account_email,
+                            "text_chars": len(text),
+                            "text_preview": text[:300],
+                            "index": index,
+                        })
+                    else:
+                        failure = ImageGenerationError(
+                            text or "Image generation was rejected by upstream policy.",
+                            status_code=400,
+                            error_type="invalid_request_error",
+                            code="content_policy_violation",
+                            account_email=account_email,
+                            conversation_id=output.conversation_id,
+                        )
+                        logger.warning({
+                            "event": "image_upstream_message_error",
+                            "trace_id": trace_id,
+                            "conversation_id": output.conversation_id,
+                            "policy_violation": policy_violation,
+                            "text_chars": len(text),
+                            "text_preview": text[:300],
+                            "index": index,
+                        })
                     if schedule_generation_retry(failure):
                         account_service.mark_image_result(token, False)
                         attempt_outcome, attempt_error = "message_retry", str(failure)
@@ -1993,9 +2070,26 @@ def _generate_single_image_attempts(
                     "error": error_text[:200],
                 })
                 continue
-            # 如果是模型返回文本而非图片，尝试换账号重试
-            if is_model_text_reply_instead_of_image(error_text) and not emitted_for_token:
+            # 如果是模型返回文本而非图片，尝试换账号重试。
+            # 文本回复有两种识别方式：正文里带工具参数 JSON（旧逻辑），或上游
+            # 明确回了正文但轮询拿不到图（text_reply 标记，code=upstream_text_reply）。
+            is_text_reply_failure = (
+                getattr(exc, "code", "") == "upstream_text_reply"
+                or is_model_text_reply_instead_of_image(error_text)
+            )
+            if is_text_reply_failure and not emitted_for_token:
+                upstream_text = ""
+                exc_body = getattr(exc, "body", None)
+                if isinstance(exc_body, dict):
+                    upstream_text = str(exc_body.get("upstream_text") or "")
                 text_reply_retry_count += 1
+                diagnostics["text_reply"] = {
+                    "chars": len(upstream_text or error_text),
+                    "preview": (upstream_text or error_text)[:300],
+                    "retry_count": text_reply_retry_count,
+                    "code": getattr(exc, "code", ""),
+                    "conversation_id": getattr(exc, "conversation_id", ""),
+                }
                 if text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES:
                     logger.warning({
                         "event": "image_model_text_reply_retry",
@@ -2003,8 +2097,10 @@ def _generate_single_image_attempts(
                         "request_token": anonymize_token(token),
                         "account_email": account_email,
                         "retry_count": text_reply_retry_count,
+                        "error_code": getattr(exc, "code", ""),
+                        "error_chars": len(upstream_text or error_text),
+                        "error_preview": (upstream_text or error_text)[:300],
                         "index": index,
-                        "error": error_text[:200],
                     })
                     continue
                 logger.warning({
@@ -2013,9 +2109,10 @@ def _generate_single_image_attempts(
                     "request_token": anonymize_token(token),
                     "account_email": account_email,
                     "retry_count": text_reply_retry_count,
+                    "error_preview": (upstream_text or error_text)[:300],
                     "index": index,
                 })
-                raise ImageGenerationError(
+                exhausted = ImageGenerationError(
                     "Image generation failed: the upstream model returned a text description "
                     "instead of generating an image. Please try again later.",
                     status_code=502,
@@ -2023,7 +2120,10 @@ def _generate_single_image_attempts(
                     code="upstream_text_reply",
                     account_email=account_email,
                     conversation_id=getattr(exc, "conversation_id", ""),
-                ) from exc
+                )
+                if upstream_text:
+                    exhausted.body = {"upstream_text": upstream_text[:1000]}
+                raise exhausted from exc
             logger.warning({
                 "event": "image_stream_generation_error",
                 "trace_id": trace_id,

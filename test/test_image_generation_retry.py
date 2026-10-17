@@ -219,6 +219,32 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(failure.code, "content_policy_violation")
         self.assertEqual(accounts.selected_image_tokens, ["token-a"])
 
+    def test_text_reply_is_not_reported_as_content_policy_violation(self):
+        prose = "已将圣诞镂空桌布融入美式客厅。你希望洞里的宠物保持这只博美犬吗？"
+
+        def stream_fn(backend, request, index=1, total=1):
+            yield ImageOutput(
+                kind="message",
+                model=request.model,
+                index=index,
+                total=total,
+                text=prose,
+                text_reply=True,
+                conversation_id="conv-text",
+            )
+
+        # 文本回复会换号重试（最多 3 次），所以号池里要留够 4 个号，
+        # 否则会先撞到「no available image quota」而不是文本回复的最终错误。
+        failure, _ = self._run_expecting_error(
+            ["token-a", "token-b", "token-c", "token-d"], stream_fn, 0,
+        )
+
+        # 模型正文不是错误文案：对外给明确分类，原文只留在日志里（upstream_error.body）
+        self.assertEqual(failure.code, "upstream_text_reply")
+        self.assertEqual(failure.status_code, 502)
+        self.assertNotIn(prose, str(failure))
+        self.assertEqual((failure.body or {}).get("upstream_text"), prose)
+
     def test_retry_switches_account_on_skipped_mainline(self):
         def stream_fn(backend, request, index=1, total=1):
             if backend.access_token == "token-a":

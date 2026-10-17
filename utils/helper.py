@@ -301,6 +301,11 @@ def describe_exception(exc: BaseException, limit: int = _EXCEPTION_TEXT_LIMIT) -
         status_code = getattr(current, "status_code", None)
         if isinstance(status_code, int):
             frame["status_code"] = status_code
+        # 分类码（content_policy_violation / upstream_text_reply / upstream_timeout …）
+        # 比面向用户的 message 更能说明失败类型，日志详情里要能看到。
+        code = getattr(current, "code", None)
+        if isinstance(code, str) and code:
+            frame["code"] = code
         retry_after = getattr(current, "retry_after", None)
         if isinstance(retry_after, int):
             frame["retry_after"] = retry_after

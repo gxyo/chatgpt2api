@@ -157,6 +157,41 @@ class MultiImageResultTests(unittest.TestCase):
 
         self.assertEqual(urls, ["https://files.test/one.png"])
 
+    def test_direct_resolve_empty_falls_back_to_poll(self) -> None:
+        """SSE 给的 id 暂时换不到 URL 时，要回退轮询等文件落盘，而不是直接丢图。"""
+
+        class LateFileBackend(FakeBackend):
+            polled = False
+
+            def _get_conversation(self, conversation_id: str) -> dict:
+                data = super()._get_conversation(conversation_id)
+                self.polled = True
+                return data
+
+            def _get_file_download_url(self, file_id: str) -> str:
+                return self.file_urls.get(file_id, "") if self.polled else ""
+
+        backend = LateFileBackend([
+            _conversation([]),
+            _conversation(["file-late"]),
+            _conversation(["file-late"]),
+        ])
+        backend.file_urls = {"file-late": "https://files.test/late.png"}
+
+        with (
+            mock.patch.dict(config.data, {
+                "image_poll_initial_wait_secs": 0,
+                "image_poll_interval_secs": 0.01,
+                "image_poll_timeout_secs": 10,
+            }),
+            mock.patch("services.openai_backend_api.time.sleep", lambda _seconds: None),
+        ):
+            urls = backend.resolve_conversation_image_urls("conv-1", ["file-late"], [], poll=True)
+
+        self.assertEqual(urls, ["https://files.test/late.png"])
+        self.assertEqual(backend.image_resolve_diagnostics["resolve_direct"], "empty")
+        self.assertEqual(backend.image_resolve_diagnostics["resolve_poll"], "hit")
+
     def test_responses_stream_emits_all_image_output_items(self) -> None:
         first = base64.b64encode(b"first").decode("ascii")
         second = base64.b64encode(b"second").decode("ascii")

@@ -193,6 +193,10 @@ FILE_ID_RE = re.compile(r"\b(file[-_](?!service\b)[A-Za-z0-9_-]+)\b")
 REAL_IMAGE_FILE_ID_RE = re.compile(r"\bfile_00000000[a-f0-9]{24}\b")
 SEDIMENT_ID_RE = re.compile(r"sediment://([A-Za-z0-9_-]+)")
 IMAGE_POLL_SETTLE_SECS = 2.0
+# SSE 已经给出 file_ids/sediment_ids、但直接换下载地址拿不到结果时的回退轮询窗口。
+# SSE 刚关闭时文件/附件往往还没落盘，一次解析失败不代表没出图；等这么久仍拿不到
+# 就按原逻辑返回（通常是模型只回了正文），避免把请求拖到整体超时。
+RESOLVE_FALLBACK_POLL_SECS = 30.0
 IMAGE_POLL_FAST_FAIL_STATUS_CODES = {502, 503, 504}
 IMAGE_POLL_FAST_FAIL_CONSECUTIVE_ERRORS = 2
 CODEX_RESPONSES_INSTRUCTIONS = (
@@ -289,6 +293,9 @@ class OpenAIBackendAPI:
         self.image_prompt_sent = ""
         # 同一个账号上主链路（prepare→POST）因 conduit 失效重试过几次。
         self.image_mainline_retries = 0
+        # 取图阶段的现场：SSE 给了哪些 id、直接解析是否落空、回退轮询等了多久、
+        # 每个 id 换下载地址失败的原因。失败时随诊断一起进调用日志。
+        self.image_resolve_diagnostics: Dict[str, Any] = {}
         self.session = requests.Session(**proxy_settings.build_session_kwargs(
             account=self.account,
             impersonate=self.fp["impersonate"],
@@ -2752,19 +2759,21 @@ class OpenAIBackendAPI:
             try:
                 url = self._get_file_download_url(file_id)
             except Exception as exc:
-                logger.debug({
+                self._record_resolve_failure("file", file_id, repr(exc)[:300])
+                logger.warning({
                     "event": "image_download_url_failed",
                     "source": "file",
                     "conversation_id": conversation_id,
                     "id": file_id,
-                    "error": repr(exc),
+                    "error": repr(exc)[:300],
                 })
                 continue
             if url:
                 if url not in urls:
                     urls.append(url)
             else:
-                logger.debug({
+                self._record_resolve_failure("file", file_id, "empty download url")
+                logger.warning({
                     "event": "image_download_url_empty",
                     "source": "file",
                     "conversation_id": conversation_id,
@@ -2783,19 +2792,21 @@ class OpenAIBackendAPI:
             try:
                 url = self._get_attachment_download_url(conversation_id, sediment_id)
             except Exception as exc:
-                logger.debug({
+                self._record_resolve_failure("sediment", sediment_id, repr(exc)[:300])
+                logger.warning({
                     "event": "image_download_url_failed",
                     "source": "sediment",
                     "conversation_id": conversation_id,
                     "id": sediment_id,
-                    "error": repr(exc),
+                    "error": repr(exc)[:300],
                 })
                 continue
             if url:
                 if url not in urls:
                     urls.append(url)
             else:
-                logger.debug({
+                self._record_resolve_failure("sediment", sediment_id, "empty download url")
+                logger.warning({
                     "event": "image_download_url_empty",
                     "source": "sediment",
                     "conversation_id": conversation_id,
@@ -2810,6 +2821,21 @@ class OpenAIBackendAPI:
         })
         return urls
 
+    def _record_resolve_failure(self, source: str, item_id: str, reason: str) -> None:
+        """把单个 id 换下载地址失败的原因攒进取图诊断，随失败日志一起导出。
+
+        只保留前 8 条，避免异常时把日志撑爆。
+        """
+        diagnostics = getattr(self, "image_resolve_diagnostics", None)
+        if not isinstance(diagnostics, dict):
+            return
+        failures = diagnostics.setdefault("resolve_failures", [])
+        if not isinstance(failures, list):
+            return
+        entry = {"source": source, "id": item_id, "reason": reason}
+        if entry not in failures and len(failures) < 8:
+            failures.append(entry)
+
     def resolve_conversation_image_urls(
             self,
             conversation_id: str,
@@ -2821,35 +2847,79 @@ class OpenAIBackendAPI:
         file_ids = [item for item in file_ids if item != "file_upload"]
         sediment_ids = list(sediment_ids)
         timeout = poll_timeout_secs if poll_timeout_secs is not None else config.image_poll_timeout_secs
-        # SSE 已给出 file_ids 时直接解析 URL，省去 initial_wait + 轮询耗时。
+        diagnostics: Dict[str, Any] = {
+            "resolve_initial_file_ids": list(file_ids),
+            "resolve_initial_sediment_ids": list(sediment_ids),
+            "resolve_poll_timeout_secs": round(float(timeout), 1),
+        }
+        self.image_resolve_diagnostics = diagnostics
+        logger.info({
+            "event": "image_resolve_start",
+            "conversation_id": conversation_id,
+            "file_ids": file_ids,
+            "sediment_ids": sediment_ids,
+            "poll_enabled": poll,
+            "poll_timeout_secs": timeout,
+        })
+        # SSE 已给出 file_ids 时先直接解析 URL，省去 initial_wait + 轮询耗时。
+        # 但直接解析失败不能就此放手：SSE 刚关闭时文件/附件常常还没落盘，
+        # 一次换不到下载地址不代表没出图，否则会把已经生成好的图丢掉。
+        direct_empty = False
         if poll and conversation_id and (file_ids or sediment_ids):
-            logger.info({
-                "event": "image_resolve_skip_poll_direct_resolve",
+            urls = self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+            if urls:
+                diagnostics.update({"resolve_direct": "hit", "resolve_url_count": len(urls)})
+                logger.info({
+                    "event": "image_resolve_direct_hit",
+                    "conversation_id": conversation_id,
+                    "file_ids": file_ids,
+                    "sediment_ids": sediment_ids,
+                    "url_count": len(urls),
+                })
+                return urls
+            direct_empty = True
+            diagnostics["resolve_direct"] = "empty"
+            logger.warning({
+                "event": "image_resolve_direct_empty_fallback_poll",
                 "conversation_id": conversation_id,
                 "file_ids": file_ids,
                 "sediment_ids": sediment_ids,
+                "note": "SSE 给出的 id 暂时换不到下载地址，回退轮询等待落盘",
             })
-            return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
-        if poll and conversation_id:
+        poll_timeout = timeout
+        if direct_empty:
+            remaining = self._remaining_deadline_secs()
+            poll_timeout = RESOLVE_FALLBACK_POLL_SECS if remaining is None else min(
+                RESOLVE_FALLBACK_POLL_SECS, remaining,
+            )
+            diagnostics["resolve_fallback_poll_secs"] = round(float(poll_timeout), 1)
+        should_poll = poll and conversation_id and (direct_empty or not (file_ids or sediment_ids))
+        if should_poll:
             logger.info({
                 "event": "image_resolve_poll_needed",
                 "conversation_id": conversation_id,
                 "initial_file_ids": file_ids,
                 "initial_sediment_ids": sediment_ids,
-                "poll_timeout_secs": timeout,
+                "poll_timeout_secs": poll_timeout,
+                "fallback_after_direct_empty": direct_empty,
             })
+            started = time.time()
             try:
                 polled_file_ids, polled_sediment_ids = self._poll_image_results(
                     conversation_id,
-                    timeout,
-                    file_ids,
-                    sediment_ids,
+                    poll_timeout,
+                    # 直接解析失败时不能把已有 id 当轮询起点：_poll_image_results 看到
+                    # 初始 id 非空会立刻返回同样的 id，起不到等待落盘的作用。
+                    [] if direct_empty else file_ids,
+                    [] if direct_empty else sediment_ids,
                 )
             except ImagePollTimeoutError as exc:
+                diagnostics["resolve_poll"] = "timeout"
+                diagnostics.update(poll_timeout_diagnostics(exc))
                 # 如果轮询超时且有 task error（如 moderation 拦截），抛出 ImageContentPolicyError
                 # 而非 ImagePollTimeoutError，让调用方能区分真正的超时和上游拒绝
                 task_error = getattr(exc, "task_error", "")
-                if not file_ids and not sediment_ids:
+                if not direct_empty and not file_ids and not sediment_ids:
                     if task_error:
                         raise ImageContentPolicyError(task_error) from exc
                     raise
@@ -2858,21 +2928,60 @@ class OpenAIBackendAPI:
                     "conversation_id": conversation_id,
                     "file_ids": file_ids,
                     "sediment_ids": sediment_ids,
+                    "fallback_after_direct_empty": direct_empty,
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                    "task_error": task_error[:200] if task_error else "",
                 })
             except Exception as exc:
-                if not file_ids and not sediment_ids:
+                diagnostics["resolve_poll"] = "error"
+                if not direct_empty and not file_ids and not sediment_ids:
                     raise
                 logger.warning({
                     "event": "image_resolve_poll_partial_error",
                     "conversation_id": conversation_id,
                     "file_ids": file_ids,
                     "sediment_ids": sediment_ids,
-                    "error": repr(exc),
+                    "fallback_after_direct_empty": direct_empty,
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                    "error": repr(exc)[:300],
                 })
             else:
+                diagnostics["resolve_poll"] = "hit" if (polled_file_ids or polled_sediment_ids) else "empty"
+                diagnostics["resolve_poll_elapsed_ms"] = int((time.time() - started) * 1000)
+                diagnostics["resolve_poll_file_ids"] = list(polled_file_ids)
+                diagnostics["resolve_poll_sediment_ids"] = list(polled_sediment_ids)
+                logger.info({
+                    "event": "image_resolve_poll_done",
+                    "conversation_id": conversation_id,
+                    "poll_timeout_secs": poll_timeout,
+                    "fallback_after_direct_empty": direct_empty,
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                    "polled_file_ids": polled_file_ids,
+                    "polled_sediment_ids": polled_sediment_ids,
+                })
                 file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
                 sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
-        return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        urls = self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        diagnostics["resolve_url_count"] = len(urls)
+        diagnostics["resolve_outcome"] = "resolved" if urls else "empty"
+        if urls:
+            logger.info({
+                "event": "image_resolve_done",
+                "conversation_id": conversation_id,
+                "url_count": len(urls),
+                "fallback_after_direct_empty": direct_empty,
+            })
+        else:
+            logger.warning({
+                "event": "image_resolve_empty",
+                "conversation_id": conversation_id,
+                "file_ids": file_ids,
+                "sediment_ids": sediment_ids,
+                "fallback_after_direct_empty": direct_empty,
+                "poll_used": should_poll,
+                "note": "所有 id 都没换到下载地址；上游可能只回了正文，图片也可能尚未就绪",
+            })
+        return urls
 
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
         images = []
