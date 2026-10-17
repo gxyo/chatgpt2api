@@ -7,14 +7,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from services.register.playwright_register import (
     OAUTH_ROUTE_PATTERN,
     OAUTH_TOKEN_PATH,
+    IdentityVerificationRequired,
     _code_is_bound_to_our_challenge,
     _continue_identity_verification,
     _install_oauth_routes,
     _exchange_oauth_token_in_browser,
+    _exchange_with_fresh_code,
     _fill_birthdate,
+    _is_invalid_grant,
     _match_verifier,
+    _obtain_fresh_oauth_code,
     _page_rejects_password_signup,
     _replace_pkce_params,
+    _resolve_browser_verifier,
     _return_to_otp_signup,
     _secret_fingerprint,
     _run_signup_state_machine,
@@ -49,6 +54,10 @@ def _oauth_context(**overrides) -> dict:
         "verifier_source": "自带",
         "issuer_fp": "",
         "rewritten_fps": set(),
+        "authorize_url": "",
+        "browser_verifier": "",
+        "capture_how": "",
+        "fresh_code": False,
     }
     context.update(overrides)
     return context
@@ -60,6 +69,10 @@ class FakePage:
         self.listeners = {}
         # 页面存储快照（sessionStorage/localStorage/cookie 摊平后的样子）。
         self.storage = {"values": [], "device_id": ""}
+        self.url = ""
+        self.goto_urls: list[str] = []
+        # 导航发生时调用；用来模拟「重新 authorize 之后路由截到了新 code」。
+        self.on_goto = None
 
     async def route(self, pattern, handler) -> None:
         self.routes[pattern] = handler
@@ -69,6 +82,16 @@ class FakePage:
 
     async def evaluate(self, script, *args):
         return self.storage
+
+    async def goto(self, url, **kwargs):
+        self.goto_urls.append(url)
+        self.url = url
+        if self.on_goto is not None:
+            self.on_goto(url)
+        return None
+
+    async def wait_for_timeout(self, milliseconds):
+        return None
 
 
 class FakeFrame:
@@ -88,10 +111,14 @@ def frame_at(url: str) -> FakeFrame:
 
 
 class FakeRequest:
-    def __init__(self, url: str, method: str = "GET", resource_type: str = "document", frame=None) -> None:
+    def __init__(
+        self, url: str, method: str = "GET", resource_type: str = "document",
+        frame=None, post_data: str | None = None,
+    ) -> None:
         self.url = url
         self.method = method
         self.resource_type = resource_type
+        self.post_data = post_data
         self._frame = frame
 
     @property
@@ -598,6 +625,171 @@ class PlaywrightRegisterOAuthTests(unittest.IsolatedAsyncioTestCase):
             redirect_uri="https://platform.openai.com/auth/callback",
             device_id="dev-1",
         )
+
+    async def test_authorize_challenge_in_the_post_body_is_recognized(self) -> None:
+        # 真正的签发方可能是一条 POST：URL 上不带 challenge，只看 query 就会把 issuer_fp
+        # 停在更早那条（往往是我们改写过的）请求上，误判成「改写生效=是」。
+        page = FakePage()
+        oauth = _oauth_context()
+        events: list[str] = []
+        await _install_oauth_routes(page, 1, "our-challenge", [], events, oauth)
+
+        page.listeners["request"](
+            FakeRequest(
+                "https://auth.openai.com/api/accounts/authorize",
+                method="POST",
+                resource_type="fetch",
+                post_data=json.dumps({
+                    "code_challenge": "post-challenge",
+                    "client_id": "app_body",
+                    "redirect_uri": "https://platform.openai.com/auth/callback",
+                }),
+            )
+        )
+        # issuer_fp 是抓到 code 那一刻从观察状态里快照的，所以先走一次 callback。
+        await page.routes[OAUTH_ROUTE_PATTERN](
+            FakeRoute(
+                "https://platform.openai.com/auth/callback?code=post-body-code&state=s",
+                frame=frame_at("https://platform.openai.com/signup"),
+            )
+        )
+
+        self.assertEqual(oauth["issuer_fp"], _secret_fingerprint("post-challenge"))
+        self.assertEqual(oauth["client_id"], "app_body")
+        self.assertEqual(oauth["redirect_uri"], platform_oauth_redirect_uri)
+        self.assertTrue(any("请求体" in event for event in events))
+
+    async def test_form_encoded_authorize_body_is_also_recognized(self) -> None:
+        page = FakePage()
+        oauth = _oauth_context()
+        await _install_oauth_routes(page, 1, "our-challenge", [], [], oauth)
+
+        page.listeners["request"](
+            FakeRequest(
+                "https://auth.openai.com/oauth/authorize",
+                method="POST",
+                resource_type="fetch",
+                post_data="code_challenge=form-challenge&client_id=app_form",
+            )
+        )
+        await page.routes[OAUTH_ROUTE_PATTERN](
+            FakeRoute(
+                "https://platform.openai.com/auth/callback?code=form-body-code&state=s",
+                frame=frame_at("https://platform.openai.com/signup"),
+            )
+        )
+
+        self.assertEqual(oauth["issuer_fp"], _secret_fingerprint("form-challenge"))
+        self.assertEqual(oauth["client_id"], "app_form")
+
+    async def test_browser_verifier_can_be_probed_for_diagnostics_only(self) -> None:
+        # 判定「code 是我们的」时不该改用浏览器那份，但仍要把探测结果记下来，
+        # 下一批日志才能对照判定到底准不准。
+        verifier = "browser-verifier-" + "f" * 40
+        oauth = _oauth_context(
+            challenges=[code_challenge_for(verifier)],
+            issuer_fp=_secret_fingerprint(code_challenge_for(verifier)),
+        )
+        events: list[str] = []
+
+        with patch(
+            "services.register.playwright_register._browser_storage_snapshot",
+            AsyncMock(return_value=(_verifier_candidates([verifier]), "")),
+        ):
+            await _resolve_browser_verifier(
+                MagicMock(), oauth, events.append, stage="兑换前", use=False
+            )
+
+        self.assertEqual(oauth["browser_verifier"], verifier)
+        self.assertEqual(oauth["verifier"], "")
+        self.assertEqual(oauth["verifier_source"], "自带")
+        self.assertTrue(any("只记诊断" in event for event in events))
+
+    async def test_authorize_url_is_remembered_for_the_fresh_authorize(self) -> None:
+        page = FakePage()
+        oauth = _oauth_context()
+        await _install_oauth_routes(page, 1, "our-challenge", [], [], oauth)
+        original = (
+            "https://auth.openai.com/oauth/authorize"
+            "?client_id=app_browser&state=s&code_challenge=browser-challenge"
+        )
+
+        await page.routes[OAUTH_ROUTE_PATTERN](
+            FakeRoute(original, frame=frame_at("https://platform.openai.com/signup"))
+        )
+
+        # 存的是改写前的原始 URL：重放时参数必须和浏览器自己那次一致。
+        self.assertEqual(oauth["authorize_url"], original)
+
+    async def test_fresh_authorize_replays_the_url_with_our_challenge(self) -> None:
+        page = FakePage()
+        captured: list[str] = []
+        page.on_goto = lambda url: captured.append("fresh-code")
+        oauth = _oauth_context(
+            authorize_url=(
+                "https://auth.openai.com/oauth/authorize"
+                "?client_id=app_browser&state=s&code_challenge=browser-challenge"
+            )
+        )
+
+        fresh = await _obtain_fresh_oauth_code(page, 3, oauth, "our-challenge", captured)
+
+        self.assertEqual(fresh, "fresh-code")
+        self.assertEqual(len(page.goto_urls), 1)
+        params = parse_qs(urlparse(page.goto_urls[0]).query)
+        self.assertEqual(params["code_challenge"], ["our-challenge"])
+        self.assertEqual(params["client_id"], ["app_browser"])
+        self.assertEqual(params["state"], ["s"])
+
+    async def test_fresh_authorize_reports_when_no_new_code_is_issued(self) -> None:
+        page = FakePage()
+        oauth = _oauth_context(
+            authorize_url="https://auth.openai.com/oauth/authorize?code_challenge=browser-challenge"
+        )
+
+        with patch(
+            "services.register.playwright_register.OAUTH_REAUTHORIZE_WAIT", 0
+        ), patch(
+            "services.register.playwright_register.step",
+            side_effect=lambda *_args, **_kwargs: None,
+        ):
+            fresh = await _obtain_fresh_oauth_code(page, 3, oauth, "our-challenge", [])
+
+        self.assertEqual(fresh, "")
+
+    async def test_fresh_code_is_exchanged_with_our_own_verifier(self) -> None:
+        # 新 code 是我们自己 authorize 签发的，必须用我们的 verifier，不能沿用浏览器那份。
+        page = FakePage()
+        context = MagicMock()
+        oauth = _oauth_context(
+            client_id="app_browser",
+            redirect_uri=platform_oauth_redirect_uri,
+            device_id="dev-1",
+        )
+
+        with patch(
+            "services.register.playwright_register._obtain_fresh_oauth_code",
+            AsyncMock(return_value="fresh-code"),
+        ), patch(
+            "services.register.playwright_register._exchange_oauth_token_in_browser",
+            AsyncMock(return_value={"access_token": "access"}),
+        ) as exchange:
+            tokens = await _exchange_with_fresh_code(
+                page, context, 3, oauth, "our-verifier", "our-challenge", ["old-code"], ""
+            )
+
+        self.assertEqual(tokens["access_token"], "access")
+        self.assertTrue(oauth["fresh_code"])
+        exchange.assert_awaited_once_with(
+            page, context, 3, "fresh-code", "our-verifier", "",
+            client_id="app_browser",
+            redirect_uri=platform_oauth_redirect_uri,
+            device_id="dev-1",
+        )
+
+    def test_invalid_grant_detection(self) -> None:
+        self.assertTrue(_is_invalid_grant(RuntimeError('body={"error": "invalid_grant"}')))
+        self.assertFalse(_is_invalid_grant(RuntimeError("status=503")))
 
     async def test_identity_verification_page_is_detected_before_the_timeout(self) -> None:
         page = MagicMock()

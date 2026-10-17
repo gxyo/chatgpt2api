@@ -87,6 +87,18 @@ OAUTH_STATIC_RESOURCE_TYPES = frozenset({"stylesheet", "image", "font", "media"}
 OAUTH_FRAMELESS_BLOCK_TYPES = frozenset({"xhr", "fetch", "other", "ping", "eventsource"})
 OAUTH_TOKEN_EXCHANGE_ATTEMPTS = 3
 OAUTH_TRANSIENT_STATUSES = ("status=429", "status=500", "status=502", "status=503", "status=504")
+# 兑换失败后「用自带 PKCE 重新 authorize 换一张新 code」的导航 / 等码上限。
+# 正常情况下 authorize 到 callback 只要 1-2 秒，给到 10 秒已经足够看出是被弹回了注册页。
+OAUTH_REAUTHORIZE_TIMEOUT = 20_000
+OAUTH_REAUTHORIZE_WAIT = 10_000
+
+
+class IdentityVerificationRequired(RuntimeError):
+    """上游要求证件核验（verify-your-identity）。
+
+    账号本身已经创建成功，只是当前事务/会话被风控闸门拦住。单独成类是为了让调用方
+    还能先试一次「用自带 PKCE 重新 authorize 直接拿 code」，而不是把整次注册判死。
+    """
 
 
 def _secret_fingerprint(value: str) -> str:
@@ -218,6 +230,67 @@ def _note_authorize_params(oauth: dict[str, Any], params: dict[str, list[str]]) 
             oauth[key] = value
 
 
+def _remember_authorize_url(oauth: dict[str, Any], url: str) -> None:
+    """记下浏览器自己发起的 authorize 原始 URL，兑换失败时用它重放一次。
+
+    只留第一条：重放要的是「浏览器自己那次」，client_id / redirect_uri 也都是从它身上抄的；
+    两条 URL 混着用只会让参数对不上。改写后的 URL 不能当模板（它带着我们的 challenge，
+    浏览器那份 state / screen_hint 却可能已经变了），所以这里只认改写前的原始 URL。
+    """
+    if oauth.get("authorize_url"):
+        return
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return
+    if "authorize" not in parsed.path or "code_challenge" not in parsed.query:
+        return
+    oauth["authorize_url"] = url
+
+
+def _challenge_from_body(request) -> tuple[str, dict[str, list[str]]]:
+    """POST 形式的 authorize 把 PKCE 放在请求体里，URL query 里什么都没有。
+
+    只解析 query 会漏掉这些请求，``issuer_fp`` 于是停在更早那条（往往正是我们改写过的）
+    请求上，把「签发方不是我们」误判成「是」——线上那批 invalid_grant 的
+    ``改写生效=是`` 很可能就是这么来的。
+    """
+    try:
+        raw = getattr(request, "post_data", None)
+    except Exception:
+        return "", {}
+    if not raw or not isinstance(raw, str):
+        return "", {}
+    params: dict[str, list[str]] = {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if not isinstance(value, str) or not value:
+                continue
+            if key in {"code_challenge", "codeChallenge"}:
+                params["code_challenge"] = [value]
+            elif key in {"client_id", "clientId"}:
+                params["client_id"] = [value]
+            elif key in {"redirect_uri", "redirectUri"}:
+                params["redirect_uri"] = [value]
+            elif key in {"device_id", "deviceId"}:
+                params["device_id"] = [value]
+    if "code_challenge" not in params:
+        # 表单编码（application/x-www-form-urlencoded）的请求体。
+        try:
+            form = parse_qs(raw)
+        except Exception:
+            form = {}
+        for key in ("code_challenge", "client_id", "redirect_uri", "device_id"):
+            value = str((form.get(key) or [""])[0])
+            if value:
+                params[key] = [value]
+    return str((params.get("code_challenge") or [""])[0]), params
+
+
 def _code_is_bound_to_our_challenge(oauth: dict[str, Any]) -> bool:
     """签发 code 的那次 authorize 是不是我们改写成功的那次？
 
@@ -229,16 +302,22 @@ def _code_is_bound_to_our_challenge(oauth: dict[str, Any]) -> bool:
     return bool(issuer_fp) and issuer_fp in (oauth.get("rewritten_fps") or set())
 
 
-async def _resolve_browser_verifier(page, oauth: dict[str, Any], record, *, stage: str) -> None:
+async def _resolve_browser_verifier(
+    page, oauth: dict[str, Any], record, *, stage: str, use: bool = True
+) -> str:
     """按 challenge 的 S256 反查浏览器自己留存的 verifier，找到就记进 ``oauth``。
 
     上游 SPA 生成 verifier 后必须存下来才能在跳转回来后兑换——而且必须存在**兑换方**的源
     （platform.openai.com）下，否则它自己那一步就兑不成。存哪个键名会变，所以只认
     「算出来等于签发 code 那条 challenge」这个事实；签发的那条由 ``issuer_fp`` 指认，
     多条 challenge 里先按它收窄，收窄不到再退回全部（宁可多试一条，也别空手）。
+
+    ``use=False`` 时只反查、只记诊断，不改用——线上出现过判定「改写生效=是」却仍然
+    invalid_grant 的情况，那个判定可能被看不见的 POST authorize 骗了；无论结论如何都把
+    浏览器那份找出来记下，下一批日志才能对照到底是哪一种。
     """
     if oauth.get("verifier"):
-        return
+        return str(oauth["verifier"])
     issuer_fp = str(oauth.get("issuer_fp") or "")
     challenges = [
         challenge for challenge in oauth.get("challenges") or []
@@ -246,23 +325,32 @@ async def _resolve_browser_verifier(page, oauth: dict[str, Any], record, *, stag
     ] or list(oauth.get("challenges") or [])
     if not challenges:
         record(f"没有任何观察到 challenge 的 authorize 请求（{stage}），兑换只能用自带的那份")
-        return
+        return ""
     candidates, device_id = await _browser_storage_snapshot(page)
     if device_id and not oauth.get("device_id"):
         oauth["device_id"] = device_id
     verifier = _match_verifier(candidates, challenges)
     if verifier:
-        oauth["verifier"] = verifier
-        oauth["verifier_source"] = "浏览器"
-        record(f"从浏览器存储里反查到 verifier（{stage}），code 用浏览器自己那份兑换")
-        return
-    oauth["verifier_source"] = "自带"
+        oauth["browser_verifier"] = verifier
+        if use:
+            oauth["verifier"] = verifier
+            oauth["verifier_source"] = "浏览器"
+            record(f"从浏览器存储里反查到 verifier（{stage}），code 用浏览器自己那份兑换")
+        else:
+            record(
+                f"从浏览器存储里反查到 verifier（{stage}），但判定 code 绑在我们这份上，"
+                "只记诊断、不改用"
+            )
+        return verifier
+    if use:
+        oauth["verifier_source"] = "自带"
     if not oauth.get("probe_miss_logged"):
         oauth["probe_miss_logged"] = True
         record(
             f"浏览器存储里没有匹配 challenge 的 verifier（{stage}，"
             f"候选 {len(candidates)} 条），兑换只能用自带的那份"
         )
+    return ""
 
 
 def _callback_frames(frame) -> tuple[Any, ...]:
@@ -408,8 +496,11 @@ async def _install_oauth_routes(
         if code in captured_codes:
             return
         captured_codes.append(code)
-        if oauth is not None and not oauth.get("issuer_fp"):
-            oauth["issuer_fp"] = state["issuer_fp"]
+        if oauth is not None:
+            if not oauth.get("issuer_fp"):
+                oauth["issuer_fp"] = state["issuer_fp"]
+            if not oauth.get("capture_how"):
+                oauth["capture_how"] = how
         _record(f"获取 OAuth code（{how}）code_fp={_secret_fingerprint(code)}")
         step(index, "已拦截到 OAuth code")
 
@@ -427,6 +518,9 @@ async def _install_oauth_routes(
         路由不到的跳转目标也会走到这里，所以日志能回答"签发 code 的那次请求到底带了谁的
         challenge"——那决定了这个 code 我们换不换得动。这里也是**唯一**能观察到那几跳的
         authorize 参数的地方：连 client_id 都只能在这儿抄，兑换才不会拿错 client。
+
+        challenge 也可能在 POST 请求体里（URL 上什么都没有），漏掉它 ``issuer_fp`` 就会
+        停在更早的请求上，把签发方误判成「我们改写过的」。所以 query 和 body 都要看。
         """
         try:
             target = str(getattr(request, "url", "") or "")
@@ -437,7 +531,18 @@ async def _install_oauth_routes(
                 state["callback_requested"] = True
                 _record("浏览器已发出 callback 请求")
             return
+        if oauth is not None:
+            try:
+                _remember_authorize_url(oauth, target)
+            except Exception:
+                pass
         fingerprint = _challenge_fp(target)
+        body_params: dict[str, list[str]] = {}
+        if not fingerprint:
+            # 只有 URL 里没有 challenge 时才去看请求体：query 那份已经是最直接的事实。
+            body_challenge, body_params = _challenge_from_body(request)
+            if body_challenge:
+                fingerprint = _secret_fingerprint(body_challenge)
         # 我们自己的 challenge 出现在线上只可能是改写的结果，不是浏览器自己生成的——
         # 记进「浏览器那份」里只会把兑换带偏。
         if not fingerprint or fingerprint == own_challenge_fp:
@@ -445,14 +550,21 @@ async def _install_oauth_routes(
         state["issuer_fp"] = fingerprint
         if oauth is not None:
             try:
-                _note_authorize_params(oauth, parse_qs(urlparse(target).query))
+                params = parse_qs(urlparse(target).query)
+                for key, value in body_params.items():
+                    params.setdefault(key, value)
+                _note_authorize_params(oauth, params)
             except Exception:
                 pass
         key = f"{urlparse(target).path}#{fingerprint}"
         if key in seen_challenges:
             return
         seen_challenges.add(key)
-        _record(f"发出带 challenge 的请求 {urlparse(target).path} challenge_fp={fingerprint}")
+        source = "（请求体）" if body_params else ""
+        _record(
+            f"发出带 challenge 的请求 {urlparse(target).path} "
+            f"challenge_fp={fingerprint}{source}"
+        )
 
     def _on_response(response) -> None:
         """Read the code off the 302 that points at the callback.
@@ -507,6 +619,7 @@ async def _install_oauth_routes(
                 params = parse_qs(urlparse(url).query)
                 original = str((params.get("code_challenge") or [""])[0])
                 if oauth is not None:
+                    _remember_authorize_url(oauth, url)
                     _note_authorize_params(oauth, params)
                     oauth["rewritten_fps"].add(_secret_fingerprint(original))
                 # 这里**不能**去读页面存储：请求正停在这个 handler 里，页面处于导航中，
@@ -718,15 +831,18 @@ async def _continue_identity_verification(page, index: int) -> None:
     页面本身只有一句说明 + Continue；点了多半是进第三方证件核验（自动化不了），所以这是
     唯一能做的一步，点不动就立刻认输。关键在于失败原因要说清是风控闸门，而不是「认不出页面」——
     后者会让人以为是我们自己的选择器坏了，白白浪费一轮线上排查。
+
+    Persona 的 iframe overlay 会一直挡住按钮的指针事件，``click()`` 的默认超时是 30 秒，
+    线上每次都在这里白等 30 秒才报错——把点击本身也压到 5 秒，点不动就立刻收尾。
     """
     button = page.locator(
         'button:has-text("Continue"), button:has-text("继续"), button[type="submit"]'
     ).first
     try:
         await button.wait_for(state="visible", timeout=5_000)
-        await button.click()
+        await button.click(timeout=5_000)
     except Exception:
-        raise RuntimeError(
+        raise IdentityVerificationRequired(
             "上游要求证件核验（verify-your-identity），当前 IP 或邮箱域名已被风控"
         )
     step(index, "已点击证件核验页面的继续", "yellow")
@@ -810,6 +926,14 @@ def _is_transient_exchange_error(error: Exception) -> bool:
     if "status=" not in message:
         return True
     return any(fragment in message for fragment in OAUTH_TRANSIENT_STATUSES)
+
+
+def _is_invalid_grant(error: Exception) -> bool:
+    """code 绑在另一份 verifier 上（或已被兑换）时上游的确定性回复。
+
+    这种错误重试同一个 code 没有意义——失败本身还会把 code 消耗掉——但可以换一张新 code。
+    """
+    return "invalid_grant" in str(error)
 
 
 async def _exchange_oauth_token_in_browser(
@@ -901,9 +1025,102 @@ async def _exchange_oauth_token_in_browser(
     )
 
 
+async def _obtain_fresh_oauth_code(
+    page, index: int, oauth: dict[str, Any], code_challenge: str, captured_codes: list[str],
+) -> str:
+    """用我们自己的 PKCE 重新发起一次 authorize，拿一张绑在我们 verifier 上的新 code。
+
+    只有两种情况会走到这里：拿到的 code 兑换不了（``invalid_grant``），或者上游卡在
+    证件核验闸门上。两次的账号都已经创建成功、auth.openai.com 的会话 cookie 还在，
+    所以重放一次 authorize 有相当概率直接签发新 code——但结论以实际观察到的 code 为准，
+    没拿到就返回空串，多花十几秒而已。
+
+    重放的是浏览器自己那条 authorize URL（其余参数原样保留，包括 client_id /
+    redirect_uri / state），只把 PKCE 换成我们的。这样即使上游 SPA 换过 client，
+    兑换参数也和签发时一致。
+    """
+    authorize_url = str(oauth.get("authorize_url") or "")
+    if not authorize_url:
+        step(index, "OAuth 兜底: 没有记录到 authorize URL，无法重新授权", "yellow")
+        return ""
+    before = set(captured_codes)
+    target = _replace_pkce_params(authorize_url, code_challenge)
+    step(index, "OAuth 兜底: 用自带 PKCE 重新发起 authorize", "yellow")
+    goto_error: Exception | None = None
+    try:
+        await page.goto(
+            target, wait_until="domcontentloaded", timeout=OAUTH_REAUTHORIZE_TIMEOUT
+        )
+    except Exception as error:
+        # 导航被 302 打断（net::ERR_ABORTED 之类）不代表没拿到 code，继续轮询。
+        goto_error = error
+    deadline = asyncio.get_running_loop().time() + OAUTH_REAUTHORIZE_WAIT / 1000
+    while True:
+        for code in captured_codes:
+            if code not in before:
+                step(
+                    index,
+                    f"OAuth 兜底: 重新授权拿到新 code code_fp={_secret_fingerprint(code)}",
+                    "yellow",
+                )
+                return str(code)
+        if asyncio.get_running_loop().time() >= deadline:
+            break
+        await page.wait_for_timeout(250)
+    try:
+        current_url = str(page.url or "")[:160]
+    except Exception:
+        current_url = "-"
+    detail = f"，导航异常: {goto_error}" if goto_error else ""
+    step(
+        index,
+        f"OAuth 兜底: 重新授权未签发新 code{detail}, 最终页面: {current_url}",
+        "yellow",
+    )
+    return ""
+
+
+async def _exchange_with_fresh_code(
+    page, context, index: int, oauth: dict[str, Any], code_verifier: str,
+    code_challenge: str, captured_codes: list[str], proxy: str,
+) -> dict | None:
+    """``invalid_grant`` 之后换一张新 code 再兑换。
+
+    失败的兑换已经消耗掉原来那张 code，所以不能拿同一个 code 去试第二份 verifier；
+    新 code 是我们自己发起的 authorize 签发的，必然绑在 ``code_verifier`` 上。
+    """
+    fresh_code = await _obtain_fresh_oauth_code(
+        page, index, oauth, code_challenge, captured_codes
+    )
+    if not fresh_code:
+        return None
+    oauth["fresh_code"] = True
+    oauth["verifier_source"] = "自带（重新授权）"
+    step(index, "OAuth 兜底: 用新 code 重新兑换 token", "yellow")
+    try:
+        return await _exchange_oauth_token_in_browser(
+            page, context, index, fresh_code, code_verifier, proxy,
+            client_id=str(oauth.get("client_id") or ""),
+            redirect_uri=str(oauth.get("redirect_uri") or ""),
+            device_id=str(oauth.get("device_id") or ""),
+        )
+    except Exception as error:
+        step(index, f"OAuth 兜底: 新 code 兑换仍失败: {error}", "yellow")
+        return None
+
+
 async def _run_signup_state_machine(
-    page, index: int, password: str, name: str, age: str, mailbox: dict, captured_code: list[str]
+    page, index: int, password: str, name: str, age: str, mailbox: dict, captured_code: list[str],
+    *, signup_state: dict | None = None,
 ) -> bool:
+    """跑注册状态机，返回是否设置过密码。
+
+    ``signup_state`` 是可选的输出字典：状态机中途抛 ``IdentityVerificationRequired`` 时
+    返回值拿不到，调用方仍需要知道密码到底设没设过（决定保存的账号要不要带密码）。
+    """
+    if signup_state is None:
+        signup_state = {}
+    signup_state["password_set"] = False
     password_set = False
     password_attempted = False
     otp_submitted = False
@@ -920,6 +1137,7 @@ async def _run_signup_state_machine(
                 raise RuntimeError(f"提交密码后页面未继续, url={page.url}, body={body}")
             password_attempted = True
             password_set = await _submit_password(page, index, password)
+            signup_state["password_set"] = password_set
             continue
         if state == "otp":
             if not password_attempted and not otp_submitted and await _switch_to_password_if_offered(page, index):
@@ -939,7 +1157,7 @@ async def _run_signup_state_machine(
             profile_submitted = True
         if state == "identity":
             if identity_attempted:
-                raise RuntimeError(
+                raise IdentityVerificationRequired(
                     "上游要求证件核验（verify-your-identity），当前 IP 或邮箱域名已被风控"
                 )
             identity_attempted = True
@@ -1039,6 +1257,14 @@ async def _browser_register_flow(
         # 签发 code 的那条 challenge 的指纹，以及我们真正改写成功的那些指纹。
         "issuer_fp": "",
         "rewritten_fps": set(),
+        # 浏览器自己那条 authorize URL：兑换失败时用它重放一次换新 code。
+        "authorize_url": "",
+        # 浏览器存储里反查到的那份 verifier（只用于诊断，未必采用）。
+        "browser_verifier": "",
+        # code 是从哪条路捕获的（响应 Location / 直接导航），成功日志里也要看得到。
+        "capture_how": "",
+        # 当前这张 code 是不是「用自带 PKCE 重新授权」签发的。
+        "fresh_code": False,
     }
 
     def _dump_oauth_events() -> None:
@@ -1079,10 +1305,24 @@ async def _browser_register_flow(
 
     step(index, f"点击继续后页面: {page.url}")
 
+    signup_state: dict[str, Any] = {}
     try:
         password_set = await _run_signup_state_machine(
-            page, index, password, name, age, mailbox, captured_code
+            page, index, password, name, age, mailbox, captured_code,
+            signup_state=signup_state,
         )
+    except IdentityVerificationRequired:
+        # 账号已经创建成功，只是 signup 这条事务被闸门拦住。如果闸门只挂在 signup 事务上，
+        # 用自带 PKCE 重新 authorize 一次仍可能直接签发 code——先试，拿不到再认输。
+        step(index, f"OAuth 诊断: 状态机中止于 {page.url[:120]}（证件核验闸门）", "yellow")
+        _dump_oauth_events()
+        password_set = bool(signup_state.get("password_set"))
+        if not await _obtain_fresh_oauth_code(
+            page, index, oauth_context, code_challenge, captured_code
+        ):
+            raise
+        oauth_context["fresh_code"] = True
+        step(index, "OAuth 兜底: 证件核验闸门后仍拿到了 code", "yellow")
     except Exception:
         # 状态机死掉时（比如停在认不出的页面上）也要留下拦截记录，
         # 否则日志里只有一句"无法识别注册流程页面"，看不到前面发生了什么。
@@ -1112,12 +1352,14 @@ async def _browser_register_flow(
         _dump_oauth_events()
         raise RuntimeError(f"未能获取到 OAuth code, 最终页面: {page.url}")
 
-    if not oauth_context["verifier"] and not _code_is_bound_to_our_challenge(oauth_context):
-        # 签发 code 的那次 authorize 不是我们改写成功的那次（路由不到的跳转目标进不来 handler），
-        # code 绑在浏览器自己的 verifier 上。此刻页面正停在 callback（platform.openai.com 源），
-        # 而存储只在导航结束后读得到——首次能读的时机就是这里。
+    if not oauth_context["fresh_code"] and not oauth_context["verifier"]:
+        # 签发 moment 的判定可能被「URL 里看不见 challenge 的 POST authorize」骗过（线上
+        # 那批「改写生效=是」却 invalid_grant 的失败就是这么来的），所以无论判定如何都
+        # 先把浏览器那份 verifier 反查出来：判定为「不是我们的」才真的采用它，其余只记诊断。
+        # 此刻页面正停在 callback（platform.openai.com 源），存储只在导航结束后读得到。
         await _resolve_browser_verifier(
-            page, oauth_context, oauth_events.append, stage="兑换前"
+            page, oauth_context, oauth_events.append, stage="兑换前",
+            use=not _code_is_bound_to_our_challenge(oauth_context),
         )
     verifier = str(oauth_context["verifier"] or code_verifier)
     client_id = str(oauth_context["client_id"] or platform_oauth_client_id)
@@ -1125,10 +1367,14 @@ async def _browser_register_flow(
     step(
         index,
         f"OAuth 诊断: verifier 来源={oauth_context['verifier_source']}, "
-        f"client_id={client_id}, device_id={'有' if oauth_context['device_id'] else '无'}, "
+        f"client_id={client_id}, redirect_uri={redirect_uri}, "
+        f"device_id={'有' if oauth_context['device_id'] else '无'}, "
         f"观察到的 challenge={len(oauth_context['challenges'])} 条, "
         f"签发方 challenge_fp={oauth_context['issuer_fp'] or '-'}"
-        f"（改写生效={'是' if _code_is_bound_to_our_challenge(oauth_context) else '否'}）",
+        f"（改写生效={'是' if _code_is_bound_to_our_challenge(oauth_context) else '否'}）, "
+        f"我们的 challenge_fp={_secret_fingerprint(code_challenge)}, "
+        f"浏览器 verifier={'有' if oauth_context['browser_verifier'] else '无'}, "
+        f"code 捕获方式={oauth_context['capture_how'] or '-'}",
         "yellow",
     )
 
@@ -1140,6 +1386,7 @@ async def _browser_register_flow(
             f"code_fp={_secret_fingerprint(captured_code[0])}, "
             f"verifier_fp={_secret_fingerprint(verifier)}",
         )
+    tokens: dict | None = None
     try:
         tokens = await _exchange_oauth_token_in_browser(
             page, context, index, captured_code[0], verifier, proxy,
@@ -1147,18 +1394,36 @@ async def _browser_register_flow(
             device_id=str(oauth_context["device_id"]),
         )
     except Exception as error:
-        # invalid_grant 说明这个 code 我们换不了：要么已被兑换，要么绑在别人的 verifier 上。
-        # 打印拦截记录、平台会话状态和这次兑换的身份，让日志能区分这几种情况。
-        step(index, f"OAuth 诊断: {await _probe_platform_session(context)}", "yellow")
-        _dump_oauth_events()
-        raise RuntimeError(
-            f"{error}（verifier={oauth_context['verifier_source']}, client_id={client_id}, "
-            f"签发方改写生效={'是' if _code_is_bound_to_our_challenge(oauth_context) else '否'}）"
-        ) from error
+        if _is_invalid_grant(error):
+            # invalid_grant 说明这张 code 我们换不了：要么已被兑换，要么绑在别人的
+            # verifier 上。失败的兑换已经把 code 消耗掉，拿同一张 code 再试第二份
+            # verifier 毫无意义；但账号已经创建成功、auth.openai.com 的会话还在，
+            # 用自带 PKCE 重新 authorize 换一张新 code 还能救回这个账号。
+            tokens = await _exchange_with_fresh_code(
+                page, context, index, oauth_context, code_verifier,
+                code_challenge, captured_code, proxy,
+            )
+        if not tokens:
+            # 打印拦截记录、平台会话状态和这次兑换的身份，让日志能区分这几种情况。
+            step(index, f"OAuth 诊断: {await _probe_platform_session(context)}", "yellow")
+            _dump_oauth_events()
+            raise RuntimeError(
+                f"{error}（verifier={oauth_context['verifier_source']}, client_id={client_id}, "
+                f"签发方改写生效={'是' if _code_is_bound_to_our_challenge(oauth_context) else '否'}）"
+            ) from error
 
     if not tokens or not tokens.get("access_token"):
         raise RuntimeError("OAuth token 交换返回数据缺少 access_token")
 
+    # 成功路径也要留一行：日志页只记失败，但对照「成功那批用的是哪份 verifier、
+    # code 从哪条路捕获」正是判断失败根因的关键。
+    step(
+        index,
+        f"OAuth 诊断: 兑换成功 verifier 来源={oauth_context['verifier_source']}, "
+        f"code 捕获方式={oauth_context['capture_how'] or '-'}, "
+        f"重新授权={'是' if oauth_context['fresh_code'] else '否'}",
+        "yellow",
+    )
     step(index, "注册完成，token 获取成功")
     return {
         "email": email,
