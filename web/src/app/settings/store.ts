@@ -30,9 +30,64 @@ function normalizeOptionalInterval(value: unknown, defaultValue: number | null =
   return Math.floor(interval);
 }
 
+const DEFAULT_UPSTREAM_MODEL_NAME = "gpt-5-5";
+const THINKING_EFFORT_CHOICES = ["auto", "standard", "extended", "max"] as const;
+type ThinkingEffort = (typeof THINKING_EFFORT_CHOICES)[number];
+
+function normalizeThinkingEffort(value: unknown): ThinkingEffort | string {
+  const effort = String(value || "").trim().toLowerCase();
+  return THINKING_EFFORT_CHOICES.includes(effort as ThinkingEffort) ? effort : "auto";
+}
+
+/** 编辑草稿：保留输入中的原始字符串（例如 "0."），保存时再统一转数字。 */
+function normalizePricingDraft(value: unknown): Record<string, string | number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const result: Record<string, string | number> = {};
+  for (const [rawModel, rawPrice] of Object.entries(value)) {
+    const model = String(rawModel || "").trim();
+    if (!model || (typeof rawPrice !== "string" && typeof rawPrice !== "number")) {
+      continue;
+    }
+    result[model] = rawPrice;
+  }
+  return result;
+}
+
+/** 提交前收紧：空白视为未定价（丢弃），0 保留为免费，负数/非法值丢弃。 */
+function normalizePricingForSave(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const result: Record<string, number> = {};
+  for (const [rawModel, rawPrice] of Object.entries(value)) {
+    const model = String(rawModel || "").trim();
+    if (!model) {
+      continue;
+    }
+    const text = typeof rawPrice === "string" ? rawPrice.trim() : String(rawPrice ?? "");
+    if (text === "") {
+      continue;
+    }
+    const price = Number(text);
+    if (!Number.isFinite(price) || price < 0) {
+      continue;
+    }
+    result[model] = Math.round(price * 1_000_000) / 1_000_000;
+  }
+  return result;
+}
+
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
   return {
     ...config,
+    default_upstream_model_name:
+      typeof config.default_upstream_model_name === "string" && config.default_upstream_model_name.trim()
+        ? config.default_upstream_model_name.trim()
+        : DEFAULT_UPSTREAM_MODEL_NAME,
+    default_thinking_effort: normalizeThinkingEffort(config.default_thinking_effort),
+    model_pricing: normalizePricingDraft(config.model_pricing),
     refresh_account_interval_minute: normalizeOptionalInterval(config.refresh_account_interval_minute, 5),
     refresh_all_accounts_interval_minute: normalizeOptionalInterval(config.refresh_all_accounts_interval_minute),
     image_retention_days: Number(config.image_retention_days || 30),
@@ -88,6 +143,11 @@ type SettingsStore = {
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
+  setDefaultUpstreamModelName: (value: string) => void;
+  setDefaultThinkingEffort: (value: string) => void;
+  setModelPrice: (model: string, value: string) => void;
+  addPricingModel: (model: string) => void;
+  removePricingModel: (model: string) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
   setGlobalSystemPrompt: (value: string) => void;
@@ -172,6 +232,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
+        default_upstream_model_name: String(config.default_upstream_model_name || "").trim(),
+        default_thinking_effort: normalizeThinkingEffort(config.default_thinking_effort),
+        model_pricing: normalizePricingForSave(config.model_pricing),
         global_system_prompt: String(config.global_system_prompt || "").trim(),
         sensitive_words: (config.sensitive_words || []).map((item) => String(item).trim()).filter(Boolean),
         ai_review: {
@@ -266,6 +329,48 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (enabled) levels.add(level);
       else levels.delete(level);
       return { config: { ...state.config, log_levels: Array.from(levels) } };
+    });
+  },
+
+  setDefaultUpstreamModelName: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_upstream_model_name: value } } : {});
+  },
+
+  setDefaultThinkingEffort: (value) => {
+    set((state) => state.config ? { config: { ...state.config, default_thinking_effort: value } } : {});
+  },
+
+  setModelPrice: (model, value) => {
+    set((state) => {
+      if (!state.config) return {};
+      const key = model.trim();
+      if (!key) return {};
+      return {
+        config: {
+          ...state.config,
+          model_pricing: { ...(state.config.model_pricing || {}), [key]: value },
+        },
+      };
+    });
+  },
+
+  addPricingModel: (model) => {
+    set((state) => {
+      if (!state.config) return {};
+      const key = model.trim();
+      if (!key) return {};
+      const pricing = state.config.model_pricing || {};
+      if (key in pricing) return {};
+      return { config: { ...state.config, model_pricing: { ...pricing, [key]: "" } } };
+    });
+  },
+
+  removePricingModel: (model) => {
+    set((state) => {
+      if (!state.config) return {};
+      const pricing = { ...(state.config.model_pricing || {}) };
+      delete pricing[model];
+      return { config: { ...state.config, model_pricing: pricing } };
     });
   },
 

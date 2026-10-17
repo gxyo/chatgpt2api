@@ -10,8 +10,13 @@ from services.stats_service import ImageStatsService, beijing_today
 
 
 def log_line(time_text: str, endpoint: str, status: str = "success", duration_ms: int = 100,
-             log_type: str = "call", summary: str = "调用") -> str:
+             log_type: str = "call", summary: str = "调用", model: str | None = None,
+             urls: list[str] | None = None) -> str:
     detail = {"endpoint": endpoint, "status": status, "duration_ms": duration_ms, "ended_at": time_text}
+    if model is not None:
+        detail["model"] = model
+    if urls is not None:
+        detail["urls"] = urls
     return json.dumps(
         {"id": f"id-{time_text}-{endpoint}-{status}", "time": time_text, "type": log_type, "summary": summary, "detail": detail},
         ensure_ascii=False,
@@ -40,7 +45,7 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(result["range"]["start_date"], "2026-09-28")
         self.assertEqual(result["totals"], {
             "requests": 3, "success": 2, "failed": 1, "policy_violation": 0,
-            "success_rate": 2 / 3, "avg_duration_ms": 100,
+            "success_rate": 2 / 3, "avg_duration_ms": 100, "images": 0, "revenue": 0,
         })
         by_label = {point["label"]: point for point in result["series"]}
         self.assertEqual(by_label["09:00"]["requests"], 2)
@@ -438,7 +443,7 @@ class SnapshotPersistenceTests(unittest.TestCase):
 
         self.assertEqual(after_cleanup["totals"], {
             "requests": 2, "success": 1, "failed": 1, "policy_violation": 0,
-            "success_rate": 0.5, "avg_duration_ms": 100,
+            "success_rate": 0.5, "avg_duration_ms": 100, "images": 0, "revenue": 0,
         })
         self.assertEqual(after_restart["series"][0]["requests"], 1)
         self.assertEqual(after_restart["totals"]["requests"], 2)
@@ -472,6 +477,238 @@ class SnapshotPersistenceTests(unittest.TestCase):
             result = ImageStatsService(path).summary("2026-09-28", "2026-09-28")
 
         self.assertEqual(result["totals"]["requests"], 1)
+
+
+class ModelRevenueTests(unittest.TestCase):
+    """收入口径：只有成功请求返回的图片才计费，按 detail.urls 的数量算。"""
+
+    def make_service(self, tmp_dir: str, lines: list[str]) -> ImageStatsService:
+        path = Path(tmp_dir) / "logs.jsonl"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return ImageStatsService(path)
+
+    def test_successful_images_are_counted_by_urls_and_priced(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1", "https://img/2"]),
+                log_line("2026-09-28 10:05:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/3"]),
+                log_line("2026-09-28 10:10:00", "/v1/images/generations",
+                         model="gpt-image-2.5", urls=["https://img/4"]),
+                # 失败请求即使带了 urls 也不能计收入。
+                log_line("2026-09-28 10:15:00", "/v1/images/generations", status="failed",
+                         model="gpt-image-2", urls=["https://img/5"]),
+                # 成功但没有返回图片（理论上不该发生）：不计数。
+                log_line("2026-09-28 10:20:00", "/v1/images/generations", model="gpt-image-2"),
+            ])
+
+            result = service.summary(
+                "2026-09-28", "2026-09-28",
+                pricing={"gpt-image-2": 0.5, "gpt-image-2.5": 1.2},
+            )
+
+        self.assertEqual(result["currency"], "CNY")
+        self.assertEqual(result["totals"]["images"], 4)
+        self.assertEqual(result["totals"]["revenue"], 2.7)
+        self.assertEqual([row["model"] for row in result["by_model"]], ["gpt-image-2", "gpt-image-2.5"])
+        self.assertEqual(result["by_model"][0], {
+            "model": "gpt-image-2", "images": 3, "price": 0.5, "revenue": 1.5,
+        })
+        self.assertEqual(result["by_model"][1], {
+            "model": "gpt-image-2.5", "images": 1, "price": 1.2, "revenue": 1.2,
+        })
+
+    def test_unpriced_models_report_null_price_and_zero_revenue(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1", "https://img/2"]),
+            ])
+
+            result = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(result["totals"]["images"], 2)
+        self.assertEqual(result["totals"]["revenue"], 0)
+        self.assertEqual(result["by_model"], [
+            {"model": "gpt-image-2", "images": 2, "price": None, "revenue": 0.0},
+        ])
+
+    def test_zero_price_means_free_not_unpriced(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="auto", urls=["https://img/1"]),
+            ])
+
+            result = service.summary("2026-09-28", "2026-09-28", pricing={"auto": 0})
+
+        self.assertEqual(result["totals"]["revenue"], 0)
+        self.assertEqual(result["by_model"][0]["price"], 0)
+        self.assertEqual(result["by_model"][0]["revenue"], 0.0)
+
+    def test_invalid_prices_are_treated_as_unpriced(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1"]),
+            ])
+
+            result = service.summary(
+                "2026-09-28", "2026-09-28",
+                pricing={"gpt-image-2": -1},  # type: ignore[dict-item]
+            )
+
+        self.assertIsNone(result["by_model"][0]["price"])
+
+    def test_image_urls_are_deduplicated_before_counting_is_not_required(self):
+        """urls 里重复的地址仍按数组长度计——日志侧已经去过重，这里只信任长度。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1", "https://img/1"]),
+            ])
+
+            result = service.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 1})
+
+        self.assertEqual(result["totals"]["images"], 2)
+        self.assertEqual(result["totals"]["revenue"], 2.0)
+
+
+def downgrade_snapshot_to_v1(snapshot_path: Path) -> None:
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["version"] = 1
+    for bucket in snapshot["hours"].values():
+        bucket.pop("images", None)
+        bucket.pop("models", None)
+    snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+
+class SnapshotModelMigrationTests(unittest.TestCase):
+    """v1 快照直升 v2：请求历史保留，模型/图片数据从现存日志回填且只回填一次。"""
+
+    def make_service(self, tmp_dir: str, lines: list[str]) -> tuple[ImageStatsService, Path, Path]:
+        path = Path(tmp_dir) / "logs.jsonl"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return ImageStatsService(path), path, Path(tmp_dir) / "image_stats.json"
+
+    def test_v1_snapshot_backfills_images_without_recounting_requests(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, path, snapshot_path = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1", "https://img/2"]),
+                log_line("2026-09-28 11:00:00", "/v1/images/generations", status="failed",
+                         model="gpt-image-2"),
+                log_line("2026-09-29 10:00:00", "/v1/images/edits",
+                         model="gpt-image-2.5", urls=["https://img/3"]),
+            ])
+            service.summary("2026-09-28", "2026-09-29")
+            self.assertEqual(json.loads(snapshot_path.read_text(encoding="utf-8"))["version"], 2)
+
+            downgrade_snapshot_to_v1(snapshot_path)
+            restarted = ImageStatsService(path)
+            first = restarted.summary("2026-09-28", "2026-09-29")
+
+            self.assertEqual(first["totals"]["requests"], 3)
+            self.assertEqual(first["totals"]["success"], 2)
+            self.assertEqual(first["totals"]["failed"], 1)
+            self.assertEqual(first["totals"]["images"], 3)
+            self.assertEqual(first["totals"]["revenue"], 0)
+            self.assertEqual(
+                [(row["model"], row["images"]) for row in first["by_model"]],
+                [("gpt-image-2", 2), ("gpt-image-2.5", 1)],
+            )
+
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["version"], 2)
+            self.assertEqual(sum(bucket["images"] for bucket in snapshot["hours"].values()), 3)
+
+            # 迁移只做一次：再查一遍不能把图片数翻倍。
+            second = restarted.summary("2026-09-28", "2026-09-29")
+            self.assertEqual(second["totals"]["images"], 3)
+            self.assertEqual(second["totals"]["requests"], 3)
+
+    def test_v1_snapshot_keeps_appending_new_images_after_migration(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, path, snapshot_path = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1"]),
+            ])
+            service.summary("2026-09-28", "2026-09-28")
+            downgrade_snapshot_to_v1(snapshot_path)
+
+            restarted = ImageStatsService(path)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(log_line("2026-09-28 12:00:00", "/v1/images/generations",
+                                      model="gpt-image-2", urls=["https://img/2"]) + "\n")
+            result = restarted.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 1})
+
+        self.assertEqual(result["totals"]["images"], 2)
+        self.assertEqual(result["totals"]["revenue"], 2.0)
+
+    def test_v1_snapshot_with_lost_anchor_skips_backfill(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, path, snapshot_path = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1"]),
+            ])
+            service.summary("2026-09-28", "2026-09-28")
+            downgrade_snapshot_to_v1(snapshot_path)
+
+            # 日志被整份改写：锚点找不到，不能确认旧聚合对应哪些行，只能放弃回填。
+            path.write_text("".join(
+                log_line(f"2026-09-28 13:{minute:02d}:00", "/v1/messages")
+                for minute in range(5)
+            ), encoding="utf-8")
+            restarted = ImageStatsService(path)
+            result = restarted.summary("2026-09-28", "2026-09-28")
+
+            self.assertEqual(result["totals"]["requests"], 1)
+            self.assertEqual(result["totals"]["images"], 0)
+            self.assertEqual(result["by_model"], [])
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["version"], 2)
+
+    def test_v1_snapshot_without_log_file_is_marked_migrated(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, path, snapshot_path = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1"]),
+            ])
+            service.summary("2026-09-28", "2026-09-28")
+            downgrade_snapshot_to_v1(snapshot_path)
+
+            path.unlink()
+            restarted = ImageStatsService(path)
+            result = restarted.summary("2026-09-28", "2026-09-28")
+
+            self.assertEqual(result["totals"]["requests"], 1)
+            self.assertEqual(result["totals"]["images"], 0)
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["version"], 2)
+
+
+class BuildImageStatsTests(unittest.TestCase):
+    def test_build_image_stats_reads_pricing_from_config(self):
+        import types
+        from unittest import mock
+
+        import services.config as config_module
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text(log_line(
+                "2026-09-28 10:00:00", "/v1/images/generations",
+                model="gpt-image-2", urls=["https://img/1", "https://img/2"],
+            ) + "\n", encoding="utf-8")
+            service = ImageStatsService(path)
+            with mock.patch.object(stats_service, "image_stats_service", service), \
+                    mock.patch.object(config_module, "config", types.SimpleNamespace(model_pricing={"gpt-image-2": 1.5})):
+                result = stats_service.build_image_stats("2026-09-28", "2026-09-28")
+
+        self.assertEqual(result["totals"]["images"], 2)
+        self.assertEqual(result["totals"]["revenue"], 3.0)
+        self.assertEqual(result["by_model"][0]["price"], 1.5)
 
 
 if __name__ == "__main__":

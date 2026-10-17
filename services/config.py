@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -13,6 +14,10 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
 VERSION_FILE = BASE_DIR / "VERSION"
+
+DEFAULT_UPSTREAM_MODEL_NAME = "gpt-5-5"
+THINKING_EFFORT_CHOICES = ("auto", "standard", "extended", "max")
+DEFAULT_THINKING_EFFORT = "auto"
 
 DEFAULT_IMAGE_POLL_TIMEOUT_SECS = 75
 # 生图失败后换号重新生成的次数。留空/0 = 不重试，保持原有行为。
@@ -118,6 +123,34 @@ def _normalize_image_generation_retry_count(value: object) -> int:
     if value is None or (isinstance(value, str) and not value.strip()):
         return DEFAULT_IMAGE_GENERATION_RETRY_COUNT
     return _normalize_positive_int(value, DEFAULT_IMAGE_GENERATION_RETRY_COUNT, 0)
+
+
+def _normalize_upstream_model_name(value: object) -> str:
+    return str(value or "").strip() or DEFAULT_UPSTREAM_MODEL_NAME
+
+
+def _normalize_thinking_effort(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in THINKING_EFFORT_CHOICES else DEFAULT_THINKING_EFFORT
+
+
+def _normalize_model_pricing(value: object) -> dict[str, float]:
+    """模型单价表：保留 0（免费），丢弃非法、负数和非有限值。"""
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, float] = {}
+    for raw_model, raw_price in value.items():
+        model = str(raw_model or "").strip()
+        if not model or isinstance(raw_price, bool):
+            continue
+        try:
+            price = float(raw_price)
+        except (OverflowError, TypeError, ValueError):
+            continue
+        if not math.isfinite(price) or price < 0:
+            continue
+        result[model] = round(price, 6)
+    return result
 
 
 def _normalize_log_cleanup_time(value: object) -> str:
@@ -382,12 +415,15 @@ class ConfigStore:
 
     @property
     def default_upstream_model_name(self) -> str:
-        return str(self.data.get("default_upstream_model_name") or "gpt-5-5").strip()
+        return _normalize_upstream_model_name(self.data.get("default_upstream_model_name"))
 
     @property
     def default_thinking_effort(self) -> str:
-        value = str(self.data.get("default_thinking_effort") or "auto").strip().lower()
-        return value if value in {"auto", "standard", "extended", "max"} else "auto"
+        return _normalize_thinking_effort(self.data.get("default_thinking_effort"))
+
+    @property
+    def model_pricing(self) -> dict[str, float]:
+        return _normalize_model_pricing(self.data.get("model_pricing"))
 
     @property
     def images_dir(self) -> Path:
@@ -457,6 +493,7 @@ class ConfigStore:
         data["global_system_prompt"] = self.global_system_prompt
         data["default_upstream_model_name"] = self.default_upstream_model_name
         data["default_thinking_effort"] = self.default_thinking_effort
+        data["model_pricing"] = self.model_pricing
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
         data.pop("auth-key", None)
         return data
@@ -499,6 +536,16 @@ class ConfigStore:
             next_data["image_generation_retry_count"] = _normalize_image_generation_retry_count(
                 next_data.get("image_generation_retry_count")
             )
+        if "default_upstream_model_name" in next_data:
+            next_data["default_upstream_model_name"] = _normalize_upstream_model_name(
+                next_data.get("default_upstream_model_name")
+            )
+        if "default_thinking_effort" in next_data:
+            next_data["default_thinking_effort"] = _normalize_thinking_effort(
+                next_data.get("default_thinking_effort")
+            )
+        if "model_pricing" in next_data:
+            next_data["model_pricing"] = _normalize_model_pricing(next_data.get("model_pricing"))
         self.data = next_data
         self._save()
         return self.get()

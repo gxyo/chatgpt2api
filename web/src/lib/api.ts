@@ -115,6 +115,12 @@ export type SettingsConfig = {
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
+  /** 生图请求实际发往官网的上游模型名。 */
+  default_upstream_model_name?: string;
+  /** 上游思考强度：auto / standard / extended / max。 */
+  default_thinking_effort?: string;
+  /** 模型单价表（每张图片，人民币）。0 表示免费；键缺失表示未定价。 */
+  model_pricing?: Record<string, string | number>;
   [key: string]: unknown;
 };
 
@@ -582,6 +588,16 @@ export type ImageStatsBreakdown = {
   policy_violation: number;
 };
 
+export type ImageStatsModelBreakdown = {
+  model: string;
+  /** 该模型成功生成的图片数（按返回的 urls 计）。 */
+  images: number;
+  /** 每张图片单价；null 表示未定价。0 表示免费。 */
+  price: number | null;
+  /** 按当前定价估算的收入（人民币）。 */
+  revenue: number;
+};
+
 export type ImageStatsResponse = {
   range: {
     start_date: string;
@@ -598,8 +614,16 @@ export type ImageStatsResponse = {
     policy_violation: number;
     success_rate: number;
     avg_duration_ms: number;
+    /** 成功生成的图片总数。 */
+    images: number;
+    /** 按当前定价估算的收入（人民币）。 */
+    revenue: number;
   };
+  /** 收入币种，目前固定为 CNY。 */
+  currency: string;
   by_mode: ImageStatsBreakdown[];
+  /** 按模型汇总的成功图片数与收入，含未定价模型（price 为 null）。 */
+  by_model: ImageStatsModelBreakdown[];
   series: ImageStatsPoint[];
   peak: ImageStatsPoint | null;
 };

@@ -172,6 +172,82 @@ class ConfigLoadingTests(unittest.TestCase):
 
             self.assertEqual(store.default_thinking_effort, "auto")
 
+    def test_model_pricing_defaults_to_empty_and_is_exposed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            self.assertEqual(store.model_pricing, {})
+            self.assertEqual(store.get()["model_pricing"], {})
+
+    def test_model_pricing_is_normalized_when_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            config = store.update({
+                "model_pricing": {
+                    " gpt-image-2 ": "0.5",
+                    "gpt-image-2.5": 0,      # 0 是合法的「免费」，必须保留
+                    "auto": "2.3456789",     # 四舍五入到 6 位
+                    "": 9,                   # 空模型名丢弃
+                    "negative": -1,          # 负数丢弃
+                    "non-number": "abc",     # 非法值丢弃
+                    "boolean": True,         # 布尔不是价格
+                    "infinite": "inf",       # 非有限值丢弃
+                    "nan": "nan",
+                },
+            })
+            saved = json.loads(config_file.read_text(encoding="utf-8"))
+
+            expected = {"gpt-image-2": 0.5, "gpt-image-2.5": 0.0, "auto": 2.345679}
+            self.assertEqual(config["model_pricing"], expected)
+            self.assertEqual(saved["model_pricing"], expected)
+            self.assertEqual(store.model_pricing, expected)
+
+    def test_non_dict_model_pricing_falls_back_to_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({
+                "auth-key": "test-auth",
+                "model_pricing": ["not", "a", "dict"],
+            }), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            self.assertEqual(store.model_pricing, {})
+
+            config = store.update({"model_pricing": "oops"})
+
+            self.assertEqual(config["model_pricing"], {})
+
+    def test_upstream_model_name_is_trimmed_and_empty_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            updated = store.update({"default_upstream_model_name": "  gpt-5-4  "})
+            self.assertEqual(updated["default_upstream_model_name"], "gpt-5-4")
+            self.assertEqual(store.get()["default_upstream_model_name"], "gpt-5-4")
+
+            blank = store.update({"default_upstream_model_name": "   "})
+            self.assertEqual(blank["default_upstream_model_name"], "gpt-5-5")
+
+    def test_default_thinking_effort_is_normalized_when_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            extended = store.update({"default_thinking_effort": " EXTENDED "})
+            self.assertEqual(extended["default_thinking_effort"], "extended")
+            self.assertEqual(store.get()["default_thinking_effort"], "extended")
+
+            fallback = store.update({"default_thinking_effort": "turbo"})
+            self.assertEqual(fallback["default_thinking_effort"], "auto")
+
 
 if __name__ == "__main__":
     unittest.main()

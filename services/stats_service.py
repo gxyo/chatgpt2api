@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from pathlib import Path
@@ -45,8 +46,10 @@ _STATUS_FAILED = LOG_STATUS_FAILED
 _STATUS_POLICY_VIOLATION = LOG_STATUS_POLICY_VIOLATION
 _STATUSES = (_STATUS_SUCCESS, _STATUS_FAILED, _STATUS_POLICY_VIOLATION)
 
-# 聚合快照的落盘格式版本。格式变了就换版本号，旧快照会被忽略并重建。
-SNAPSHOT_VERSION = 1
+# 聚合快照的落盘格式版本。格式变了就换版本号。
+# v2 起小时桶增加 images/models；v1 快照会被加载后做一次模型数据回填，不丢请求统计。
+SNAPSHOT_VERSION = 2
+CURRENCY = "CNY"
 # 两次落盘之间的最小间隔：统计每次查询都会刷新，不能每次都写盘。
 # 因为游标和聚合是一起写入的，崩溃时两者一起回退到上一个一致点，重放日志即可，不会重复计数。
 SNAPSHOT_INTERVAL_SECONDS = 30
@@ -70,6 +73,8 @@ def _empty_bucket() -> dict[str, Any]:
         "failed": 0,
         "policy_violation": 0,
         "duration_ms": 0,
+        "images": 0,
+        "models": {},
         "modes": {mode: _empty_mode_bucket() for mode in MODE_LABELS},
     }
 
@@ -78,11 +83,23 @@ def _restore_bucket(value: Any) -> dict[str, Any]:
     """把快照里读回来的桶重新整成内部结构，字段缺失或类型不对的按 0 处理。"""
     source = value if isinstance(value, dict) else {}
     bucket = _empty_bucket()
-    for key in ("requests", "success", "failed", "policy_violation", "duration_ms"):
+    for key in ("requests", "success", "failed", "policy_violation", "duration_ms", "images"):
         try:
             bucket[key] = max(0, int(source.get(key) or 0))
         except (TypeError, ValueError):
             bucket[key] = 0
+    models = source.get("models")
+    if isinstance(models, dict):
+        for model, count in models.items():
+            name = str(model or "").strip()
+            if not name:
+                continue
+            try:
+                normalized = max(0, int(count or 0))
+            except (TypeError, ValueError):
+                normalized = 0
+            if normalized:
+                bucket["models"][name] = normalized
     modes = source.get("modes")
     if isinstance(modes, dict):
         for mode, mode_value in modes.items():
@@ -96,13 +113,32 @@ def _restore_bucket(value: Any) -> dict[str, Any]:
     return bucket
 
 
-def _accumulate(bucket: dict[str, Any], *, mode: str, status: str, duration_ms: int) -> None:
+def _accumulate(
+    bucket: dict[str, Any], *, mode: str, status: str, duration_ms: int, model: str, images: int
+) -> None:
     bucket["requests"] += 1
     bucket[status] += 1
     bucket["duration_ms"] += duration_ms
     mode_bucket = bucket["modes"].setdefault(mode, _empty_mode_bucket())
     mode_bucket["requests"] += 1
     mode_bucket[status] += 1
+    if images <= 0:
+        return
+    bucket["images"] += images
+    if model:
+        bucket["models"][model] = bucket["models"].get(model, 0) + images
+
+
+def _parse_price(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        price = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(price) or price < 0:
+        return None
+    return price
 
 
 def _parse_duration(detail: dict[str, Any]) -> int:
@@ -112,8 +148,18 @@ def _parse_duration(detail: dict[str, Any]) -> int:
         return 0
 
 
-def _parse_image_event(raw_line: str) -> tuple[str, str, str, int] | None:
-    """把一行日志解析成 (小时键, 模式, 状态, 耗时毫秒)，不是生图调用则返回 None。"""
+def _parse_images(detail: dict[str, Any], status: str) -> int:
+    """成功返回的图片数按 detail.urls 计；失败/被拦截的请求就算带了 urls 也不计收入。"""
+    if status != _STATUS_SUCCESS:
+        return 0
+    urls = detail.get("urls")
+    if not isinstance(urls, list):
+        return 0
+    return sum(1 for url in urls if isinstance(url, str) and url.strip())
+
+
+def _parse_image_event(raw_line: str) -> tuple[str, str, str, int, str, int] | None:
+    """把一行日志解析成 (小时键, 模式, 状态, 耗时毫秒, 模型, 图片数)，不是生图调用则返回 None。"""
     if "/v1/images/" not in raw_line and "/api/image-tasks/" not in raw_line:
         return None
     try:
@@ -144,7 +190,8 @@ def _parse_image_event(raw_line: str) -> tuple[str, str, str, int] | None:
     hour_text = time_text[11:13]
     if not hour_text.isdigit() or int(hour_text) > 23:
         return None
-    return f"{time_text[:10]}T{hour_text}", mode, status, _parse_duration(detail)
+    model = str(detail.get("model") or "").strip()
+    return f"{time_text[:10]}T{hour_text}", mode, status, _parse_duration(detail), model, _parse_images(detail, status)
 
 
 def _merge_day(hours: dict[str, dict[str, Any]], day: str) -> dict[str, Any]:
@@ -157,6 +204,9 @@ def _merge_day(hours: dict[str, dict[str, Any]], day: str) -> dict[str, Any]:
         for key in _STATUSES:
             merged[key] += bucket[key]
         merged["duration_ms"] += bucket["duration_ms"]
+        merged["images"] += bucket["images"]
+        for model, count in bucket["models"].items():
+            merged["models"][model] = merged["models"].get(model, 0) + count
         for mode, mode_bucket in bucket["modes"].items():
             target = merged["modes"].setdefault(mode, _empty_mode_bucket())
             for key in ("requests", *_STATUSES):
@@ -182,6 +232,9 @@ def _merge_totals(totals: dict[str, Any], bucket: dict[str, Any]) -> None:
     for key in _STATUSES:
         totals[key] += bucket[key]
     totals["duration_ms"] += bucket["duration_ms"]
+    totals["images"] += bucket["images"]
+    for model, count in bucket["models"].items():
+        totals["models"][model] = totals["models"].get(model, 0) + count
     for mode, mode_bucket in bucket["modes"].items():
         target = totals["modes"].setdefault(mode, _empty_mode_bucket())
         for key in ("requests", *_STATUSES):
@@ -220,6 +273,7 @@ class ImageStatsService:
         self._offset = 0
         self._anchor = b""
         self._last_save = 0.0
+        self._needs_model_backfill = False
 
     def _load_snapshot(self) -> None:
         """载入上次落盘的聚合与游标。读不到或格式对不上就从零开始重建。"""
@@ -227,7 +281,11 @@ class ImageStatsService:
             snapshot = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        if not isinstance(snapshot, dict) or snapshot.get("version") != SNAPSHOT_VERSION:
+        if not isinstance(snapshot, dict):
+            return
+        version = snapshot.get("version")
+        # v1 快照没有 images/models，加载后从现存日志回填一次模型数据；v2 直接使用。
+        if version not in (1, SNAPSHOT_VERSION):
             return
         hours = snapshot.get("hours")
         if not isinstance(hours, dict):
@@ -248,6 +306,7 @@ class ImageStatsService:
         # 载入时游标与聚合是对齐的，不必马上回写。
         self._hours = restored
         self._last_save = time.monotonic()
+        self._needs_model_backfill = version == 1
 
     def _save_snapshot(self, *, force: bool = False) -> None:
         """把聚合和游标一起原子落盘。写失败只影响下次重启，不该让查询出错。"""
@@ -285,7 +344,7 @@ class ImageStatsService:
         except OSError:
             return False
 
-    def _resync(self) -> None:
+    def _resync(self) -> bool:
         """文件被改写后重新对齐游标，已计入的聚合不回退。
 
         按时间清理日志只是把最老的一段前缀删掉，保留下来的尾部字节与上次读到的完全一致，
@@ -293,20 +352,70 @@ class ImageStatsService:
         逐条删除（中间挖洞）会让后面的字节整体前移，锚点也随之移动，同样能找回来。
         锚点确实找不到时（内容被大改）只能退到最后一个完整行：宁可漏掉少数尚未计入的行，
         也不重复计数。
+
+        返回是否靠锚点找回游标；只有找回时，[0, offset) 才能确定仍是已计入的数据。
         """
         try:
             data = self.path.read_bytes()
         except OSError:
-            return
+            return False
         if self._anchor:
             # 取最靠后的一处：万一这段字节在文件里出现过多次，靠后的那个才不会重复计数。
             found = data.rfind(self._anchor)
             if found >= 0:
                 self._offset = found + len(self._anchor)
-                return
+                return True
         cut = data.rfind(b"\n")
         self._offset = cut + 1 if cut >= 0 else 0
         self._anchor = data[max(0, self._offset - self._ANCHOR_BYTES) : self._offset]
+        return False
+
+    def _migrate_model_stats(self) -> None:
+        """把 v1 快照缺的 images/models 从现存日志里补回来。
+
+        只扫描快照游标之前、确定已经计入过请求计数的字节，并且只写模型字段，
+        绝不重算 requests 等计数。锚点找不回时宁可不补，也不虚增收入。
+        """
+        if not self._needs_model_backfill:
+            return
+        try:
+            self.path.stat()
+        except FileNotFoundError:
+            # 日志已经被清理干净，没有可回填的数据了。
+            self._needs_model_backfill = False
+            self._save_snapshot(force=True)
+            return
+        except OSError:
+            return
+        if not self._anchor_matches() and not self._resync():
+            # 内容被大改，无法确认 [0, offset) 与旧聚合的对应关系，放弃补模型数据。
+            self._needs_model_backfill = False
+            self._save_snapshot(force=True)
+            return
+        for bucket in self._hours.values():
+            bucket["images"] = 0
+            bucket["models"] = {}
+        try:
+            with self.path.open("rb") as handle:
+                while handle.tell() < self._offset:
+                    raw_line = handle.readline()
+                    if not raw_line or handle.tell() > self._offset:
+                        break
+                    event = _parse_image_event(raw_line.decode("utf-8", errors="replace"))
+                    if event is None:
+                        continue
+                    hour_key, _mode, status, _duration_ms, model, images = event
+                    bucket = self._hours.get(hour_key)
+                    if bucket is None or status != _STATUS_SUCCESS or images <= 0:
+                        continue
+                    bucket["images"] += images
+                    if model:
+                        bucket["models"][model] = bucket["models"].get(model, 0) + images
+        except OSError:
+            # 读日志失败：保持待迁移状态，下次查询再试。
+            return
+        self._needs_model_backfill = False
+        self._save_snapshot(force=True)
 
     def _refresh(self) -> None:
         """把新追加的日志并进聚合结果；文件被改写时只重新对齐游标，不重建聚合。"""
@@ -342,16 +451,26 @@ class ImageStatsService:
             event = _parse_image_event(raw_line)
             if event is None:
                 continue
-            hour_key, mode, status, duration_ms = event
+            hour_key, mode, status, duration_ms, model, images = event
             bucket = self._hours.setdefault(hour_key, _empty_bucket())
-            _accumulate(bucket, mode=mode, status=status, duration_ms=duration_ms)
+            _accumulate(
+                bucket, mode=mode, status=status, duration_ms=duration_ms, model=model, images=images
+            )
 
-    def summary(self, start_date: str = "", end_date: str = "", scope: str = "") -> dict[str, Any]:
+    def summary(
+        self,
+        start_date: str = "",
+        end_date: str = "",
+        scope: str = "",
+        pricing: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
         scope = SCOPE_ALL if (scope or "").strip().lower() == SCOPE_ALL else SCOPE_RANGE
 
         # 汇总全程持锁：既避免并发查询各自重扫一遍，也避免读到正被 _consume 改写的桶。
         # scope=all 的起点要读聚合，所以区间归一化也一并放进锁里。
         with self._lock:
+            # v1 快照迁移必须在消费新日志之前完成：回填只扫描尚未被 _refresh 推进的游标区间。
+            self._migrate_model_stats()
             self._refresh()
             if scope == SCOPE_ALL:
                 # 全部：从聚合里最早的一天算到今天。聚合只增不减，所以这里给的是「有记录以来的全部」，
@@ -404,6 +523,21 @@ class ImageStatsService:
             }
             for mode, label in MODE_LABELS.items()
         ]
+        prices = pricing or {}
+        by_model: list[dict[str, Any]] = []
+        for model, images in totals["models"].items():
+            if images <= 0:
+                continue
+            price = _parse_price(prices.get(model))
+            revenue = round(images * price, 2) if price is not None else 0.0
+            by_model.append({
+                "model": model,
+                "images": images,
+                "price": price,
+                "revenue": revenue,
+            })
+        by_model.sort(key=lambda item: (-item["revenue"], -item["images"], item["model"]))
+        revenue = round(sum(item["revenue"] for item in by_model), 2)
 
         return {
             "range": {
@@ -420,8 +554,12 @@ class ImageStatsService:
                 "policy_violation": totals["policy_violation"],
                 "success_rate": (totals["success"] / rate_base) if rate_base else 0.0,
                 "avg_duration_ms": int(totals["duration_ms"] / requests) if requests else 0,
+                "images": totals["images"],
+                "revenue": revenue,
             },
+            "currency": CURRENCY,
             "by_mode": by_mode,
+            "by_model": by_model,
             "series": series,
             "peak": peak,
         }
@@ -431,7 +569,10 @@ image_stats_service = ImageStatsService(log_service.path)
 
 
 def build_image_stats(start_date: str = "", end_date: str = "", scope: str = "") -> dict[str, Any]:
-    return image_stats_service.summary(start_date, end_date, scope)
+    # 延迟导入：统计模块的解析逻辑要能在没有配置（甚至没有 auth-key）的测试里独立使用。
+    from services.config import config
+
+    return image_stats_service.summary(start_date, end_date, scope, pricing=config.model_pricing)
 
 
 __all__ = [

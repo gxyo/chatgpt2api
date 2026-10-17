@@ -8,11 +8,13 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 
 import { ApiDocsCard } from "./components/api-docs-card";
 import { ConfigCard } from "./components/config-card";
+import { ModelPricingCard } from "./components/model-pricing-card";
 import { SettingsHeader } from "./components/settings-header";
 import { UserKeysCard } from "./components/user-keys-card";
 import { useSettingsStore } from "./store";
 
 const settingsTabs = [
+  { value: "model-pricing", title: "模型与定价设置" },
   { value: "basic", title: "基础配置" },
   { value: "keys", title: "用户密钥" },
   { value: "api-docs", title: "接口接入" },
@@ -38,7 +40,7 @@ function SettingsPageContent() {
     <>
       <SettingsDataController />
       <SettingsHeader />
-      <Tabs defaultValue="basic" className="space-y-4">
+      <Tabs defaultValue="model-pricing" className="space-y-4">
         <div className="sticky top-[4.5rem] z-20 overflow-x-auto rounded-xl border border-white/80 bg-white/90 px-3 py-2 shadow-sm backdrop-blur lg:top-3">
           <TabsList variant="line" className="min-w-max justify-start">
             {settingsTabs.map((tab) => (
@@ -48,6 +50,9 @@ function SettingsPageContent() {
             ))}
           </TabsList>
         </div>
+        <TabsContent value="model-pricing">
+          <ModelPricingCard />
+        </TabsContent>
         <TabsContent value="basic">
           <ConfigCard />
         </TabsContent>

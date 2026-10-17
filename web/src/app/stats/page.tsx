@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
@@ -22,6 +23,7 @@ const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
 const POLICY_DOT = "bg-[#d97706] dark:bg-[#f0a13a]";
 const NEUTRAL_DOT = "bg-neutral-300 dark:bg-neutral-600";
 const LIVE_DOT = "bg-[#2fa96b] dark:bg-[#3fc07f]";
+const REVENUE_DOT = "bg-[#c08a2e] dark:bg-[#e0ab4c]";
 
 // days=0 表示不按天数取区间，交给后端按已有记录算「全部」。
 const PRESETS = [
@@ -42,6 +44,12 @@ function formatDuration(value: number) {
     return "-";
   }
   return value >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value} ms`;
+}
+
+const currencyFormatter = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY" });
+
+function formatCurrency(value: number) {
+  return currencyFormatter.format(Number.isFinite(value) ? value : 0);
 }
 
 function StatsContent() {
@@ -115,6 +123,7 @@ function StatsContent() {
       ? `${range.start_date} 全天 · 按小时`
       : `${range.start_date} 至 ${range.end_date} · 按天`
     : "";
+  const byModel = data?.by_model ?? [];
   return (
     <section className="space-y-5">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
@@ -180,7 +189,7 @@ function StatsContent() {
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           label="请求数"
           value={String(totals?.requests ?? 0)}
@@ -205,11 +214,20 @@ function StatsContent() {
           caption={`占请求数 ${policyRate} · 不计入失败`}
           tone={POLICY_DOT}
         />
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <StatTile
           label="成功率"
           value={totals ? formatRate(totals.success_rate) : "-"}
           caption={`平均耗时 ${formatDuration(totals?.avg_duration_ms ?? 0)}`}
           tone={NEUTRAL_DOT}
+        />
+        <StatTile
+          label="收入"
+          value={formatCurrency(totals?.revenue ?? 0)}
+          caption={`成功生成 ${totals?.images ?? 0} 张 · 按当前定价估算`}
+          tone={REVENUE_DOT}
         />
         <StatTile
           label="当前请求数"
@@ -230,6 +248,75 @@ function StatsContent() {
           }
         />
       </div>
+
+      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+        <CardContent className="space-y-4 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="font-semibold text-neutral-900 dark:text-neutral-50">模型收入明细</div>
+              <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
+                按当前定价估算 · {rangeLabel || "全部时间"}
+              </div>
+            </div>
+            <Badge variant="info" className="rounded-md px-2.5 py-1 tabular-nums">
+              合计 {formatCurrency(totals?.revenue ?? 0)}
+            </Badge>
+          </div>
+
+          {byModel.length === 0 ? (
+            <div className="flex h-32 flex-col items-center justify-center gap-1 text-sm text-neutral-400">
+              <span>该时间段没有成功生成的图片</span>
+              <Link
+                href="/settings"
+                className="text-xs text-neutral-500 underline-offset-4 transition hover:text-neutral-800 hover:underline dark:text-neutral-400 dark:hover:text-neutral-100"
+              >
+                去设置模型定价
+              </Link>
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-neutral-200 dark:border-white/10">
+              <div className="grid grid-cols-[minmax(0,1fr)_4rem_5.5rem] items-center gap-3 border-b border-neutral-100 bg-neutral-50 px-4 py-2 text-xs font-medium text-neutral-500 sm:grid-cols-[minmax(0,1fr)_5rem_6rem_6rem] dark:border-white/10 dark:bg-white/5 dark:text-neutral-400">
+                <span>模型</span>
+                <span className="text-right">生成图片</span>
+                <span className="hidden text-right sm:block">单价</span>
+                <span className="text-right">收入</span>
+              </div>
+              <div className="divide-y divide-neutral-100 dark:divide-white/10">
+                {byModel.map((item) => (
+                  <div
+                    key={item.model}
+                    className="grid grid-cols-[minmax(0,1fr)_4rem_5.5rem] items-center gap-3 px-4 py-2.5 text-sm sm:grid-cols-[minmax(0,1fr)_5rem_6rem_6rem]"
+                  >
+                    <span className="truncate font-mono text-xs text-neutral-800 dark:text-neutral-200" title={item.model}>
+                      {item.model}
+                    </span>
+                    <span className="text-right tabular-nums text-neutral-700 dark:text-neutral-300">{item.images}</span>
+                    <span
+                      className={cn(
+                        "hidden text-right tabular-nums sm:block",
+                        item.price === null
+                          ? "text-xs text-amber-600 dark:text-amber-400"
+                          : "text-neutral-600 dark:text-neutral-400",
+                      )}
+                    >
+                      {item.price === null ? "未定价" : item.price === 0 ? "免费" : formatCurrency(item.price)}
+                    </span>
+                    <span className="text-right font-medium tabular-nums text-neutral-900 dark:text-neutral-50">
+                      {formatCurrency(item.revenue)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_4rem_5.5rem] items-center gap-3 border-t border-neutral-200 bg-neutral-50 px-4 py-2.5 text-sm font-semibold text-neutral-900 sm:grid-cols-[minmax(0,1fr)_5rem_6rem_6rem] dark:border-white/10 dark:bg-white/5 dark:text-neutral-50">
+                <span>合计</span>
+                <span className="text-right tabular-nums">{totals?.images ?? 0}</span>
+                <span className="hidden sm:block" />
+                <span className="text-right tabular-nums">{formatCurrency(totals?.revenue ?? 0)}</span>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="space-y-4 p-5">
