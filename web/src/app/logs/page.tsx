@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Check, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -337,6 +337,60 @@ function getStatusVariant(item: SystemLog) {
   if (status === "failed") return "danger";
   if (status === "policy_violation") return "warning";
   return "success";
+}
+
+/**
+ * 提示词、错误堆栈这类长文本：默认折到 9 行左右 + 底部渐隐，点「展开全文」看完整内容。
+ * 只有真的超出高度才显示折叠按钮，短文本不受影响。
+ */
+function LongTextField({ label, value }: { label: string; value: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const textRef = useRef<HTMLParagraphElement | null>(null);
+
+  useEffect(() => {
+    const element = textRef.current;
+    if (!element) {
+      return;
+    }
+    // 展开后 clientHeight 会跟着内容变高，量不出溢出，所以只在收起状态测量；
+    // 展开期间保留之前的判断，按钮不会自己消失。
+    if (expanded) {
+      return;
+    }
+    setOverflowing(element.scrollHeight > element.clientHeight + 1);
+  }, [value, expanded]);
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs text-neutral-400">{label}</div>
+        {overflowing || expanded ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((current) => !current)}
+            className="shrink-0 text-xs font-medium text-neutral-500 transition-colors hover:text-neutral-900"
+          >
+            {expanded ? "收起" : "展开全文"}
+          </button>
+        ) : null}
+      </div>
+      <div className="relative overflow-hidden rounded-lg bg-neutral-50 ring-1 ring-neutral-100 ring-inset">
+        <p
+          ref={textRef}
+          className={`px-3 py-2.5 text-[13px] leading-6 break-words whitespace-pre-wrap text-neutral-700 ${
+            expanded ? "" : "max-h-[216px] overflow-hidden"
+          }`}
+        >
+          {value}
+        </p>
+        {!expanded && overflowing ? (
+          // 渐隐提示下面还有内容，而不是生硬地截断。
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-neutral-50 via-neutral-50/85 to-transparent" />
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 function LogsContent() {
@@ -846,13 +900,14 @@ function LogsContent() {
                     <div className="grid grid-cols-1 gap-y-3 rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-600">
                       {detailFields.map(([key, value]) => {
                         const label = detailLabels[key] || key;
-                        // 提示词/错误信息是长文本，左对齐，右对齐会挤成难读的一团。
+                        // 提示词/错误信息是长文本，单独排版并支持折叠，避免把左列撑得读不下去。
                         if (key === "request_text" || key === "error") {
                           return (
-                            <div key={key} className="space-y-1">
-                              <div className="text-xs text-neutral-400">{label}</div>
-                              <p className="leading-6 break-words whitespace-pre-wrap text-neutral-700">{String(value)}</p>
-                            </div>
+                            <LongTextField
+                              key={`${detailLog?.id}-${key}`}
+                              label={label}
+                              value={String(value)}
+                            />
                           );
                         }
                         return (
