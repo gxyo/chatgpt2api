@@ -72,7 +72,7 @@ export function ModelPricingCard() {
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
       <CardContent className="space-y-5 p-6 pb-24 md:pr-28 md:pb-6">
         <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm leading-6 text-neutral-600">
-          默认上游模型决定生图请求实际发往官网的模型；模型定价按「每张成功生成的图片」计费，用于统计页估算收入。
+          默认上游模型决定生图请求实际发往官网的模型；模型定价按「每张成功生成的图片」计费（一次请求返回多张图按张数计费，失败与安全拦截不计费），用于统计页估算收入。
         </div>
 
         <div className="grid gap-4 md:grid-cols-2">

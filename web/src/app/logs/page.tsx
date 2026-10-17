@@ -200,15 +200,16 @@ function isAccountRetry(item: SystemLog) {
   );
 }
 
-/** 重试列的小卡片：是=琥珀色，否=绿色，避免灰卡片在表格里显得脏。 */
-function RetryCard({ retried }: { retried: boolean }) {
+/** 重试列的小卡片：失败=红色（同一行的状态也是红的），否则是=琥珀色、否=绿色。 */
+function RetryCard({ retried, failed }: { retried: boolean; failed: boolean }) {
+  const tone = failed
+    ? "border-red-200 bg-red-50 text-red-700"
+    : retried
+      ? "border-amber-200 bg-amber-50 text-amber-700"
+      : "border-emerald-200 bg-emerald-50 text-emerald-700";
   return (
     <span
-      className={`inline-flex w-14 items-center justify-center gap-1.5 rounded-lg border px-2 py-1 text-xs font-medium shadow-sm ${
-        retried
-          ? "border-amber-200 bg-amber-50 text-amber-700"
-          : "border-emerald-200 bg-emerald-50 text-emerald-700"
-      }`}
+      className={`inline-flex w-14 items-center justify-center gap-1.5 rounded-lg border px-2 py-1 text-xs font-medium shadow-sm ${tone}`}
     >
       {retried ? <RotateCcw className="size-3.5" /> : <Check className="size-3.5" />}
       {retried ? "是" : "否"}
@@ -665,7 +666,10 @@ function LogsContent() {
                       ) : null}
                       {isCallLog ? (
                         <TableCell>
-                          <RetryCard retried={isAccountRetry(item)} />
+                          <RetryCard
+                            retried={isAccountRetry(item)}
+                            failed={item.detail?.status === "failed"}
+                          />
                         </TableCell>
                       ) : null}
                       {isCallLog ? (

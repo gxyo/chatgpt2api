@@ -119,7 +119,7 @@ export type SettingsConfig = {
   default_upstream_model_name?: string;
   /** 上游思考强度：auto / standard / extended / max。 */
   default_thinking_effort?: string;
-  /** 模型单价表（每张图片，人民币）。0 表示免费；键缺失表示未定价。 */
+  /** 模型单价表（每张成功生成的图片，人民币）。0 表示免费；键缺失表示未定价。 */
   model_pricing?: Record<string, string | number>;
   /** 设置页定价表中被手动删除/隐藏的模型，只影响列表展示。 */
   hidden_pricing_models?: string[];
@@ -577,6 +577,8 @@ export type ImageStatsPoint = {
   requests: number;
   success: number;
   failed: number;
+  /** 成功生成的图片数；注册统计复用这个类型时没有该字段。 */
+  images?: number;
   /** 被内容安全策略拦截的数量；注册统计复用这个类型时没有该字段。 */
   policy_violation?: number;
 };
@@ -588,15 +590,17 @@ export type ImageStatsBreakdown = {
   success: number;
   failed: number;
   policy_violation: number;
+  /** 该调用方式成功生成的图片数。 */
+  images: number;
 };
 
 export type ImageStatsModelBreakdown = {
   model: string;
-  /** 该模型成功生成的图片数（按返回的 urls 计）。 */
+  /** 该模型成功生成的图片数，也是计费单位。 */
   images: number;
   /** 当前配置的每张图片单价；null 表示未定价。0 表示免费。 */
   price: number | null;
-  /** 请求计费时累计的收入（人民币），不随之后的调价变化。 */
+  /** 按图片计费时累计的收入（人民币），不随之后的调价变化。 */
   revenue: number;
 };
 
@@ -618,7 +622,7 @@ export type ImageStatsResponse = {
     avg_duration_ms: number;
     /** 成功生成的图片总数。 */
     images: number;
-    /** 请求计费时累计的收入（人民币）。 */
+    /** 按图片计费时累计的收入（人民币）。 */
     revenue: number;
     /** 更早的、没有模型/图片记录的请求按成功次数估算的收入。 */
     legacy_revenue: number;

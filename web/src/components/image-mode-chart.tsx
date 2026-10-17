@@ -45,12 +45,12 @@ function barClass(mode: string) {
  * 表本身就是占比条的 table view，所以颜色从来不是唯一的信息通道。
  */
 export function ImageModeChart({ modes }: ImageModeChartProps) {
-  const total = modes.reduce((sum, item) => sum + item.requests, 0);
-  // 占比条只画有请求的方式：0 次的方式在表里保留一行，但不该在条上占一个零宽段。
-  const segments = modes.filter((item) => item.requests > 0);
+  const total = modes.reduce((sum, item) => sum + item.images, 0);
+  // 占比条只画有成功图片的方式：0 张的方式在表里保留一行，但不该在条上占一个零宽段。
+  const segments = modes.filter((item) => item.images > 0);
 
   if (total === 0) {
-    return <div className="py-10 text-center text-sm text-neutral-400">该时间段没有生图请求</div>;
+    return <div className="py-10 text-center text-sm text-neutral-400">该时间段没有成功生成的图片</div>;
   }
 
   return (
@@ -61,10 +61,10 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
             {/* 2px 的表面色缝隙分开两段，不额外描边。 */}
             {index > 0 ? <div className="h-full w-0.5 shrink-0 bg-white" /> : null}
             <div
-              // flexGrow 按请求数分配，flexBasis 归零，缝隙的宽度就不会让总长溢出。
-              style={{ flexGrow: item.requests, flexBasis: 0 }}
+              // flexGrow 按成功图片数分配，flexBasis 归零，缝隙的宽度就不会让总长溢出。
+              style={{ flexGrow: item.images, flexBasis: 0 }}
               className={cn("h-full", barClass(item.mode))}
-              title={`${item.label}：${formatCount(item.requests)} 次 · 占比 ${formatRate(item.requests / total)}`}
+              title={`${item.label}：${formatCount(item.images)} 张 · 占比 ${formatRate(item.images / total)}`}
             />
           </Fragment>
         ))}
@@ -76,10 +76,10 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
           <span key={item.mode} className="inline-flex items-center gap-1.5">
             <span className={cn("size-2.5 rounded-full", barClass(item.mode))} />
             <span className="text-neutral-600 dark:text-neutral-300">{item.label}</span>
-            <span className="tabular-nums">{formatRate(item.requests / total)}</span>
+            <span className="tabular-nums">{formatRate(item.images / total)}</span>
           </span>
         ))}
-        <span className="ml-auto tabular-nums">共 {formatCount(total)} 次</span>
+        <span className="ml-auto tabular-nums">共 {formatCount(total)} 张</span>
       </div>
 
       <div className="overflow-x-auto">
@@ -90,7 +90,7 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
                 调用方式
               </th>
               <th scope="col" className="px-3 py-2 text-right font-medium">
-                请求数
+                成功图片
               </th>
               <th scope="col" className="px-3 py-2 text-right font-medium">
                 占比
@@ -102,9 +102,11 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
           </thead>
           <tbody>
             {modes.map((item) => {
-              // 成功率只按成功 + 失败算，安全策略拦截不参与分母。
-              const rateBase = item.success + item.failed;
-              const rate = rateBase > 0 ? item.success / rateBase : 0;
+              // 成功率按成功图片 + 失败算，安全策略拦截不参与分母；
+              // 没有图片记录的旧数据回落到成功请求数。
+              const successImages = item.images > 0 ? item.images : item.success;
+              const rateBase = successImages + item.failed;
+              const rate = rateBase > 0 ? successImages / rateBase : 0;
               return (
                 <tr
                   key={item.mode}
@@ -117,10 +119,10 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
                     </span>
                   </td>
                   <td className="px-3 py-3 text-right font-semibold tabular-nums text-neutral-900 dark:text-neutral-50">
-                    {formatCount(item.requests)}
+                    {formatCount(item.images)}
                   </td>
                   <td className="px-3 py-3 text-right tabular-nums text-neutral-500 dark:text-neutral-400">
-                    {formatRate(item.requests / total)}
+                    {formatRate(item.images / total)}
                   </td>
                   <td className="px-3 py-3">
                     <div className="flex items-center gap-2.5">

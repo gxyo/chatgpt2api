@@ -17,7 +17,6 @@ import { getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
-const REQUESTS_DOT = "bg-[#2a78d6] dark:bg-[#3987e5]";
 const SUCCESS_DOT = "bg-[#2a78d6]/50 dark:bg-[#3987e5]/50";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
 const POLICY_DOT = "bg-[#d97706] dark:bg-[#f0a13a]";
@@ -116,7 +115,6 @@ function StatsContent() {
   };
 
   const totals = data?.totals;
-  const policyRate = totals && totals.requests > 0 ? formatRate(totals.policy_violation / totals.requests) : "-";
   const range = data?.range;
   const granularity = range?.granularity ?? "hour";
   const rangeLabel = range
@@ -132,9 +130,9 @@ function StatsContent() {
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div className="space-y-1">
           <div className="text-xs font-semibold tracking-[0.18em] text-neutral-500 uppercase">Statistics</div>
-          <h1 className="text-2xl font-semibold tracking-tight">请求统计</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">图片统计</h1>
           <p className="text-sm text-neutral-500 dark:text-neutral-400">
-            按北京时间统计生图请求量，默认展示今天（{today}）。
+            按北京时间统计成功生成与失败的图片数，默认展示今天（{today}）。
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -194,15 +192,9 @@ function StatsContent() {
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
-          label="请求数"
-          value={String(totals?.requests ?? 0)}
+          label="成功图片"
+          value={String(totals?.images ?? 0)}
           caption={rangeLabel || " "}
-          tone={REQUESTS_DOT}
-        />
-        <StatTile
-          label="生成成功"
-          value={String(totals?.success ?? 0)}
-          caption="已成功返回图片"
           tone={SUCCESS_DOT}
         />
         <StatTile
@@ -214,28 +206,28 @@ function StatsContent() {
         <StatTile
           label="违反安全策略"
           value={String(totals?.policy_violation ?? 0)}
-          caption={`占请求数 ${policyRate} · 不计入失败`}
+          caption="被安全策略拦截 · 不计费"
           tone={POLICY_DOT}
         />
-      </div>
-
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile
           label="成功率"
           value={totals ? formatRate(totals.success_rate) : "-"}
-          caption={`平均耗时 ${formatDuration(totals?.avg_duration_ms ?? 0)}`}
+          caption={`按成功图片 /（成功图片 + 失败） · 平均耗时 ${formatDuration(totals?.avg_duration_ms ?? 0)}`}
           tone={NEUTRAL_DOT}
         />
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <StatTile
           label="收入"
           value={formatCurrency(totals?.revenue ?? 0)}
-          caption={`成功生成 ${totals?.images ?? 0} 张 · 按计费时单价累计`}
+          caption={`成功图片 ${totals?.images ?? 0} 张 · 按计费时单价累计`}
           tone={REVENUE_DOT}
         />
         <StatTile
           label="总收入"
           value={formatCurrency(data?.lifetime.revenue ?? 0)}
-          caption={`全部记录 ${data?.lifetime.images ?? 0} 张 · 含历史请求，不随筛选变化`}
+          caption={`全部记录 ${data?.lifetime.images ?? 0} 张成功图片 · 含历史请求，不随筛选变化`}
           tone={LIFETIME_DOT}
         />
         <StatTile
@@ -262,12 +254,13 @@ function StatsContent() {
         <CardContent className="space-y-4 p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="font-semibold text-neutral-900 dark:text-neutral-50">请求量波形</div>
+              <div className="font-semibold text-neutral-900 dark:text-neutral-50">成功图片波形</div>
               <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">{rangeLabel}</div>
             </div>
             {data?.peak ? (
               <Badge variant="info" className="rounded-md px-2.5 py-1 tabular-nums">
-                峰值 {data.peak.requests} · {data.peak.full_label}
+                峰值 {(data.peak.images ?? 0) > 0 ? data.peak.images : data.peak.requests} ·{" "}
+                {data.peak.full_label}
               </Badge>
             ) : null}
           </div>
@@ -278,10 +271,19 @@ function StatsContent() {
               加载中
             </div>
           ) : data && data.totals.requests > 0 ? (
-            <WaveChart series={data.series} granularity={granularity} />
+            <WaveChart
+              series={data.series}
+              granularity={granularity}
+              primary="images"
+              labels={{
+                primary: "成功图片",
+                secondary: "失败数",
+                ariaLabel: "成功图片与失败数波形图，按{axis}展示",
+              }}
+            />
           ) : (
             <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-neutral-400">
-              <span>该时间段没有生图请求</span>
+              <span>该时间段没有生图记录</span>
               <span className="text-xs text-neutral-400/80">换一个日期范围试试</span>
             </div>
           )}
@@ -369,7 +371,7 @@ function StatsContent() {
           <div>
             <div className="font-semibold text-neutral-900 dark:text-neutral-50">按调用方式</div>
             <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
-              条形长度 = 各方式占总请求的比重；成功率条满格为 100%
+              条形长度 = 各方式占成功图片的比重；成功率条满格为 100%
             </div>
           </div>
           <ImageModeChart modes={data?.by_mode ?? []} />

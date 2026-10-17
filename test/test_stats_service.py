@@ -58,9 +58,11 @@ class ImageStatsServiceTests(unittest.TestCase):
     def test_date_range_is_aggregated_by_day(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(tmp_dir, [
-                log_line("2026-09-27 10:00:00", "/v1/images/generations"),
+                log_line("2026-09-27 10:00:00", "/v1/images/generations",
+                         urls=["https://img/1"]),
                 log_line("2026-09-28 10:00:00", "/v1/images/generations", status="failed"),
-                log_line("2026-09-28 23:00:00", "/v1/images/generations"),
+                log_line("2026-09-28 23:00:00", "/v1/images/generations",
+                         urls=["https://img/2", "https://img/3"]),
             ])
 
             result = service.summary("2026-09-27", "2026-09-28")
@@ -69,15 +71,17 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(result["range"]["days"], 2)
         self.assertEqual([point["label"] for point in result["series"]], ["09-27", "09-28"])
         self.assertEqual([point["requests"] for point in result["series"]], [1, 2])
+        self.assertEqual([point["images"] for point in result["series"]], [1, 2])
         self.assertEqual(result["totals"]["requests"], 3)
         self.assertEqual(result["totals"]["failed"], 1)
         self.assertEqual(result["peak"]["full_label"], "2026-09-28")
-        self.assertEqual(result["peak"]["requests"], 2)
+        self.assertEqual(result["peak"]["images"], 2)
 
     def test_days_without_traffic_are_filled_with_zeroes(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(tmp_dir, [
-                log_line("2026-09-27 10:00:00", "/v1/images/generations"),
+                log_line("2026-09-27 10:00:00", "/v1/images/generations",
+                         urls=["https://img/1"]),
             ])
 
             result = service.summary("2026-09-27", "2026-09-30")
@@ -102,8 +106,8 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(result["totals"]["success"], 1)
         self.assertEqual(result["totals"]["failed"], 1)
         self.assertEqual(result["by_mode"], [
-            {"mode": "generate", "label": "文生图", "requests": 2, "success": 1, "failed": 1, "policy_violation": 0},
-            {"mode": "edit", "label": "图生图", "requests": 0, "success": 0, "failed": 0, "policy_violation": 0},
+            {"mode": "generate", "label": "文生图", "requests": 2, "success": 1, "failed": 1, "policy_violation": 0, "images": 0},
+            {"mode": "edit", "label": "图生图", "requests": 0, "success": 0, "failed": 0, "policy_violation": 0, "images": 0},
         ])
 
     def test_policy_violations_are_counted_separately_from_failures(self):
@@ -628,8 +632,8 @@ class ModelRevenueTests(unittest.TestCase):
 
         self.assertIsNone(result["by_model"][0]["price"])
 
-    def test_image_urls_are_deduplicated_before_counting_is_not_required(self):
-        """urls 里重复的地址仍按数组长度计——日志侧已经去过重，这里只信任长度。"""
+    def test_image_urls_are_counted_by_length(self):
+        """多图请求按返回的 urls 数量计费；日志侧已经去过重，这里只信任长度。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(tmp_dir, [
                 log_line("2026-09-28 10:00:00", "/v1/images/generations",
@@ -642,6 +646,12 @@ class ModelRevenueTests(unittest.TestCase):
         self.assertEqual(result["totals"]["revenue"], 2.0)
 
 
+def strip_mode_images(snapshot: dict) -> None:
+    for bucket in snapshot["hours"].values():
+        for mode_bucket in (bucket.get("modes") or {}).values():
+            mode_bucket.pop("images", None)
+
+
 def downgrade_snapshot_to_v1(snapshot_path: Path) -> None:
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     snapshot["version"] = 1
@@ -651,6 +661,7 @@ def downgrade_snapshot_to_v1(snapshot_path: Path) -> None:
         bucket.pop("revenue", None)
         bucket.pop("models_revenue", None)
         bucket.pop("legacy_success", None)
+    strip_mode_images(snapshot)
     snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
 
 
@@ -661,6 +672,15 @@ def downgrade_snapshot_to_v2(snapshot_path: Path) -> None:
         bucket.pop("revenue", None)
         bucket.pop("models_revenue", None)
         bucket.pop("legacy_success", None)
+    strip_mode_images(snapshot)
+    snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+
+def downgrade_snapshot_to_v3(snapshot_path: Path) -> None:
+    """模拟旧版快照：调用方式桶还没有 images，收入已经是按图片计的冻结值。"""
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["version"] = 3
+    strip_mode_images(snapshot)
     snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
 
 
@@ -774,7 +794,7 @@ class SnapshotModelMigrationTests(unittest.TestCase):
 class SnapshotRevenueBootstrapTests(unittest.TestCase):
     """v2 快照没有收入：升级时按迁移这一刻的定价补一次，之后冻结。"""
 
-    def test_v2_snapshot_bills_existing_images_at_migration_prices(self):
+    def test_v2_snapshot_bills_existing_successes_at_migration_prices(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "logs.jsonl"
             path.write_text(log_line(
@@ -792,6 +812,7 @@ class SnapshotRevenueBootstrapTests(unittest.TestCase):
             snapshot_version = json.loads(snapshot_path.read_text(encoding="utf-8"))["version"]
 
         self.assertEqual(first["totals"]["images"], 2)
+        self.assertEqual(first["totals"]["success"], 1)
         self.assertEqual(first["totals"]["revenue"], 1.5)
         self.assertEqual(first["totals"]["legacy_revenue"], 0)
         self.assertEqual(first["by_model"], [
@@ -855,6 +876,40 @@ class SnapshotRevenueBootstrapTests(unittest.TestCase):
         self.assertEqual(result["totals"]["revenue"], 2)
         self.assertEqual(result["by_model"][0]["revenue"], 2)
 
+    def test_v3_snapshot_backfills_mode_images_without_rebilling(self):
+        """v3 快照只有分桶图片数：升级时按成功请求占比分摊到各调用方式，收入保持冻结。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text("\n".join([
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1", "https://img/2"]),
+                log_line("2026-09-28 10:05:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/3"]),
+                log_line("2026-09-28 10:10:00", "/v1/images/edits",
+                         model="gpt-image-2", urls=["https://img/4"]),
+            ]) + "\n", encoding="utf-8")
+            snapshot_path = Path(tmp_dir) / "image_stats.json"
+            ImageStatsService(path).summary(
+                "2026-09-28", "2026-09-28", pricing={"gpt-image-2": 1},
+            )
+            downgrade_snapshot_to_v3(snapshot_path)
+
+            # 调价后重启：收入是冻结的，不跟着重算；只补调用方式的图片数。
+            result = ImageStatsService(path).summary(
+                "2026-09-28", "2026-09-28", pricing={"gpt-image-2": 5},
+            )
+            snapshot_version = json.loads(snapshot_path.read_text(encoding="utf-8"))["version"]
+            modes = {
+                row["mode"]: row for row in result["by_mode"]
+            }
+
+        self.assertEqual(result["totals"]["images"], 4)
+        self.assertEqual(result["totals"]["revenue"], 4.0)
+        self.assertEqual(modes["generate"]["images"], 3)
+        self.assertEqual(modes["edit"]["images"], 1)
+        self.assertEqual(sum(row["images"] for row in modes.values()), 4)
+        self.assertEqual(snapshot_version, stats_service.SNAPSHOT_VERSION)
+
 
 class BuildImageStatsTests(unittest.TestCase):
     def test_build_image_stats_reads_pricing_from_config(self):
@@ -875,6 +930,7 @@ class BuildImageStatsTests(unittest.TestCase):
                 result = stats_service.build_image_stats("2026-09-28", "2026-09-28")
 
         self.assertEqual(result["totals"]["images"], 2)
+        self.assertEqual(result["totals"]["success"], 1)
         self.assertEqual(result["totals"]["revenue"], 3.0)
         self.assertEqual(result["by_model"][0]["price"], 1.5)
 

@@ -5,8 +5,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ImageStatsPoint } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-// 主线条画哪个字段。生图统计把它对准 requests（请求总数），注册统计对准 success（成功数）。
-type WaveChartPrimary = "requests" | "success";
+// 主线条画哪个字段。生图统计对准 images（成功图片数），注册统计对准 success（成功数）。
+type WaveChartPrimary = "requests" | "success" | "images";
 
 /**
  * 画法。选哪种由「这张图在讲什么」决定，不是由数据量决定：
@@ -135,12 +135,16 @@ export function WaveChart({
   const innerWidth = Math.max(0, width - PADDING.left - PADDING.right);
   const innerHeight = CHART_HEIGHT - PADDING.top - PADDING.bottom;
 
-  const primaryValue = (point: ImageStatsPoint) => point[primary];
+  // 注册统计复用本组件时没有 images 字段，回落到 success，保证旧接口也能画。
+  const primaryValue = (point: ImageStatsPoint) =>
+    primary === "images" ? (point.images ?? point.success) : point[primary];
 
   // 柱形按总数（成功 + 失败）定轴：堆叠起来的高度就是总数，只按 success 定轴的话
   // 失败多的桶会顶出画面，被 yAt 截断后各段长度就加不起来了。
   const scale = useMemo(
-    () => niceScale(Math.max(0, ...series.map((item) => (form === "bar" ? item.requests : item[primary])))),
+    () => niceScale(Math.max(0, ...series.map((item) => (form === "bar" ? item.requests : primaryValue(item))))),
+    // primaryValue 只依赖 primary；series 变化时重新算即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [series, primary, form],
   );
 
@@ -202,16 +206,17 @@ export function WaveChart({
   const peakIndex = useMemo(() => {
     let best = -1;
     series.forEach((point, index) => {
-      if (point[primary] > 0 && (best === -1 || point[primary] > series[best][primary])) {
+      if (primaryValue(point) > 0 && (best === -1 || primaryValue(point) > primaryValue(series[best]))) {
         best = index;
       }
     });
     return best;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [series, primary]);
 
   // 峰值标记的落点：柱形挂在整根柱顶（柱高是总数），折线落在主线上。
   const peakTop = (index: number) =>
-    yAt(form === "bar" ? series[index].requests : series[index][primary]);
+    yAt(form === "bar" ? series[index].requests : primaryValue(series[index]));
 
   const labelStep = Math.max(1, Math.ceil(pointCount / MAX_X_LABELS));
   const active = activeIndex === null ? null : series[activeIndex];
@@ -392,7 +397,7 @@ export function WaveChart({
               textAnchor="middle"
               className="fill-neutral-500 text-[11px] font-medium tabular-nums dark:fill-neutral-300"
             >
-              峰值 {series[peakIndex][primary]}
+              峰值 {primaryValue(series[peakIndex])}
             </text>
           </g>
         ) : null}
@@ -409,7 +414,7 @@ export function WaveChart({
             />
             <circle
               cx={activeX}
-              cy={yAt(active[primary])}
+              cy={yAt(primaryValue(active))}
               r={4.5}
               strokeWidth={2}
               className={cn(REQUESTS_FILL, "stroke-white dark:stroke-neutral-900")}
@@ -469,9 +474,9 @@ export function WaveChart({
                 <span className={cn("size-2 rounded-full", REQUESTS_DOT)} />
                 {labels.primary}
               </span>
-              <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">{active[primary]}</span>
+              <span className="font-semibold tabular-nums text-neutral-900 dark:text-neutral-100">{primaryValue(active)}</span>
             </div>
-            {/* 主线已经是成功数时不再重复列一行「成功」，改为给出总数。 */}
+            {/* 主线已经是成功数/成功图片数时不再重复列一行「成功」；请求数主线改列成功请求。 */}
             {primary === "requests" ? (
               <div className="flex items-center justify-between gap-4">
                 <span className="inline-flex items-center gap-1.5">
@@ -480,7 +485,7 @@ export function WaveChart({
                 </span>
                 <span className="tabular-nums">{active.success}</span>
               </div>
-            ) : (
+            ) : primary === "success" ? (
               <div className="flex items-center justify-between gap-4">
                 <span className="inline-flex items-center gap-1.5">
                   <span className={cn("size-2 rounded-full", REQUESTS_DOT, "opacity-50")} />
@@ -488,7 +493,7 @@ export function WaveChart({
                 </span>
                 <span className="tabular-nums">{active.requests}</span>
               </div>
-            )}
+            ) : null}
             <div className="flex items-center justify-between gap-4">
               <span className="inline-flex items-center gap-1.5">
                 <span className={cn("size-2 rounded-full", FAILED_DOT)} />
@@ -502,18 +507,18 @@ export function WaveChart({
                   <span className={cn("size-2 rounded-full", POLICY_DOT)} />
                   违反安全策略
                 </span>
-                <span className="tabular-nums">
-                  {active.policy_violation}
-                  {active.requests > 0 ? ` · 占请求 ${formatRate(active.policy_violation / active.requests)}` : ""}
-                </span>
+                <span className="tabular-nums">{active.policy_violation}</span>
               </div>
             ) : null}
             <div className="flex items-center justify-between gap-4 border-t border-neutral-100 pt-1 dark:border-white/10">
               <span>成功率</span>
               <span className="tabular-nums">
-                {active.success + active.failed
-                  ? formatRate(active.success / (active.success + active.failed))
-                  : "-"}
+                {(() => {
+                  const successImages = active.images ?? active.success;
+                  return successImages + active.failed
+                    ? formatRate(successImages / (successImages + active.failed))
+                    : "-";
+                })()}
               </span>
             </div>
           </div>
