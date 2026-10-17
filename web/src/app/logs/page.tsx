@@ -347,6 +347,8 @@ function LogsContent() {
   const [endDate, setEndDate] = useState("");
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  // 原始 JSON 默认收起：多数时候看上面的信息就够了，需要排查时再展开。
+  const [showDetailJson, setShowDetailJson] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
@@ -531,6 +533,7 @@ function LogsContent() {
 
   const openDetail = (item: SystemLog) => {
     setDetailLog(item);
+    setShowDetailJson(false);
     setDetailOpen(true);
   };
 
@@ -829,190 +832,222 @@ function LogsContent() {
         </CardContent>
       </Card>
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="flex h-[min(88vh,860px)] w-[min(92vw,920px)] flex-col overflow-hidden rounded-2xl p-0">
+        <DialogContent className="flex h-[min(90vh,900px)] w-[min(96vw,1400px)] flex-col overflow-hidden rounded-2xl p-0">
           <DialogHeader className="shrink-0 border-b border-neutral-100 px-6 py-5">
             <DialogTitle>日志详情</DialogTitle>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-6 py-5">
-            <div className="space-y-4">
-              <div className="grid gap-x-6 gap-y-3 rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-600 md:grid-cols-2">
-                {detailFields.map(([key, value]) => {
-                  const label = detailLabels[key] || key;
-                  // 提示词/错误信息是长文本，占满整行、左对齐，右对齐会挤成难读的一团。
-                  if (key === "request_text" || key === "error") {
-                    return (
-                      <div key={key} className="space-y-1 md:col-span-2">
-                        <div className="text-xs text-neutral-400">{label}</div>
-                        <p className="leading-6 break-words whitespace-pre-wrap text-neutral-700">{String(value)}</p>
-                      </div>
-                    );
-                  }
-                  return (
-                    <div key={key} className="flex min-w-0 items-start justify-between gap-4">
-                      {/* shrink-0 + nowrap：格子变窄时标签不应该被压成竖排的单字。 */}
-                      <span className="shrink-0 whitespace-nowrap text-neutral-400">{label}</span>
-                      <span className="min-w-0 text-right font-medium break-words text-neutral-700">{String(value)}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              {accountTrail.length ? (
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
-                    <Route className="size-4 text-neutral-400" />
-                    账号轨迹
-                    <span className="text-xs font-normal text-neutral-400">这次请求实际用过的账号，按尝试顺序</span>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-neutral-200 bg-white p-3">
-                    {accountTrail.map((email, index) => (
-                      <Fragment key={`${email}-${index}`}>
-                        {index > 0 ? <ArrowRight className="size-3.5 shrink-0 text-neutral-300" /> : null}
-                        <span className="inline-flex max-w-full items-center gap-1.5 rounded-lg bg-neutral-100 py-1 pr-2 pl-1 text-xs text-neutral-700">
-                          <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-white text-[10px] font-semibold text-neutral-500">
-                            {index + 1}
-                          </span>
-                          <span className="break-all">{email}</span>
-                        </span>
-                      </Fragment>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-              {attemptGroups.length ? (
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
-                    <ListChecks className="size-4 text-neutral-400" />
-                    尝试轨迹
-                    <span className="text-xs font-normal text-neutral-400">每次换号的结局、耗时与现场</span>
-                  </div>
+            <div className="space-y-5">
+              {/* 三列：左=请求字段，中=执行/尝试过程，右=图片。窄屏下依次堆叠。 */}
+              <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)_minmax(0,0.8fr)]">
+                <div className="space-y-4">
                   <div className="space-y-2">
-                    {attemptGroups.map((group, groupIndex) => (
-                      <div key={groupIndex} className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
-                        {group.parsed ? (
-                          group.steps.map((step, stepIndex) => {
-                            const outcome = attemptOutcomeStyle(step.outcome);
-                            return (
-                              <div
-                                key={stepIndex}
-                                className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 px-3 py-2.5 text-xs ${stepIndex > 0 ? "border-t border-neutral-100" : ""}`}
-                              >
-                                <span className="inline-flex h-5 min-w-8 shrink-0 items-center justify-center rounded-md bg-neutral-100 px-1 font-mono text-[11px] font-semibold text-neutral-600">
-                                  {step.index}
-                                </span>
-                                <span className="break-all font-medium text-neutral-700">{step.email || "未选出账号"}</span>
-                                <Badge variant={outcome.variant} className="rounded-md">{outcome.label}</Badge>
-                                {step.marks.map((mark, markIndex) => (
-                                  <span
-                                    key={`${mark}-${markIndex}`}
-                                    className="rounded-md bg-neutral-50 px-1.5 py-0.5 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200 ring-inset"
-                                  >
-                                    {mark}
-                                  </span>
-                                ))}
-                                <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-neutral-400">
-                                  {formatAttemptDuration(step.durationMs)}
-                                </span>
-                                {step.error ? <p className="w-full leading-5 text-neutral-500">{step.error}</p> : null}
-                              </div>
-                            );
-                          })
-                        ) : (
-                          <pre className="overflow-x-auto px-3 py-2.5 leading-6 whitespace-pre-wrap break-all text-neutral-600">
-                            {group.raw}
-                          </pre>
-                        )}
+                    <div className="text-sm font-medium text-neutral-700">请求信息</div>
+                    <div className="grid grid-cols-1 gap-y-3 rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-600">
+                      {detailFields.map(([key, value]) => {
+                        const label = detailLabels[key] || key;
+                        // 提示词/错误信息是长文本，左对齐，右对齐会挤成难读的一团。
+                        if (key === "request_text" || key === "error") {
+                          return (
+                            <div key={key} className="space-y-1">
+                              <div className="text-xs text-neutral-400">{label}</div>
+                              <p className="leading-6 break-words whitespace-pre-wrap text-neutral-700">{String(value)}</p>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div key={key} className="flex min-w-0 items-start justify-between gap-4">
+                            {/* shrink-0 + nowrap：格子变窄时标签不应该被压成竖排的单字。 */}
+                            <span className="shrink-0 whitespace-nowrap text-neutral-400">{label}</span>
+                            <span className="min-w-0 text-right font-medium break-words text-neutral-700">{String(value)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {accountTrail.length ? (
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
+                        <Route className="size-4 text-neutral-400" />
+                        账号轨迹
+                        <span className="text-xs font-normal text-neutral-400">按尝试顺序</span>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-              {timelineGroups.length ? (
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
-                    <Route className="size-4 text-neutral-400" />
-                    执行时间线
-                    <span className="text-xs font-normal text-neutral-400">
-                      每一步做了什么、从请求开始算起的时间、花了多久、为什么
-                    </span>
-                  </div>
-                  {timelineGroups.map((group) => (
-                    <div key={`timeline-${group.index}`} className="space-y-1.5">
-                      {timelineGroups.length > 1 ? (
-                        <div className="px-1 text-xs font-medium text-neutral-500">
-                          第 {group.index}
-                          {group.total ? ` / ${group.total}` : ""} 张
-                        </div>
-                      ) : null}
-                      <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
-                        {group.steps.map((step, stepIndex) => (
-                          <div
-                            key={`${group.index}-${stepIndex}-${step.at_ms ?? 0}`}
-                            className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 px-3 py-2.5 text-xs ${stepIndex > 0 ? "border-t border-neutral-100" : ""}`}
-                          >
-                            <span className="w-14 shrink-0 font-mono text-[11px] tabular-nums text-neutral-400">
-                              {formatTimelineAt(step.at_ms)}
-                            </span>
-                            <span className={`shrink-0 rounded-md border px-1.5 py-0.5 font-medium ${timelineStepTone(step)}`}>
-                              {step.label || step.step || "步骤"}
-                            </span>
-                            {step.detail ? (
-                              <p className="min-w-0 flex-1 leading-5 break-words text-neutral-600">
-                                {step.detail}
-                              </p>
-                            ) : (
-                              <span className="flex-1" />
-                            )}
-                            {typeof step.dur_ms === "number" ? (
-                              <span className="shrink-0 font-mono text-[11px] tabular-nums text-neutral-500">
-                                {formatTimelineDuration(step.dur_ms)}
+                      <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-neutral-200 bg-white p-3">
+                        {accountTrail.map((email, index) => (
+                          <Fragment key={`${email}-${index}`}>
+                            {index > 0 ? <ArrowRight className="size-3.5 shrink-0 text-neutral-300" /> : null}
+                            <span className="inline-flex max-w-full items-center gap-1.5 rounded-lg bg-neutral-100 py-1 pr-2 pl-1 text-xs text-neutral-700">
+                              <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-white text-[10px] font-semibold text-neutral-500">
+                                {index + 1}
                               </span>
-                            ) : null}
+                              <span className="break-all">{email}</span>
+                            </span>
+                          </Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="space-y-4">
+                  {attemptGroups.length ? (
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
+                        <ListChecks className="size-4 text-neutral-400" />
+                        尝试轨迹
+                        <span className="text-xs font-normal text-neutral-400">每次换号的结局、耗时与现场</span>
+                      </div>
+                      <div className="space-y-2">
+                        {attemptGroups.map((group, groupIndex) => (
+                          <div key={groupIndex} className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
+                            {group.parsed ? (
+                              group.steps.map((step, stepIndex) => {
+                                const outcome = attemptOutcomeStyle(step.outcome);
+                                return (
+                                  <div
+                                    key={stepIndex}
+                                    className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 px-3 py-2.5 text-xs ${stepIndex > 0 ? "border-t border-neutral-100" : ""}`}
+                                  >
+                                    <span className="inline-flex h-5 min-w-8 shrink-0 items-center justify-center rounded-md bg-neutral-100 px-1 font-mono text-[11px] font-semibold text-neutral-600">
+                                      {step.index}
+                                    </span>
+                                    <span className="break-all font-medium text-neutral-700">{step.email || "未选出账号"}</span>
+                                    <Badge variant={outcome.variant} className="rounded-md">{outcome.label}</Badge>
+                                    {step.marks.map((mark, markIndex) => (
+                                      <span
+                                        key={`${mark}-${markIndex}`}
+                                        className="rounded-md bg-neutral-50 px-1.5 py-0.5 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200 ring-inset"
+                                      >
+                                        {mark}
+                                      </span>
+                                    ))}
+                                    <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-neutral-400">
+                                      {formatAttemptDuration(step.durationMs)}
+                                    </span>
+                                    {step.error ? <p className="w-full leading-5 text-neutral-500">{step.error}</p> : null}
+                                  </div>
+                                );
+                              })
+                            ) : (
+                              <pre className="overflow-x-auto px-3 py-2.5 leading-6 whitespace-pre-wrap break-all text-neutral-600">
+                                {group.raw}
+                              </pre>
+                            )}
                           </div>
                         ))}
                       </div>
                     </div>
-                  ))}
-                </div>
-              ) : null}
-              {detailUpstreamError.length ? (
-                <div className="space-y-2">
-                  <div className="text-sm font-medium text-neutral-700">上游报错</div>
-                  {detailUpstreamError.map((frame, index) => (
-                    <div key={index} className="space-y-2 rounded-xl border border-rose-100 bg-rose-50/60 p-3">
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
-                        <Badge variant="danger" className="rounded-md">{frame.type || "异常"}</Badge>
-                        {typeof frame.status_code === "number" ? <span>status={frame.status_code}</span> : null}
-                        {frame.code ? <span className="font-mono">{frame.code}</span> : null}
-                        {frame.context ? <span>{frame.context}</span> : null}
-                        {typeof frame.retry_after === "number" ? <span>retry_after={frame.retry_after}</span> : null}
+                  ) : null}
+                  {timelineGroups.length ? (
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
+                        <Route className="size-4 text-neutral-400" />
+                        执行时间线
+                        <span className="text-xs font-normal text-neutral-400">步骤 / 耗时 / 原因</span>
                       </div>
-                      <pre className="overflow-x-auto text-xs leading-6 whitespace-pre-wrap break-all text-neutral-700">
-                        {frame.body || frame.message || "-"}
-                      </pre>
+                      {timelineGroups.map((group) => (
+                        <div key={`timeline-${group.index}`} className="space-y-1.5">
+                          {timelineGroups.length > 1 ? (
+                            <div className="px-1 text-xs font-medium text-neutral-500">
+                              第 {group.index}
+                              {group.total ? ` / ${group.total}` : ""} 张
+                            </div>
+                          ) : null}
+                          <div className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
+                            {group.steps.map((step, stepIndex) => (
+                              <div
+                                key={`${group.index}-${stepIndex}-${step.at_ms ?? 0}`}
+                                className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 px-3 py-2.5 text-xs ${stepIndex > 0 ? "border-t border-neutral-100" : ""}`}
+                              >
+                                <span className="w-14 shrink-0 font-mono text-[11px] tabular-nums text-neutral-400">
+                                  {formatTimelineAt(step.at_ms)}
+                                </span>
+                                <span className={`shrink-0 rounded-md border px-1.5 py-0.5 font-medium ${timelineStepTone(step)}`}>
+                                  {step.label || step.step || "步骤"}
+                                </span>
+                                {step.detail ? (
+                                  <p className="min-w-0 flex-1 leading-5 break-words text-neutral-600">
+                                    {step.detail}
+                                  </p>
+                                ) : (
+                                  <span className="flex-1" />
+                                )}
+                                {typeof step.dur_ms === "number" ? (
+                                  <span className="shrink-0 font-mono text-[11px] tabular-nums text-neutral-500">
+                                    {formatTimelineDuration(step.dur_ms)}
+                                  </span>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  ) : null}
+                  {detailUpstreamError.length ? (
+                    <div className="space-y-2">
+                      <div className="text-sm font-medium text-neutral-700">上游报错</div>
+                      {detailUpstreamError.map((frame, index) => (
+                        <div key={index} className="space-y-2 rounded-xl border border-rose-100 bg-rose-50/60 p-3">
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
+                            <Badge variant="danger" className="rounded-md">{frame.type || "异常"}</Badge>
+                            {typeof frame.status_code === "number" ? <span>status={frame.status_code}</span> : null}
+                            {frame.code ? <span className="font-mono">{frame.code}</span> : null}
+                            {frame.context ? <span>{frame.context}</span> : null}
+                            {typeof frame.retry_after === "number" ? <span>retry_after={frame.retry_after}</span> : null}
+                          </div>
+                          <pre className="overflow-x-auto text-xs leading-6 whitespace-pre-wrap break-all text-neutral-700">
+                            {frame.body || frame.message || "-"}
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
-              {detailUrls.length ? (
-                <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-                  {detailUrls.map((url, index) => (
-                    <button
-                      key={url}
-                      type="button"
-                      className="aspect-square overflow-hidden rounded-xl border border-neutral-200 bg-neutral-100"
-                      onClick={() => {
-                        setLightboxIndex(index);
-                        setLightboxOpen(true);
-                      }}
-                    >
-                      <img src={url} alt="" className="h-full w-full object-cover" />
-                    </button>
-                  ))}
+                <div className="space-y-2">
+                  {detailUrls.length ? (
+                    <>
+                      <div className="flex items-center gap-2 text-sm font-medium text-neutral-700">
+                        生成图片
+                        <span className="text-xs font-normal text-neutral-400">{detailUrls.length} 张</span>
+                      </div>
+                      <div className="flex flex-col gap-3">
+                        {detailUrls.map((url, index) => (
+                          <button
+                            key={url}
+                            type="button"
+                            className="aspect-square overflow-hidden rounded-xl border border-neutral-200 bg-neutral-100"
+                            onClick={() => {
+                              setLightboxIndex(index);
+                              setLightboxOpen(true);
+                            }}
+                          >
+                            <img src={url} alt="" className="h-full w-full object-cover" />
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : null}
                 </div>
-              ) : null}
-              <pre className="max-h-[72vh] overflow-auto rounded-xl border border-neutral-200 bg-neutral-50 p-4 text-xs leading-6 text-neutral-700">
-                {JSON.stringify(detailLog?.detail || {}, null, 2)}
-              </pre>
+              </div>
+              {/* 原始 JSON 默认收起，排查时再展开。 */}
+              <div className="overflow-hidden rounded-xl border border-neutral-200 bg-neutral-50">
+                <button
+                  type="button"
+                  onClick={() => setShowDetailJson((value) => !value)}
+                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-medium text-neutral-700 hover:bg-neutral-100"
+                >
+                  <span className="flex items-center gap-2">
+                    <ChevronRight className={`size-4 text-neutral-400 transition-transform ${showDetailJson ? "rotate-90" : ""}`} />
+                    原始 JSON
+                  </span>
+                  <span className="text-xs font-normal text-neutral-400">{showDetailJson ? "点击收起" : "点击展开"}</span>
+                </button>
+                {showDetailJson ? (
+                  <pre className="max-h-[60vh] overflow-auto border-t border-neutral-200 bg-white p-4 text-xs leading-6 text-neutral-700">
+                    {JSON.stringify(detailLog?.detail || {}, null, 2)}
+                  </pre>
+                ) : null}
+              </div>
             </div>
           </div>
         </DialogContent>
