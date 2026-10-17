@@ -60,6 +60,50 @@ class UpstreamModelListTests(unittest.TestCase):
         self.assertEqual(result, raw)
 
 
+class UpstreamModelProbeTests(unittest.TestCase):
+    def test_probe_reports_model_slug_from_server_ste_metadata(self):
+        captured = {}
+
+        class FakeBackend:
+            def __init__(self, access_token="", deadline=None):
+                captured["access_token"] = access_token
+
+            def stream_conversation(self, **kwargs):
+                captured.update(kwargs)
+                yield json.dumps({
+                    "type": "server_ste_metadata",
+                    "metadata": {"model_slug": "gpt-5-6"},
+                })
+                yield "[DONE]"
+
+        with mock.patch.object(openai_v1_models, "OpenAIBackendAPI", FakeBackend):
+            result = openai_v1_models.probe_upstream_model("token-1", "gpt-5-5")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["model"], "gpt-5-5")
+        self.assertEqual(result["model_slug"], "gpt-5-6")
+        self.assertEqual(result["channel"], "authenticated")
+        self.assertEqual(captured["access_token"], "token-1")
+        self.assertEqual(captured["model"], "gpt-5-5")
+        self.assertEqual(captured["prompt"], "ping")
+
+    def test_probe_marks_stream_error_as_failure(self):
+        class FakeBackend:
+            def __init__(self, access_token="", deadline=None):
+                pass
+
+            def stream_conversation(self, **kwargs):
+                yield json.dumps({"type": "error", "message": "model not found"})
+                yield "[DONE]"
+
+        with mock.patch.object(openai_v1_models, "OpenAIBackendAPI", FakeBackend):
+            result = openai_v1_models.probe_upstream_model("", "no-such-model")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "model not found")
+        self.assertEqual(result["channel"], "anonymous")
+
+
 class ModelListTests(unittest.TestCase):
     def test_list_models_only_returns_image_models_backed_by_account_types(self):
         with (

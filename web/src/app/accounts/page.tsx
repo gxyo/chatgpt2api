@@ -12,6 +12,7 @@ import {
   CircleOff,
   Copy,
   Download,
+  FlaskConical,
   Link2,
   LoaderCircle,
   LogIn,
@@ -53,6 +54,7 @@ import {
   fetchRefreshProgress,
   fetchReLoginProgress,
   fetchUpstreamModels,
+  probeUpstreamModel,
   reLoginAccounts,
   refreshAccounts,
   testProxy,
@@ -62,6 +64,7 @@ import {
   type AccountStatus,
   type Model,
   type RefreshProgressResponse,
+  type UpstreamModelProbeResponse,
 } from "@/lib/api";
 import { formatBeijing, formatBeijingClock, parseInstant } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -199,6 +202,10 @@ function AccountsPageContent() {
   // "anonymous" 或号池账号在 accounts 里的下标：决定探测走匿名还是该账号的登录通道。
   const [probeAccountKey, setProbeAccountKey] = useState("anonymous");
   const modelProbeSeqRef = useRef(0);
+  // 模型可用性探测：真实发一条极短对话，看 slug 是否被接受、上游回报什么。
+  const [probeModelInput, setProbeModelInput] = useState("");
+  const [isProbingModel, setIsProbingModel] = useState(false);
+  const [probeResult, setProbeResult] = useState<UpstreamModelProbeResponse | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -301,6 +308,22 @@ function AccountsPageContent() {
     }
     setIsModelsDialogOpen(true);
     void loadModelListSnapshot(probeAccessToken(key));
+  };
+
+  const handleProbeModel = async () => {
+    setIsProbingModel(true);
+    setProbeResult(null);
+    try {
+      const data = await probeUpstreamModel(
+        probeAccessToken(probeAccountKey),
+        probeModelInput.trim(),
+      );
+      setProbeResult(data);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "探测模型失败");
+    } finally {
+      setIsProbingModel(false);
+    }
   };
 
   const copyModelsRaw = async () => {
@@ -944,7 +967,7 @@ function AccountsPageContent() {
       </Dialog>
 
       <Dialog open={isModelsDialogOpen} onOpenChange={setIsModelsDialogOpen}>
-        <DialogContent className="w-[min(92vw,720px)] rounded-2xl p-6">
+        <DialogContent className="max-h-[90dvh] w-[min(92vw,720px)] overflow-y-auto rounded-2xl p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>获取模型列表</DialogTitle>
             <DialogDescription className="text-sm leading-6">
@@ -953,12 +976,13 @@ function AccountsPageContent() {
               的本地合并。默认走匿名通道，选择号池账号可查看该账号登录后的模型列表。
             </DialogDescription>
           </DialogHeader>
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3">
             <span className="shrink-0 text-xs text-neutral-500">探测通道</span>
             <Select
               value={probeAccountKey}
               onValueChange={(value) => {
                 setProbeAccountKey(value);
+                setProbeResult(null);
                 void loadModelListSnapshot(probeAccessToken(value));
               }}
               disabled={isFetchingModelList}
@@ -976,6 +1000,66 @@ function AccountsPageContent() {
               </SelectContent>
             </Select>
           </div>
+          <div className="min-w-0 space-y-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Input
+                value={probeModelInput}
+                onChange={(event) => setProbeModelInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void handleProbeModel();
+                  }
+                }}
+                placeholder="输入模型 slug 探测（留空探测默认上游模型）"
+                className="h-9 min-w-0 flex-1 rounded-xl"
+              />
+              <Button
+                variant="outline"
+                className="h-9 shrink-0"
+                onClick={() => void handleProbeModel()}
+                disabled={isProbingModel}
+              >
+                {isProbingModel ? (
+                  <LoaderCircle className="size-4 animate-spin" />
+                ) : (
+                  <FlaskConical className="size-4" />
+                )}
+                探测
+              </Button>
+            </div>
+            <p className="text-xs text-neutral-400">
+              会向当前通道真实发送一条极短对话，可能出现在该账号的对话历史里。
+            </p>
+            {probeResult ? (
+              <div
+                className={cn(
+                  "rounded-xl border px-4 py-3 text-xs",
+                  probeResult.ok
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : "border-rose-200 bg-rose-50 text-rose-600",
+                )}
+              >
+                <div className="flex items-center gap-1.5 font-medium">
+                  {probeResult.ok ? (
+                    <CheckCircle2 className="size-3.5" />
+                  ) : (
+                    <CircleOff className="size-3.5" />
+                  )}
+                  <span className="font-mono">{probeResult.model}</span>
+                  {probeResult.ok ? "可请求" : "请求失败"}
+                </div>
+                {probeResult.ok ? (
+                  <div className="mt-1 text-emerald-600">
+                    上游回报 model_slug：{probeResult.model_slug || "（未返回）"}
+                    {typeof probeResult.elapsed_ms === "number" ? ` · ${probeResult.elapsed_ms}ms` : ""}
+                  </div>
+                ) : (
+                  <div className="mt-1 break-all">{probeResult.error || "未知错误"}</div>
+                )}
+              </div>
+            ) : null}
+          </div>
           {isFetchingModelList ? (
             <div className="flex items-center justify-center gap-2 py-12 text-sm text-neutral-500">
               <LoaderCircle className="size-4 animate-spin" />
@@ -986,8 +1070,8 @@ function AccountsPageContent() {
               {modelsError}
             </div>
           ) : modelsRaw ? (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between gap-2 text-xs text-neutral-500">
+            <div className="min-w-0 space-y-3">
+              <div className="flex min-w-0 items-center justify-between gap-2 text-xs text-neutral-500">
                 <span className="min-w-0 truncate" title={upstreamModelView.endpoint}>
                   {upstreamModelView.channel
                     ? `${upstreamModelView.channel}${upstreamModelView.accountEmail ? `（${upstreamModelView.accountEmail}）` : ""} · `

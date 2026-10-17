@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from services.config import DATA_DIR
+from services.config import DATA_DIR, config
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from utils.beijing_time import beijing_now_text, beijing_text_from_timestamp
 from utils.helper import anthropic_sse_stream, describe_exception, public_error_message, sse_json_stream
@@ -444,6 +444,28 @@ def add_postprocess_detail(
         if item.get("upscale_to_size") or item.get("upscale_error"):
             merged["upscale_images"] = int(merged.get("upscale_images") or 0) + 1
     detail.update(merged)
+
+
+def add_upstream_model_detail(
+    detail: dict[str, Any],
+    *,
+    result: object = None,
+    upstream_model_slug: str = "",
+) -> None:
+    """记录发往上游的模型 slug，以及上游 SSE 回报的实际调度模型。
+
+    `/backend-api/models` 只是模型选择器清单，不在清单里的旧 slug 仍可能被
+    后端路由，所以「请求了什么」和「上游回报了什么」分开记，便于对账。
+    """
+    actual = (upstream_model_slug or "").strip()
+    if not actual and isinstance(result, dict):
+        actual = str(result.get("_upstream_model_slug") or "").strip()
+    if not actual:
+        return
+    detail["upstream_model_slug"] = actual
+    requested = str(config.default_upstream_model_name or "").strip()
+    if requested:
+        detail["upstream_model_requested"] = requested
 
 
 def _flatten_account_trail(trails: list[list[str]]) -> list[str]:
@@ -884,10 +906,6 @@ class LoggedCall:
             detail, result=result, exc=exc, image_timelines=image_timelines,
         )
         add_postprocess_detail(detail, result=result, postprocess=postprocess)
-        # 上游 SSE 汇报的实际调度模型：和请求里写的 model 往往不是一回事。
-        effective_model = upstream_model_slug.strip()
-        if not effective_model and isinstance(result, dict):
-            effective_model = str(result.get("_upstream_model_slug") or "").strip()
-        if effective_model:
-            detail["upstream_model_slug"] = effective_model
+        # 上游请求模型 / 上游 SSE 回报的实际调度模型，分开记。
+        add_upstream_model_detail(detail, result=result, upstream_model_slug=upstream_model_slug)
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)

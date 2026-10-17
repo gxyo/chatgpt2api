@@ -289,6 +289,26 @@ export async function fetchUpstreamModels(accessToken = "") {
   });
 }
 
+/** 模型可用性探测结果：真的发一条最短对话后的上游回报。 */
+export type UpstreamModelProbeResponse = {
+  model: string;
+  channel?: "anonymous" | "authenticated";
+  ok: boolean;
+  model_slug?: string;
+  conversation_id?: string;
+  elapsed_ms?: number;
+  error?: string;
+};
+
+/** 探测会在账号上真实创建一条极短对话；model 留空时用默认上游模型。 */
+export async function probeUpstreamModel(accessToken: string, model: string) {
+  return httpRequest<UpstreamModelProbeResponse>("/api/accounts/probe-model", {
+    method: "POST",
+    body: { access_token: accessToken, model },
+    timeoutMs: 30000,
+  });
+}
+
 export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",

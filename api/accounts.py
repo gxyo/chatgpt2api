@@ -76,6 +76,12 @@ class UpstreamModelsRequest(BaseModel):
     access_token: str = ""
 
 
+class ModelProbeRequest(BaseModel):
+    """调试用：实际发一条最短对话，看某个模型 slug 能否被上游接受。"""
+    access_token: str = ""
+    model: str = ""
+
+
 def _account_payload_token(item: dict[str, Any]) -> str:
     return str(item.get("access_token") or item.get("accessToken") or "").strip()
 
@@ -178,6 +184,21 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=404, detail={"error": "该账号不在号池中"})
         try:
             return await run_in_threadpool(openai_v1_models.list_upstream_models, access_token)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail={"error": public_error_message(exc)}) from exc
+
+    @router.post("/api/accounts/probe-model")
+    async def probe_model(body: ModelProbeRequest,
+                          authorization: str | None = Header(default=None)):
+        """调试用：真实发一条最短对话，验证模型 slug 能否被上游接受。"""
+        require_admin(authorization)
+        access_token = str(body.access_token or "").strip()
+        if access_token and not account_service.get_account(access_token):
+            raise HTTPException(status_code=404, detail={"error": "该账号不在号池中"})
+        try:
+            return await run_in_threadpool(
+                openai_v1_models.probe_upstream_model, access_token, body.model,
+            )
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": public_error_message(exc)}) from exc
 

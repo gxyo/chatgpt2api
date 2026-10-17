@@ -708,6 +708,18 @@ class AttemptTrailLogTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         return items[0]["detail"]
 
+    def test_upstream_model_requested_and_actual_are_logged(self):
+        outputs = [ImageOutput(
+            kind="result", model="gpt-image-2", index=1, total=1, data=[{"url": "ok"}],
+            upstream_model_slug="gpt-5-5",
+        )]
+        with mock.patch("services.log_service.config",
+                        SimpleNamespace(default_upstream_model_name="gpt-5-5")):
+            detail = self._log_call("调用完成", conversation.collect_image_outputs(outputs))
+
+        self.assertEqual(detail["upstream_model_slug"], "gpt-5-5")
+        self.assertEqual(detail["upstream_model_requested"], "gpt-5-5")
+
     def test_retry_success_is_one_record_with_ordered_accounts(self):
         outputs = self._run_retry(["token-a", "token-b"], 1)
 

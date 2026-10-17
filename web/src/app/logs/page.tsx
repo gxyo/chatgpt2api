@@ -43,6 +43,7 @@ const typeLabels: Record<string, string> = {
 const detailLabels: Record<string, string> = {
   account_email: "账号",
   upstream_model_slug: "上游实际模型",
+  upstream_model_requested: "上游请求模型",
   request_text: "请求内容",
   error: "错误信息",
   upscale_target: "超分目标(px)",
