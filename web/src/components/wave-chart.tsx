@@ -190,9 +190,10 @@ export function WaveChart({
 
   const primaryLine = toLine(primaryValue);
   const failedLine = toSparseLine((point) => point.failed);
-  // 注册统计复用本组件时没有 policy_violation 字段，图例和折线都不出现。
+  // 注册统计复用本组件时没有 policy_violation 字段，图例和折线都不出现；
+  // 生图统计的接口始终带这个字段，即使当前区间一次拦截都没有也保留图例。
   const policyLine = toSparseLine((point) => point.policy_violation ?? 0);
-  const hasPolicyData = series.some((point) => (point.policy_violation ?? 0) > 0);
+  const hasPolicySeries = series.some((point) => typeof point.policy_violation === "number");
   const baseline = yAt(0);
   const primaryArea = pointCount
     ? `${primaryLine} L ${xAt(pointCount - 1).toFixed(2)} ${baseline.toFixed(2)} L ${xAt(0).toFixed(2)} ${baseline.toFixed(2)} Z`
@@ -229,7 +230,7 @@ export function WaveChart({
           <span className={cn("size-2.5 rounded-full", FAILED_DOT)} />
           {labels.secondary}
         </span>
-        {hasPolicyData ? (
+        {hasPolicySeries ? (
           <span className="inline-flex items-center gap-1.5">
             <span className={cn("size-2.5 rounded-full", POLICY_DOT)} />
             违反安全策略
@@ -243,7 +244,7 @@ export function WaveChart({
         viewBox={`0 0 ${Math.max(width, 1)} ${CHART_HEIGHT}`}
         role="img"
         aria-label={
-          hasPolicyData
+          hasPolicySeries
             ? `${labels.ariaLabel.replace("{axis}", axisLabel)}（另含违反安全策略数）`
             : labels.ariaLabel.replace("{axis}", axisLabel)
         }
