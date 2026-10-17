@@ -11,7 +11,13 @@ from typing import Any
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
-from services.log_service import LOG_TYPE_CALL, image_request_detail, log_service, merge_extra_detail
+from services.log_service import (
+    LOG_TYPE_CALL,
+    add_attempt_trail_detail,
+    image_request_detail,
+    log_service,
+    merge_extra_detail,
+)
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 from utils.beijing_time import beijing_now_text, beijing_text_from_timestamp
 from utils.helper import describe_exception, sanitize_image_error_text
@@ -303,6 +309,7 @@ class ImageTaskService:
                 urls=_collect_image_urls(data),
                 account_email=account_email,
                 extra_detail=image_request_detail(payload),
+                result=result,
             )
         except Exception as exc:
             error_message = sanitize_image_error_text(str(exc) or "image task failed")
@@ -368,6 +375,7 @@ class ImageTaskService:
         account_email: str = "",
         exc: BaseException | None = None,
         extra_detail: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
         summary_prefix = "图生图" if mode == "edit" else "文生图"
@@ -402,6 +410,8 @@ class ImageTaskService:
             detail["account_email"] = account_email
         if urls:
             detail["urls"] = list(dict.fromkeys(urls))
+        # 成功/失败都在同一条记录里带上换号轨迹（只有真的重试过才有内容）。
+        add_attempt_trail_detail(detail, result=result, exc=exc)
         try:
             log_service.add(LOG_TYPE_CALL, f"{summary_prefix}{suffix}", detail)
         except Exception:

@@ -23,7 +23,7 @@ LOG_TYPE_ACCOUNT = "account"
 # 注册机失败日志：只记失败（成功的注册没有排查价值），单独一个日志页看，
 # 走的是同一份 logs.jsonl 与同一套筛选/导出/清理，新增一种类型即可。
 LOG_TYPE_REGISTER = "register"
-INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id"}
+INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_account_trail", "_attempts_summary"}
 # 一键导出：默认最近 10 条，条数上界防止一次导出把浏览器拖死。
 LOG_EXPORT_DEFAULT_LIMIT = 10
 LOG_EXPORT_MAX_LIMIT = 500
@@ -262,6 +262,111 @@ def _collect_conversation_ids(value: object) -> list[str]:
     return ids
 
 
+def _collect_account_trails(value: object) -> list[list[str]]:
+    """收集结果里的换号轨迹（一次图片生成一份，按尝试顺序排列）。"""
+    trails: list[list[str]] = []
+    if isinstance(value, dict):
+        raw = value.get("_account_trail")
+        if isinstance(raw, list):
+            trail = [str(item).strip() for item in raw if str(item or "").strip()]
+            if trail:
+                trails.append(trail)
+        for key, item in value.items():
+            if key != "_account_trail":
+                trails.extend(_collect_account_trails(item))
+    elif isinstance(value, list):
+        for item in value:
+            trails.extend(_collect_account_trails(item))
+    return trails
+
+
+def _collect_attempts_summaries(value: object) -> list[str]:
+    """收集结果里的一行尝试摘要（`#1 a message_retry → #2 b success`）。"""
+    summaries: list[str] = []
+    if isinstance(value, dict):
+        raw = value.get("_attempts_summary")
+        if isinstance(raw, str) and raw.strip():
+            summaries.append(raw.strip())
+        for key, item in value.items():
+            if key != "_attempts_summary":
+                summaries.extend(_collect_attempts_summaries(item))
+    elif isinstance(value, list):
+        for item in value:
+            summaries.extend(_collect_attempts_summaries(item))
+    return summaries
+
+
+def _flatten_account_trail(trails: list[list[str]]) -> list[str]:
+    """把多份轨迹拼成一条账号顺序，去掉流式 chunk 造成的连续重复。"""
+    flat: list[str] = []
+    previous: list[str] | None = None
+    for trail in trails:
+        if not trail or trail == previous:
+            # 同一个 chunk 会带同一份轨迹，多图时也可能完全相同，只算一次。
+            continue
+        previous = trail
+        for email in trail:
+            if not flat or flat[-1] != email:
+                flat.append(email)
+    return flat
+
+
+def _exception_image_diagnostics(exc: BaseException) -> dict[str, Any] | None:
+    """沿异常链找第一份生图诊断。
+
+    多图并行全部失败时，最外层是重新包装过的 ImageGenerationError，
+    真正的 attempts 在 __cause__ 上的那条异常里。
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        diagnostics = getattr(current, "image_diagnostics", None)
+        if isinstance(diagnostics, dict) and diagnostics:
+            return diagnostics
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def add_attempt_trail_detail(
+    detail: dict[str, Any],
+    *,
+    result: object = None,
+    exc: BaseException | None = None,
+    account_trails: list[list[str]] | None = None,
+    attempts_summaries: list[str] | None = None,
+) -> None:
+    """把「这次请求先后用过哪些账号」写进同一条调用日志。
+
+    只在真的重试过时才有内容：没重试的请求只有一个账号，detail.account_email
+    已经写清楚了，再列一遍没有意义。成功和失败都走这里，日志里始终只有一条记录，
+    最后结果由 detail.status 表示。
+    """
+    trails = list(account_trails or [])
+    trails.extend(_collect_account_trails(result))
+    summaries = list(attempts_summaries or [])
+    summaries.extend(_collect_attempts_summaries(result))
+    if exc is not None:
+        diagnostics = _exception_image_diagnostics(exc)
+        if diagnostics is not None:
+            attempts = [item for item in (diagnostics.get("attempts") or []) if isinstance(item, dict)]
+            if len(attempts) > 1:
+                trail = [str(item.get("account_email") or "").strip() for item in attempts]
+                trail = [email for email in trail if email]
+                if trail:
+                    trails.append(trail)
+                summary = str(diagnostics.get("attempts_summary") or "").strip()
+                if summary:
+                    summaries.append(summary)
+    trail = _flatten_account_trail(trails)
+    if trail:
+        # 存成一行纯文本：日志详情弹窗只渲染标量字段，列表会掉进原始 JSON 里看不见。
+        detail["account_trail"] = " → ".join(trail)
+    summary_text = " | ".join(dict.fromkeys(item for item in summaries if item))
+    if summary_text:
+        detail["attempts_summary"] = summary_text
+
+
 def _strip_internal_response_fields(value: object) -> object:
     if isinstance(value, dict):
         return {
@@ -422,8 +527,11 @@ class LoggedCall:
 
         if isinstance(result, dict):
             self.log("调用完成", result)
-            response = dict(result)
-            response.pop("_account_email", None)
+            # 轨迹类字段只给日志看，不能回给客户端。
+            response = {
+                key: value for key, value in result.items()
+                if key not in INTERNAL_RESPONSE_KEYS
+            }
             return response
 
         sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
@@ -450,12 +558,16 @@ class LoggedCall:
         urls: list[str] = []
         account_emails: list[str] = []
         conversation_ids: list[str] = []
+        account_trails: list[list[str]] = []
+        attempts_summaries: list[str] = []
         failed = False
         try:
             for item in items:
                 urls.extend(_collect_urls(item))
                 account_emails.extend(_collect_account_emails(item))
                 conversation_ids.extend(_collect_conversation_ids(item))
+                account_trails.extend(_collect_account_trails(item))
+                attempts_summaries.extend(_collect_attempts_summaries(item))
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
             failed = True
@@ -467,6 +579,8 @@ class LoggedCall:
                 urls=urls,
                 account_email=(account_emails[0] if account_emails else getattr(exc, "account_email", "")),
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
+                account_trails=account_trails,
+                attempts_summaries=attempts_summaries,
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
                 from services.protocol.conversation import ImageGenerationError, public_image_error_message
@@ -476,11 +590,13 @@ class LoggedCall:
         finally:
             if not failed:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
-                         conversation_id=conversation_ids[0] if conversation_ids else "")
+                         conversation_id=conversation_ids[0] if conversation_ids else "",
+                         account_trails=account_trails, attempts_summaries=attempts_summaries)
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
-            exc: BaseException | None = None) -> None:
+            exc: BaseException | None = None, account_trails: list[list[str]] | None = None,
+            attempts_summaries: list[str] | None = None) -> None:
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -531,4 +647,9 @@ class LoggedCall:
         collected_urls = [*(urls or []), *_collect_urls(result)]
         if collected_urls and not self.endpoint.startswith("/v1/search"):
             detail["urls"] = list(dict.fromkeys(collected_urls))
+        # 换号重试的轨迹（成功/失败都写），保证一次调用始终只对应一条日志。
+        add_attempt_trail_detail(
+            detail, result=result, exc=exc,
+            account_trails=account_trails, attempts_summaries=attempts_summaries,
+        )
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)

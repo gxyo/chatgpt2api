@@ -429,6 +429,10 @@ class ImageOutput:
     data: list[dict[str, Any]] = field(default_factory=list)
     account_email: str = ""
     conversation_id: str = ""
+    # 本次图片生成实际试过的账号（按顺序）。只有换号重试过才有值，
+    # 调用日志据此把「第 1 个号 → 第 2 个号」写进同一条记录，而不是一次尝试一条。
+    account_trail: list[str] = field(default_factory=list)
+    attempts_summary: str = ""
 
     def to_chunk(self) -> dict[str, Any]:
         chunk: dict[str, Any] = {
@@ -445,6 +449,10 @@ class ImageOutput:
             chunk["_account_email"] = self.account_email
         if self.conversation_id:
             chunk["_conversation_id"] = self.conversation_id
+        if self.account_trail:
+            chunk["_account_trail"] = list(self.account_trail)
+        if self.attempts_summary:
+            chunk["_attempts_summary"] = self.attempts_summary
         if self.kind == "message":
             chunk.update({
                 "object": "image.generation.message",
@@ -1501,6 +1509,27 @@ def _attempts_summary(attempts: list[dict[str, Any]]) -> str:
     return " → ".join(parts)[:600]
 
 
+def _attach_attempt_trail(outputs: list[ImageOutput], diagnostics: dict[str, Any]) -> None:
+    """成功返回时把换号轨迹挂到结果上，调用日志才能在同一条记录里展示。
+
+    只有真的换号重试过（尝试次数 > 1）才挂；没重试的请求保持原来的日志形态。
+    失败路径不需要——异常上已经带着同一份 image_diagnostics。
+    """
+    attempts = [item for item in (diagnostics.get("attempts") or []) if isinstance(item, dict)]
+    if len(attempts) <= 1:
+        return
+    trail = [str(item.get("account_email") or "").strip() for item in attempts]
+    trail = [email for email in trail if email]
+    if not trail:
+        return
+    # 成功分支的 record_attempt_state 只补 outcome、不刷新 attempts_summary，
+    # diagnostics 里存的那份可能停在上一次失败尝试上，这里按最新 attempts 重算。
+    summary = _attempts_summary(attempts)
+    for output in outputs:
+        output.account_trail = list(trail)
+        output.attempts_summary = summary
+
+
 def _generate_single_image(
         request: ConversationRequest,
         index: int,
@@ -1518,13 +1547,16 @@ def _generate_single_image(
     # 诊断在里层现算现写进这个 dict；不管最后从哪一行抛出，都在这里统一挂到异常上。
     diagnostics: dict[str, Any] = {}
     try:
-        return _generate_single_image_attempts(request, index, total, trace_id, diagnostics)
+        outputs = _generate_single_image_attempts(request, index, total, trace_id, diagnostics)
     except BaseException as exc:
         if not getattr(exc, "image_trace", ""):
             setattr(exc, "image_trace", trace_id)
         if diagnostics and not getattr(exc, "image_diagnostics", None):
             setattr(exc, "image_diagnostics", dict(diagnostics))
         raise
+    # 成功返回没有异常可以承载诊断，轨迹直接挂在结果上给调用日志看。
+    _attach_attempt_trail(outputs, diagnostics)
+    return outputs
 
 
 def _generate_single_image_attempts(
@@ -2161,10 +2193,17 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     message = ""
     progress_parts: list[str] = []
     account_email = ""
+    account_trail: list[str] = []
+    attempts_summaries: list[str] = []
     for output in outputs:
         created = created or output.created
         if output.account_email and not account_email:
             account_email = output.account_email
+        for email in output.account_trail:
+            if not account_trail or account_trail[-1] != email:
+                account_trail.append(email)
+        if output.attempts_summary and output.attempts_summary not in attempts_summaries:
+            attempts_summaries.append(output.attempts_summary)
         if output.kind == "progress" and output.text:
             progress_parts.append(output.text)
         elif output.kind == "message":
@@ -2179,4 +2218,8 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
             result["message"] = text
     if account_email:
         result["_account_email"] = account_email
+    if account_trail:
+        result["_account_trail"] = account_trail
+    if attempts_summaries:
+        result["_attempts_summary"] = " | ".join(attempts_summaries)
     return result

@@ -7,8 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import services.log_service as log_service_module
 from services.config import ConfigStore
+from services.log_service import LoggedCall, LogService
 from services.openai_backend_api import ImagePollTimeoutError
+from services.stats_range import beijing_today
+from services.stats_service import ImageStatsService
 from services.protocol import conversation
 from services.protocol.conversation import (
     ConversationRequest,
@@ -161,6 +165,27 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
         self.assertEqual(accounts.image_results, [("token-a", False), ("token-b", True)])
 
+    def test_success_result_carries_account_trail(self):
+        outputs, _ = self._run(["token-a", "token-b"], self._message_then_result(IMAGE_RETRY_MESSAGE), 1)
+
+        result = conversation.collect_image_outputs(outputs)
+
+        self.assertEqual(
+            result["_account_trail"],
+            ["token-a@example.test", "token-b@example.test"],
+        )
+        self.assertIn("#1 token-a@example.test message_retry", result["_attempts_summary"])
+        self.assertIn("#2 token-b@example.test success", result["_attempts_summary"])
+
+    def test_no_retry_result_keeps_the_old_shape(self):
+        outputs, _ = self._run(["token-a"], self._message_then_result(IMAGE_RETRY_MESSAGE), 0,
+                               message_as_error=False)
+
+        result = conversation.collect_image_outputs(outputs)
+
+        self.assertNotIn("_account_trail", result)
+        self.assertNotIn("_attempts_summary", result)
+
     def test_empty_retry_count_does_not_retry(self):
         failure, accounts = self._run_expecting_error(
             ["token-a", "token-b"], self._message_then_result(IMAGE_RETRY_MESSAGE), 0,
@@ -207,6 +232,146 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(str(failure), IMAGE_RETRY_MESSAGE)
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b", "token-c"])
         self.assertEqual(failure.image_diagnostics["attempts"][-1]["account_email"], "token-c@example.test")
+
+
+class AttemptTrailLogTests(unittest.TestCase):
+    """一次调用只落一条日志：重试过的把账号轨迹写进这条记录，只记最终结果。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.service = LogService(Path(self._tmp.name) / "logs.jsonl")
+        patcher = mock.patch.object(log_service_module, "log_service", self.service)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    @staticmethod
+    def _run_retry(tokens: list[str], retry_count: int):
+        def stream_fn(backend, request, index=1, total=1):
+            if backend.access_token == tokens[-1]:
+                yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+                return
+            yield ImageOutput(
+                kind="message", model=request.model, index=index, total=total, text=IMAGE_RETRY_MESSAGE,
+            )
+
+        patcher = mock.patch.multiple(
+            conversation,
+            account_service=FakeAccountService(tokens),
+            config=SimpleNamespace(image_generation_retry_count=retry_count),
+            stream_image_outputs=stream_fn,
+        )
+        with patcher:
+            return list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="draw a cat",
+                message_as_error=True,
+            )))
+
+    def _log_call(self, suffix: str, *args, **kwargs):
+        call = LoggedCall(
+            {"id": "k1", "name": "管理员", "role": "admin"},
+            "/v1/images/generations", "gpt-image-2", "文生图",
+        )
+        call.log(suffix, *args, **kwargs)
+        items = self.service.list()
+        self.assertEqual(len(items), 1)
+        return items[0]["detail"]
+
+    def test_retry_success_is_one_record_with_ordered_accounts(self):
+        outputs = self._run_retry(["token-a", "token-b"], 1)
+
+        detail = self._log_call("调用完成", conversation.collect_image_outputs(outputs))
+
+        self.assertEqual(detail["status"], "success")
+        self.assertEqual(detail["account_trail"], "token-a@example.test → token-b@example.test")
+        self.assertIn("#1 token-a@example.test message_retry", detail["attempts_summary"])
+        self.assertIn("#2 token-b@example.test success", detail["attempts_summary"])
+
+    def test_retry_failure_is_one_record_with_ordered_accounts(self):
+        def stream_fn(backend, request, index=1, total=1):
+            yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=IMAGE_RETRY_MESSAGE)
+
+        patcher = mock.patch.multiple(
+            conversation,
+            account_service=FakeAccountService(["token-a", "token-b", "token-c"]),
+            config=SimpleNamespace(image_generation_retry_count=2),
+            stream_image_outputs=stream_fn,
+        )
+        with patcher, self.assertRaises(ImageGenerationError) as raised:
+            list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True,
+            )))
+        failure = raised.exception
+
+        detail = self._log_call("调用失败", status="failed", error=str(failure), exc=failure)
+
+        self.assertEqual(detail["status"], "failed")
+        self.assertEqual(
+            detail["account_trail"],
+            "token-a@example.test → token-b@example.test → token-c@example.test",
+        )
+        self.assertIn("message_retry", detail["attempts_summary"])
+
+    def test_stream_chunks_yield_one_record_and_hide_internal_keys(self):
+        call = LoggedCall(
+            {"id": "k1", "name": "管理员", "role": "admin"},
+            "/v1/images/generations", "gpt-image-2", "文生图",
+        )
+        chunks = [
+            {"object": "image.generation.result", "data": [{"url": "ok"}],
+             "_account_trail": ["token-a@example.test", "token-b@example.test"],
+             "_attempts_summary": "#1 token-a@example.test poll_timeout → #2 token-b@example.test success"},
+        ] * 2
+
+        yielded = list(call.stream(iter(chunks)))
+
+        self.assertTrue(all("_account_trail" not in item for item in yielded))
+        items = self.service.list()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["detail"]["account_trail"],
+                         "token-a@example.test → token-b@example.test")
+
+    def _stats(self):
+        today = beijing_today()
+        return ImageStatsService(self.service.path).summary(today, today)["totals"]
+
+    def test_retry_success_counts_once_as_success(self):
+        outputs = self._run_retry(["token-a", "token-b"], 1)
+        self._log_call("调用完成", conversation.collect_image_outputs(outputs))
+
+        totals = self._stats()
+
+        self.assertEqual((totals["requests"], totals["success"], totals["failed"]), (1, 1, 0))
+
+    def test_retry_failure_counts_once_as_failure(self):
+        def stream_fn(backend, request, index=1, total=1):
+            yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=IMAGE_RETRY_MESSAGE)
+
+        patcher = mock.patch.multiple(
+            conversation,
+            account_service=FakeAccountService(["token-a", "token-b"]),
+            config=SimpleNamespace(image_generation_retry_count=1),
+            stream_image_outputs=stream_fn,
+        )
+        with patcher, self.assertRaises(ImageGenerationError) as raised:
+            list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True,
+            )))
+        failure = raised.exception
+        self._log_call("调用失败", status="failed", error=str(failure), exc=failure)
+
+        totals = self._stats()
+
+        self.assertEqual((totals["requests"], totals["success"], totals["failed"]), (1, 0, 1))
+
+    def test_no_retry_log_has_no_trail(self):
+        outputs = self._run_retry(["token-a"], 0)
+
+        detail = self._log_call("调用完成", conversation.collect_image_outputs(outputs))
+
+        self.assertNotIn("account_trail", detail)
+        self.assertNotIn("attempts_summary", detail)
 
 
 if __name__ == "__main__":

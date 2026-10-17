@@ -36,6 +36,12 @@ const typeLabels: Record<string, string> = {
   [LogType.Account]: "账号管理日志",
 };
 
+/** 详情弹窗里的字段名：换号重试的两个轨迹字段翻译一下，其余保留原始键名。 */
+const detailLabels: Record<string, string> = {
+  account_trail: "账号轨迹",
+  attempts_summary: "尝试轨迹",
+};
+
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) {
     return "0 B";
@@ -564,7 +570,7 @@ function LogsContent() {
                   .filter(([key, value]) => key !== "urls" && typeof value !== "object")
                   .map(([key, value]) => (
                     <div key={key} className="flex items-start justify-between gap-4">
-                      <span className="text-neutral-400">{key}</span>
+                      <span className="text-neutral-400">{detailLabels[key] || key}</span>
                       <span className="text-right font-medium break-all text-neutral-700">{String(value)}</span>
                     </div>
                   ))}
