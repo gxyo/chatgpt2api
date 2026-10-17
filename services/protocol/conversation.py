@@ -28,6 +28,8 @@ from utils.helper import (
     IMAGE_MODELS,
     IMAGE_RETRY_MESSAGE,
     SKIPPED_MAINLINE_RE,
+    UPSTREAM_PLUMBING_RE,
+    UpstreamHTTPError,
     anonymize_token,
     extract_image_from_message_content,
     is_codex_image_model,
@@ -465,6 +467,9 @@ class ImageOutput:
     # 这条 message 是不是「上游回了正文、没有出图」。只有这种才按文本回复处理
     # （可用于换号重试）；blocked/任务错误等真正的报错文案走内容策略分支。
     text_reply: bool = False
+    # 这条 message 的正文其实是上游管道错误（例如 400 {"skipped_mainline":true} 被
+    # 解析进了 assistant 文本）。它不是模型正文，不能按 text_reply 重试/展示。
+    plumbing_error: bool = False
     # 本地后处理（4K 超分）的耗时与失败原因，只进调用日志，不返回给客户端。
     postprocess: dict[str, Any] = field(default_factory=dict)
 
@@ -968,6 +973,7 @@ def stream_image_outputs(
             quality=request.quality,
     ):
         last = event
+        _remember_stream_event(backend, event)
         if event.get("type") == "conversation.delta":
             yield ImageOutput(
                 kind="progress",
@@ -994,6 +1000,21 @@ def stream_image_outputs(
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
+    # 上游管道错误有时会被 SSE 包装成 assistant 正文（线上的 400
+    # {"skipped_mainline":true} 就出现过这种形态）。它不是模型正文：立即按上游 400
+    # 失败，交给外层换号/重建 conduit，别再花轮询预算、更别当 text_reply 重试。
+    if message and not file_ids and not sediment_ids and SKIPPED_MAINLINE_RE.search(message):
+        body = _attach_stream_context(
+            _plumbing_message_body(message) or {"upstream_response": message[:1000]},
+            backend,
+        )
+        logger.warning({
+            "event": "image_upstream_skipped_mainline_in_text",
+            "conversation_id": conversation_id,
+            "message": message[:300],
+            "stream_tail": body.get("stream_tail") or [],
+        })
+        raise UpstreamHTTPError("image stream", 400, body)
     logger.info({
         "event": "image_stream_resolve_start",
         "conversation_id": conversation_id,
@@ -1245,19 +1266,23 @@ def stream_image_outputs(
                 "message_preview": message[:200],
             })
         # 走到这里 = 上游回了正文，但轮询（含直接解析）始终没拿到图片。
-        # 正文本身通常就是模型「已完成」的解说词，不能当错误文案直接用，
-        # 所以标记成 text_reply，交给上层按「文本回复而非图片」分类/重试。
+        # 正文可能是模型「已完成」的解说词，也可能是上游把管道错误（JSON body）
+        # 塞进了 assistant 文本——后者必须按上游失败处理，不能当 text_reply 重试。
+        plumbing_body = _plumbing_message_body(message)
         logger.warning({
             "event": "image_text_reply_no_image",
             "conversation_id": conversation_id,
             "stream_file_ids": len(file_ids),
             "stream_sediment_ids": len(sediment_ids),
             "is_text_reply_pattern": is_text_reply,
+            "plumbing_error": plumbing_body is not None,
             "message_chars": len(message),
             "message_preview": message[:300],
+            "stream_tail": _image_stream_tail(backend, IMAGE_STREAM_TAIL_IN_BODY),
         })
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message,
-                          conversation_id=conversation_id, text_reply=True)
+                          conversation_id=conversation_id, text_reply=plumbing_body is None,
+                          plumbing_error=plumbing_body is not None)
         return
 
     # 兜底：当 message 为空且图片 URL 解析失败时，先尝试一次短延迟重试轮询
@@ -1376,7 +1401,16 @@ def stream_image_outputs(
                                "The image may still be processing. Please try again in a moment.",
                           conversation_id=conversation_id)
     elif message:
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
+        plumbing_body = _plumbing_message_body(message)
+        logger.warning({
+            "event": "image_stream_message_fallback",
+            "conversation_id": conversation_id,
+            "message_preview": message[:300],
+            "plumbing_error": plumbing_body is not None,
+            "stream_tail": _image_stream_tail(backend, IMAGE_STREAM_TAIL_IN_BODY),
+        })
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message,
+                          conversation_id=conversation_id, plumbing_error=plumbing_body is not None)
     else:
         # conversation_id 也为空时（SSE 流极短、未捕获到会话 ID），
         # 仍然 yield 一条消息，避免 stream_image_outputs_with_pool 产生
@@ -1517,6 +1551,112 @@ def _image_resolve_diagnostics(backend: Any) -> dict[str, Any]:
     if not isinstance(data, dict) or not data:
         return {}
     return dict(data)
+
+
+# 上游 SSE 最近几条原始事件：失败时随诊断/异常 body 进调用日志。
+# 之前只记录解析后的 state.text，上游到底发了什么（HTTP 错误被 SSE 包装、patch
+# 事件把报错塞进正文等）在日志里完全看不到。条数和长度都要截断，避免刷爆日志。
+IMAGE_STREAM_TAIL_LIMIT = 6
+IMAGE_STREAM_TAIL_CHARS = 600
+# 异常 body 会被 describe_exception 截到 2000 字符；放 2 条刚好能完整看到上游原文。
+IMAGE_STREAM_TAIL_IN_BODY = 2
+
+
+def _remember_stream_event(backend: Any, event: dict[str, Any]) -> None:
+    """把一条上游 SSE 原始事件留在 backend 上（只保留最近几条）。
+
+    `conversation_events` 已经把 raw/payload 挂在事件上：delta/event 带 raw，
+    非 JSON 的原始行带 payload。这里只做截断和去重入队，异常一律吞掉。
+    """
+    if not isinstance(event, dict):
+        return
+    raw = event.get("raw")
+    if raw is None:
+        raw = event.get("payload")
+    if raw is None:
+        return
+    try:
+        text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = repr(raw)
+    text = text.strip()
+    if not text:
+        return
+    if len(text) > IMAGE_STREAM_TAIL_CHARS:
+        text = text[:IMAGE_STREAM_TAIL_CHARS] + "…[truncated]"
+    tail = getattr(backend, "image_stream_tail", None)
+    if not isinstance(tail, list):
+        tail = []
+        try:
+            backend.image_stream_tail = tail
+        except Exception:
+            return
+    upstream_type = ""
+    if isinstance(raw, dict):
+        upstream_type = str(raw.get("type") or "")
+    tail.append({
+        "type": str(event.get("type") or ""),
+        "upstream_type": upstream_type,
+        "payload": text,
+    })
+    del tail[:-IMAGE_STREAM_TAIL_LIMIT]
+
+
+def _image_stream_tail(backend: Any, limit: int = IMAGE_STREAM_TAIL_LIMIT) -> list[dict[str, Any]]:
+    if backend is None:
+        return []
+    tail = getattr(backend, "image_stream_tail", None)
+    if not isinstance(tail, list) or not tail:
+        return []
+    return [dict(item) for item in tail[-max(1, limit):] if isinstance(item, dict)]
+
+
+def _image_stream_diagnostics(backend: Any) -> dict[str, Any]:
+    """上游 SSE 尾部现场，失败时随 image_diagnostics 一起进调用日志。"""
+    tail = _image_stream_tail(backend)
+    return {"stream_tail": tail} if tail else {}
+
+
+def _plumbing_message_body(text: str) -> dict[str, Any] | None:
+    """判断 assistant 正文是不是上游管道错误；是则返回可挂到异常上的 body。
+
+    典型形态：上游 400 ``{"skipped_mainline":true}`` 被 SSE patch 进了 assistant
+    文本。这种文本不是模型写的，不能按 `text_reply` 换号重试，也不能当内容策略
+    拒绝。工具参数 JSON（``{"size":...,"n":...}``）和带 referenced_image_ids 的
+    文本是「模型没触发工具」的正常回复，交给原来的轮询/重试逻辑处理。
+    """
+    value = str(text or "").strip()
+    if not value:
+        return None
+    if SKIPPED_MAINLINE_RE.search(value):
+        parsed: Any = None
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("skipped_mainline") is True:
+            return parsed
+        return {"skipped_mainline": True, "upstream_response": value[:1000]}
+    if TOOL_PARAMS_JSON_RE.search(value) or REFERENCED_IMAGE_IDS_RE.search(value):
+        return None
+    if value.startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            return {"upstream_response": parsed}
+    if UPSTREAM_PLUMBING_RE.search(value):
+        return {"upstream_response": value[:1000]}
+    return None
+
+
+def _attach_stream_context(body: dict[str, Any], backend: Any) -> dict[str, Any]:
+    """给异常 body 补上「上游原文 + 最近几条 SSE 事件」，日志详情直接可见。"""
+    tail = _image_stream_tail(backend, IMAGE_STREAM_TAIL_IN_BODY)
+    if tail:
+        body["stream_tail"] = tail
+    return body
 
 
 def _start_image_attempt(diagnostics: dict[str, Any], token: str, account_email: str) -> dict[str, Any]:
@@ -1706,6 +1846,13 @@ def _generate_single_image_attempts(
         else:
             for key in [key for key in diagnostics if key.startswith("resolve_")]:
                 diagnostics.pop(key, None)
+        # 上游 SSE 尾部：只在最后一次尝试的 backend 上；换号后新 backend 还没流，
+        # 清掉上一轮的，避免把上一次的上游响应误当成这一次的。
+        stream_diag = _image_stream_diagnostics(backend)
+        if stream_diag:
+            diagnostics["stream_tail"] = stream_diag["stream_tail"]
+        else:
+            diagnostics.pop("stream_tail", None)
         diagnostics.update({
             "trace_id": trace_id,
             "index": index,
@@ -1884,8 +2031,17 @@ def _generate_single_image_attempts(
                     #   2) 内容策略拒绝（blocked / 对话里检测到 policy 文案）；
                     #   3) 其它上游报错（已 sanitize 成「本次生图失败，请重试。」）。
                     text = output.text or ""
-                    text_reply = bool(output.text_reply) and not is_content_policy_error(text)
-                    policy_violation = not text_reply and is_content_policy_error(text)
+                    # 正文伪装成模型文本的上游管道错误（如 {"skipped_mainline":true}）
+                    # 单独一类：既不是模型正文，也不是内容策略拒绝。这里不只看
+                    # output.plumbing_error，按文本兜底再判一次——旧版本产出的
+                    # message 没有这个标记，但同样不能当正文重试。
+                    plumbing_body = _plumbing_message_body(text) if text.strip() else None
+                    if plumbing_body is None and getattr(output, "plumbing_error", False):
+                        plumbing_body = {"upstream_response": text[:1000]}
+                    text_reply = (
+                        bool(output.text_reply) and not plumbing_body and not is_content_policy_error(text)
+                    )
+                    policy_violation = not text_reply and not plumbing_body and is_content_policy_error(text)
                     if text_reply:
                         failure = ImageGenerationError(
                             "Image generation failed: the upstream model returned text instead of "
@@ -1897,7 +2053,7 @@ def _generate_single_image_attempts(
                             conversation_id=output.conversation_id,
                         )
                         # 模型原文只进日志（upstream_error[].body），不当作面向用户的错误文案。
-                        failure.body = {"upstream_text": text[:1000]}
+                        failure.body = _attach_stream_context({"upstream_text": text[:1000]}, backend)
                         logger.warning({
                             "event": "image_upstream_text_reply",
                             "trace_id": trace_id,
@@ -1905,6 +2061,27 @@ def _generate_single_image_attempts(
                             "account_email": account_email,
                             "text_chars": len(text),
                             "text_preview": text[:300],
+                            "stream_tail": (failure.body or {}).get("stream_tail") or [],
+                            "index": index,
+                        })
+                    elif plumbing_body is not None:
+                        failure = ImageGenerationError(
+                            IMAGE_RETRY_MESSAGE,
+                            status_code=502,
+                            error_type="server_error",
+                            code="upstream_error",
+                            account_email=account_email,
+                            conversation_id=output.conversation_id,
+                        )
+                        failure.body = _attach_stream_context(plumbing_body, backend)
+                        logger.warning({
+                            "event": "image_upstream_message_plumbing",
+                            "trace_id": trace_id,
+                            "conversation_id": output.conversation_id,
+                            "account_email": account_email,
+                            "text_chars": len(text),
+                            "text_preview": text[:300],
+                            "stream_tail": (failure.body or {}).get("stream_tail") or [],
                             "index": index,
                         })
                     else:
@@ -2122,7 +2299,7 @@ def _generate_single_image_attempts(
                     conversation_id=getattr(exc, "conversation_id", ""),
                 )
                 if upstream_text:
-                    exhausted.body = {"upstream_text": upstream_text[:1000]}
+                    exhausted.body = _attach_stream_context({"upstream_text": upstream_text[:1000]}, backend)
                 raise exhausted from exc
             logger.warning({
                 "event": "image_stream_generation_error",

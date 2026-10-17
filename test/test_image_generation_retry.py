@@ -10,7 +10,7 @@ from unittest import mock
 import services.log_service as log_service_module
 from services.config import ConfigStore
 from services.log_service import LoggedCall, LogService
-from services.openai_backend_api import ImagePollTimeoutError
+from services.openai_backend_api import ImagePollTimeoutError, is_skipped_mainline_error
 from services.stats_range import beijing_today
 from services.stats_service import ImageStatsService
 from services.protocol import conversation
@@ -20,7 +20,7 @@ from services.protocol.conversation import (
     ImageOutput,
     is_retryable_image_failure,
 )
-from utils.helper import CHANNEL_BUSY_MESSAGE, IMAGE_RETRY_MESSAGE
+from utils.helper import CHANNEL_BUSY_MESSAGE, IMAGE_RETRY_MESSAGE, UpstreamHTTPError
 
 CONTENT_POLICY_MESSAGE = (
     "非常抱歉，生成的图片可能违反了关于裸露、色情或情色内容的防护限制。"
@@ -271,6 +271,31 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(accounts.selected_image_tokens, ["token-a"])
         self.assertIn("skipped_mainline", str(failure))
 
+    def test_skipped_mainline_text_is_not_reported_as_text_reply(self):
+        def stream_fn(backend, request, index=1, total=1):
+            yield ImageOutput(
+                kind="message",
+                model=request.model,
+                index=index,
+                total=total,
+                text='{"skipped_mainline":true}',
+                conversation_id="conv-1",
+                plumbing_error=True,
+            )
+
+        failure, _ = self._run_expecting_error(["token-a"], stream_fn, 0)
+
+        # 管道错误伪装成正文：不能报成「模型只回了文字」，更不能报成内容违规
+        self.assertEqual(failure.code, "upstream_error")
+        self.assertEqual(failure.status_code, 502)
+        self.assertEqual(str(failure), IMAGE_RETRY_MESSAGE)
+        self.assertIs((failure.body or {}).get("skipped_mainline"), True)
+
+    def test_plumbing_detection_keeps_tool_params_as_text_reply(self):
+        self.assertIsNotNone(conversation._plumbing_message_body('{"skipped_mainline":true}'))
+        self.assertIsNone(conversation._plumbing_message_body('{"size":"1024x1024","n":1}'))
+        self.assertIsNone(conversation._plumbing_message_body("已将圣诞镂空桌布融入美式客厅。"))
+
     def test_retry_switches_account_on_poll_timeout(self):
         def stream_fn(backend, request, index=1, total=1):
             if backend.access_token == "token-a":
@@ -367,6 +392,38 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(str(failure), IMAGE_RETRY_MESSAGE)
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b", "token-c"])
         self.assertEqual(failure.image_diagnostics["attempts"][-1]["account_email"], "token-c@example.test")
+
+
+class SkippedMainlineTextStreamTests(unittest.TestCase):
+    def test_skipped_mainline_text_becomes_upstream_400_with_raw_stream(self):
+        """上游 400 {"skipped_mainline":true} 被 SSE 塞进正文时，要按 400 失败，
+        并把最近的上游 SSE 原文带进异常，日志详情里能看到上游到底回了什么。"""
+
+        request = ConversationRequest(
+            model="gpt-image-2",
+            prompt="draw a cat",
+            images=["data:image/png;base64,AA=="],
+        )
+        event = {
+            "type": "conversation.done",
+            "text": '{"skipped_mainline":true}',
+            "conversation_id": "conv-1",
+            "file_ids": [],
+            "sediment_ids": [],
+            "blocked": False,
+            "tool_invoked": True,
+            "turn_use_case": "image gen",
+            "raw": {"type": "error", "message": '{"skipped_mainline":true}'},
+        }
+
+        with mock.patch.object(conversation, "conversation_events", return_value=iter([event])):
+            with self.assertRaises(UpstreamHTTPError) as raised:
+                list(conversation.stream_image_outputs(SimpleNamespace(), request))
+
+        error = raised.exception
+        self.assertTrue(is_skipped_mainline_error(error))
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("skipped_mainline", error.body["stream_tail"][0]["payload"])
 
 
 class AttemptTrailLogTests(unittest.TestCase):

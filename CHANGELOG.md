@@ -16,6 +16,8 @@
 + [修复] 图生图「上游已出图却没返回」：SSE 已经给出 `file_ids`/`sediment_ids` 时，旧逻辑直接换下载地址，换不到就立刻放弃——而 SSE 刚关闭时文件/附件往往还没落盘，一次 404 就把已经生成好的图丢掉，最后把模型“已完成”的解说词当成失败上报。现在直接解析落空会回退轮询（最多 30 秒）等待落盘并重新解析。
 + [修复] 上游只回正文、没出图时不再报成 `content_policy_violation`：正文（通常还是“已将……融入……”这种完成时态解说）不再作为面向用户的 error 文案，改为 `upstream_text_reply`（502）并保留换号重试；模型原文放进日志的 `upstream_error[].body.upstream_text`。`describe_exception` 现在也会记录异常的分类码（`code`）。
 + [新增] 生图失败诊断新增取图现场：`resolve_initial_file_ids` / `resolve_initial_sediment_ids`、`resolve_direct`（hit/empty）、`resolve_fallback_poll_secs`、`resolve_poll`（hit/empty/timeout/error）、`resolve_poll_elapsed_ms`、`resolve_failures`（每个 id 换下载地址失败的原因），导出日志即可区分「图没生成」和「生成了但没取回来」。
++ [修复] 上游 `400 {"skipped_mainline":true}` 被 SSE 塞进 assistant 正文时，不再当成「模型只回了文字」重试三次、也不再等到轮询超时：识别为管道错误后立即按上游 400 失败，走原有的换号/重建 conduit 恢复流程，省下一整轮轮询预算。
++ [新增] 失败日志现在带上「上游到底回了什么」：`image_diagnostics.stream_tail` 记录最近 6 条上游 SSE 原始事件（截断），异常的 `upstream_error[].body.stream_tail` 里再放最近 2 条，日志详情/一键导出直接可见；日志页的上游报错卡片也会显示异常的 `code`。此前只记录解析后的正文，看不到原始事件形态。
 
 ## 2.0.3 - 2026-10-06
 

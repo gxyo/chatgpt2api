@@ -197,6 +197,7 @@ type UpstreamErrorFrame = {
   message?: string;
   context?: string;
   status_code?: number;
+  code?: string;
   retry_after?: number;
   body?: string;
 };
@@ -795,6 +796,7 @@ function LogsContent() {
                       <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
                         <Badge variant="danger" className="rounded-md">{frame.type || "异常"}</Badge>
                         {typeof frame.status_code === "number" ? <span>status={frame.status_code}</span> : null}
+                        {frame.code ? <span className="font-mono">{frame.code}</span> : null}
                         {frame.context ? <span>{frame.context}</span> : null}
                         {typeof frame.retry_after === "number" ? <span>retry_after={frame.retry_after}</span> : null}
                       </div>
