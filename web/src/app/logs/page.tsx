@@ -259,6 +259,16 @@ function formatDuration(item: SystemLog) {
   return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
 }
 
+const costFormatter = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY" });
+
+/** 本次生图消费；不涉及生图（或单价未配置）时后端返回 null，显示「—」。 */
+function formatCost(item: SystemLog) {
+  if (typeof item.cost !== "number" || !Number.isFinite(item.cost)) {
+    return "—";
+  }
+  return costFormatter.format(item.cost);
+}
+
 function getUrls(item: SystemLog | null) {
   const urls = item?.detail?.urls;
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
@@ -734,7 +744,7 @@ function LogsContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[900px]">
+            <Table className="min-w-[980px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
@@ -744,6 +754,7 @@ function LogsContent() {
                   {isCallLog ? <TableHead>状态</TableHead> : null}
                   {isCallLog ? <TableHead>重试</TableHead> : null}
                   {isCallLog ? <TableHead>数量</TableHead> : null}
+                  {isCallLog ? <TableHead>本次消费</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-40">操作</TableHead>
                 </TableRow>
@@ -751,7 +762,7 @@ function LogsContent() {
               <TableBody>
                 {isLoading && items.length === 0 ? (
                   <TableRow className="hover:bg-transparent">
-                    <TableCell colSpan={isCallLog ? 9 : 5} className="p-0">
+                    <TableCell colSpan={isCallLog ? 10 : 5} className="p-0">
                       <ContentLoading label="正在加载日志" />
                     </TableCell>
                   </TableRow>
@@ -785,6 +796,9 @@ function LogsContent() {
                         <TableCell>
                           <ImageCountCard count={urls.length} />
                         </TableCell>
+                      ) : null}
+                      {isCallLog ? (
+                        <TableCell className="whitespace-nowrap tabular-nums">{formatCost(item)}</TableCell>
                       ) : null}
                       <TableCell className="max-w-[420px] truncate text-neutral-500">{item.summary || "-"}</TableCell>
                       <TableCell>

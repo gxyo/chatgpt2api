@@ -959,6 +959,44 @@ class SnapshotRevenueBootstrapTests(unittest.TestCase):
         self.assertEqual(snapshot_version, stats_service.SNAPSHOT_VERSION)
 
 
+class ImageLogCostTests(unittest.TestCase):
+    def _item(self, endpoint: str, status: str = "success", model: str = "gpt-image-2",
+              urls: list[str] | None = None, log_type: str = "call") -> dict:
+        return json.loads(log_line(
+            "2026-09-28 10:00:00", endpoint, status=status, log_type=log_type,
+            model=model, urls=["https://img/1", "https://img/2"] if urls is None else urls,
+        ))
+
+    def test_successful_generation_charges_images_times_price(self):
+        item = self._item("/v1/images/generations")
+        self.assertEqual(stats_service.image_log_cost(item, {"gpt-image-2": 1.5}), 3.0)
+
+    def test_failed_and_policy_violation_are_free(self):
+        pricing = {"gpt-image-2": 1.5}
+        for status in ("failed", "policy_violation"):
+            self.assertEqual(stats_service.image_log_cost(self._item("/v1/images/edits", status=status), pricing), 0.0)
+
+    def test_non_image_call_and_account_log_are_none(self):
+        self.assertIsNone(stats_service.image_log_cost(self._item("/v1/chat/completions"), {"auto": 1}))
+        self.assertIsNone(stats_service.image_log_cost(self._item("/v1/images/generations", log_type="account"), {"auto": 1}))
+
+    def test_successful_task_endpoint_is_none_but_failure_is_free(self):
+        # 任务接口成功由 /v1/images/* 另行记费，这里不能再算一次。
+        self.assertIsNone(stats_service.image_log_cost(self._item("/api/image-tasks/generations"), {"auto": 1}))
+        self.assertEqual(
+            stats_service.image_log_cost(self._item("/api/image-tasks/generations", status="failed"), {"auto": 1}),
+            0.0,
+        )
+
+    def test_unpriced_model_returns_none(self):
+        self.assertIsNone(stats_service.image_log_cost(self._item("/v1/images/generations"), {}))
+        self.assertIsNone(stats_service.image_log_cost(self._item("/v1/images/generations", model=""), {}))
+
+    def test_no_urls_costs_zero(self):
+        item = self._item("/v1/images/generations", urls=[])
+        self.assertEqual(stats_service.image_log_cost(item, {"gpt-image-2": 1.5}), 0.0)
+
+
 class BuildImageStatsTests(unittest.TestCase):
     def test_build_image_stats_reads_pricing_from_config(self):
         import types

@@ -140,6 +140,8 @@ export type SystemLog = {
   type: "call" | "account" | string;
   summary?: string;
   detail?: Record<string, unknown>;
+  /** 本次生图消费（元）；null 表示不涉及生图或单价未配置。 */
+  cost?: number | null;
   [key: string]: unknown;
 };
 

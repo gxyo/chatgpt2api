@@ -273,6 +273,41 @@ def _parse_image_event(raw_line: str) -> tuple[str, str, str, int, str, int] | N
     return f"{time_text[:10]}T{hour_text}", mode, status, _parse_duration(detail), model, _parse_images(detail, status)
 
 
+def image_log_cost(item: dict[str, Any], pricing: dict[str, float] | None = None) -> float | None:
+    """单条日志的「本次消费」：只算生图调用，失败 / 违反策略不收费。
+
+    返回 None 表示这一条不涉及生图（或单价未配置，金额未知），前端显示「—」。
+    计费口径与统计页一致：按成功返回的图片数 × 请求模型的当前单价。
+    """
+    if not isinstance(item, dict) or item.get("type") != LOG_TYPE_CALL:
+        return None
+    detail = item.get("detail")
+    if not isinstance(detail, dict):
+        return None
+    endpoint = str(detail.get("endpoint") or "")
+    is_task_endpoint = endpoint in IMAGE_TASK_ENDPOINT_MODES
+    if endpoint not in IMAGE_ENDPOINT_MODES and not is_task_endpoint:
+        return None
+
+    raw_status = str(detail.get("status") or "")
+    status = raw_status if raw_status in _STATUSES else _STATUS_FAILED
+    if is_task_endpoint:
+        # 任务接口只在失败 / 违反策略时记日志，成功由 /v1/images/* 另行记录；
+        # 计费同样只认后者，避免同一次请求在两条日志上都显示消费。
+        return 0.0 if status != _STATUS_SUCCESS else None
+    if status != _STATUS_SUCCESS:
+        return 0.0
+    images = _parse_images(detail, status)
+    if images <= 0:
+        return 0.0
+
+    model = str(detail.get("model") or "").strip()
+    price = _parse_price((pricing or {}).get(model)) if model else None
+    if price is None:
+        return None
+    return round(images * price, 6)
+
+
 def _merge_day(hours: dict[str, dict[str, Any]], day: str) -> dict[str, Any]:
     merged = _empty_bucket()
     for hour in range(24):
@@ -834,5 +869,6 @@ __all__ = [
     "beijing_now",
     "beijing_today",
     "build_image_stats",
+    "image_log_cost",
     "image_stats_service",
 ]

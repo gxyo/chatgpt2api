@@ -21,7 +21,7 @@ from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_cleanup_service import cleanup_logs, log_storage_info
 from services.log_service import LOG_EXPORT_DEFAULT_LIMIT, log_service
 from services.proxy_service import test_proxy
-from services.stats_service import build_image_stats
+from services.stats_service import build_image_stats, image_log_cost
 from utils.beijing_time import beijing_now_text
 
 
@@ -135,12 +135,17 @@ def create_router(app_version: str) -> APIRouter:
     async def get_logs(type: str = "", status: str = "", start_date: str = "", end_date: str = "",
                        authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"items": log_service.list(
+        items = log_service.list(
             type=type.strip(),
             status=status.strip(),
             start_date=start_date.strip(),
             end_date=end_date.strip(),
-        )}
+        )
+        # 每条日志附上本地生图消费，前端直接展示，不用自己按单价折算。
+        pricing = config.model_pricing
+        for item in items:
+            item["cost"] = image_log_cost(item, pricing)
+        return {"items": items}
 
     @router.get("/api/logs/export")
     async def export_logs(type: str = "", status: str = "", start_date: str = "", end_date: str = "",
