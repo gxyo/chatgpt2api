@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, LoaderCircle, RefreshCw, Save, Search, Trash2 } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { ArrowRight, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, Route, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
@@ -37,10 +37,10 @@ const typeLabels: Record<string, string> = {
   [LogType.Account]: "账号管理日志",
 };
 
-/** 详情弹窗里的字段名：换号重试的两个轨迹字段翻译一下，其余保留原始键名。 */
+/** 详情弹窗里的字段名：翻译一下常用字段，其余保留原始键名。 */
 const detailLabels: Record<string, string> = {
-  account_trail: "账号轨迹",
-  attempts_summary: "尝试轨迹",
+  request_text: "请求内容",
+  error: "错误信息",
   upscale_target: "超分目标(px)",
   upscale_from_size: "超分前尺寸",
   upscale_to_size: "超分后尺寸",
@@ -49,6 +49,114 @@ const detailLabels: Record<string, string> = {
   upscale_queue_wait_ms: "超分排队(ms)",
   upscale_error: "超分失败原因",
 };
+
+/** 这两个字段单独排版，不进右侧对齐的键值网格。 */
+const trailDetailKeys = new Set(["account_trail", "attempts_summary"]);
+
+type AttemptOutcomeStyle = {
+  label: string;
+  variant: "success" | "warning" | "danger" | "secondary";
+};
+
+const attemptOutcomes: Record<string, AttemptOutcomeStyle> = {
+  success: { label: "成功", variant: "success" },
+  message: { label: "返回文案", variant: "warning" },
+  message_retry: { label: "文案重试", variant: "warning" },
+  poll_timeout: { label: "轮询超时", variant: "warning" },
+  transient_upstream: { label: "上游抖动", variant: "warning" },
+  mainline_rejected: { label: "主链路拒绝", variant: "warning" },
+  content_policy: { label: "内容拦截", variant: "danger" },
+  generation_error: { label: "生成失败", variant: "danger" },
+  no_image: { label: "未返回图片", variant: "danger" },
+  empty_stream: { label: "空流", variant: "warning" },
+  account_select_failed: { label: "选号失败", variant: "danger" },
+  unknown: { label: "未知", variant: "secondary" },
+};
+
+function attemptOutcomeStyle(outcome: string): AttemptOutcomeStyle {
+  return attemptOutcomes[outcome] || { label: outcome || "未知", variant: "secondary" };
+}
+
+/** 账号轨迹是后端拼好的一行 `a → b → c`。 */
+function splitAccountTrail(value: unknown): string[] {
+  if (typeof value !== "string") {
+    return [];
+  }
+  return value.split("→").map((item) => item.trim()).filter(Boolean);
+}
+
+/**
+ * 旧日志里同一段换号可能被每个流式 chunk 各拼了一遍（A→B→A→B…），
+ * 显示前把周期性重复压成一轮，别让两个账号看起来像换了二十次。
+ */
+function collapseAccountTrail(accounts: string[]): string[] {
+  const deduped = accounts.filter((email, index) => index === 0 || email !== accounts[index - 1]);
+  const length = deduped.length;
+  for (let period = 1; period <= Math.floor(length / 2); period += 1) {
+    let periodic = true;
+    for (let index = period; index < length; index += 1) {
+      if (deduped[index] !== deduped[index % period]) {
+        periodic = false;
+        break;
+      }
+    }
+    if (periodic) {
+      const remainder = length % period;
+      return remainder
+        ? [...deduped.slice(0, period), ...deduped.slice(length - remainder)]
+        : deduped.slice(0, period);
+    }
+  }
+  return deduped;
+}
+
+type AttemptStep = {
+  index: string;
+  email: string;
+  outcome: string;
+  marks: string[];
+  durationMs: number | null;
+  error: string;
+};
+
+type AttemptGroup = {
+  raw: string;
+  steps: AttemptStep[];
+  parsed: boolean;
+};
+
+/** 一条尝试：`#1 账号 结局 (标记) 123ms 错误`，结局之后几段都是可选的。 */
+function parseAttemptStep(text: string): AttemptStep | null {
+  const match = text.trim().match(/^#(\d+)\s+(\S*)\s+([A-Za-z_]+)(?:\s+\(([^)]*)\))?(?:\s+(\d+)ms)?(?:\s+(.*))?$/);
+  if (!match) {
+    return null;
+  }
+  return {
+    index: `#${match[1]}`,
+    email: match[2] === "?" ? "" : match[2],
+    outcome: match[3],
+    marks: (match[4] || "").split(",").map((mark) => mark.trim()).filter(Boolean),
+    durationMs: match[5] === undefined ? null : Number(match[5]),
+    error: (match[6] || "").trim(),
+  };
+}
+
+/** 尝试轨迹：`#1 … → #2 …`；多张图并行时各组之间用 ` | ` 分隔。 */
+function parseAttemptGroups(value: unknown): AttemptGroup[] {
+  if (typeof value !== "string" || !value.trim()) {
+    return [];
+  }
+  return value.split(" | ").map((raw) => {
+    const parts = raw.split(" → ");
+    const steps = parts.map(parseAttemptStep).filter((step): step is AttemptStep => step !== null);
+    const parsed = steps.length === parts.length;
+    return { raw, steps: parsed ? steps : [], parsed };
+  });
+}
+
+function formatAttemptDuration(milliseconds: number | null) {
+  return milliseconds === null ? "—" : `${(milliseconds / 1000).toFixed(2)} s`;
+}
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) {
@@ -143,6 +251,12 @@ function LogsContent() {
   const [isExporting, setIsExporting] = useState(false);
   const detailUrls = getUrls(detailLog);
   const detailUpstreamError = getUpstreamError(detailLog);
+  const detail = detailLog?.detail || {};
+  const detailFields = Object.entries(detail).filter(
+    ([key, value]) => key !== "urls" && !trailDetailKeys.has(key) && typeof value !== "object",
+  );
+  const accountTrail = collapseAccountTrail(splitAccountTrail(detail.account_trail));
+  const attemptGroups = parseAttemptGroups(detail.attempts_summary);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
   const pageSize = 10;
@@ -582,16 +696,97 @@ function LogsContent() {
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-6 py-5">
             <div className="space-y-4">
-              <div className="grid gap-3 rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-600 md:grid-cols-2">
-                {Object.entries(detailLog?.detail || {})
-                  .filter(([key, value]) => key !== "urls" && typeof value !== "object")
-                  .map(([key, value]) => (
-                    <div key={key} className="flex items-start justify-between gap-4">
-                      <span className="text-neutral-400">{detailLabels[key] || key}</span>
-                      <span className="text-right font-medium break-all text-neutral-700">{String(value)}</span>
+              <div className="grid gap-x-6 gap-y-3 rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-600 md:grid-cols-2">
+                {detailFields.map(([key, value]) => {
+                  const label = detailLabels[key] || key;
+                  // 提示词/错误信息是长文本，占满整行、左对齐，右对齐会挤成难读的一团。
+                  if (key === "request_text" || key === "error") {
+                    return (
+                      <div key={key} className="space-y-1 md:col-span-2">
+                        <div className="text-xs text-neutral-400">{label}</div>
+                        <p className="leading-6 break-words whitespace-pre-wrap text-neutral-700">{String(value)}</p>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div key={key} className="flex min-w-0 items-start justify-between gap-4">
+                      {/* shrink-0 + nowrap：格子变窄时标签不应该被压成竖排的单字。 */}
+                      <span className="shrink-0 whitespace-nowrap text-neutral-400">{label}</span>
+                      <span className="min-w-0 text-right font-medium break-words text-neutral-700">{String(value)}</span>
                     </div>
-                  ))}
+                  );
+                })}
               </div>
+              {accountTrail.length ? (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
+                    <Route className="size-4 text-neutral-400" />
+                    账号轨迹
+                    <span className="text-xs font-normal text-neutral-400">这次请求实际用过的账号，按尝试顺序</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-neutral-200 bg-white p-3">
+                    {accountTrail.map((email, index) => (
+                      <Fragment key={`${email}-${index}`}>
+                        {index > 0 ? <ArrowRight className="size-3.5 shrink-0 text-neutral-300" /> : null}
+                        <span className="inline-flex max-w-full items-center gap-1.5 rounded-lg bg-neutral-100 py-1 pr-2 pl-1 text-xs text-neutral-700">
+                          <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-white text-[10px] font-semibold text-neutral-500">
+                            {index + 1}
+                          </span>
+                          <span className="break-all">{email}</span>
+                        </span>
+                      </Fragment>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {attemptGroups.length ? (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
+                    <ListChecks className="size-4 text-neutral-400" />
+                    尝试轨迹
+                    <span className="text-xs font-normal text-neutral-400">每次换号的结局、耗时与现场</span>
+                  </div>
+                  <div className="space-y-2">
+                    {attemptGroups.map((group, groupIndex) => (
+                      <div key={groupIndex} className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
+                        {group.parsed ? (
+                          group.steps.map((step, stepIndex) => {
+                            const outcome = attemptOutcomeStyle(step.outcome);
+                            return (
+                              <div
+                                key={stepIndex}
+                                className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 px-3 py-2.5 text-xs ${stepIndex > 0 ? "border-t border-neutral-100" : ""}`}
+                              >
+                                <span className="inline-flex h-5 min-w-8 shrink-0 items-center justify-center rounded-md bg-neutral-100 px-1 font-mono text-[11px] font-semibold text-neutral-600">
+                                  {step.index}
+                                </span>
+                                <span className="break-all font-medium text-neutral-700">{step.email || "未选出账号"}</span>
+                                <Badge variant={outcome.variant} className="rounded-md">{outcome.label}</Badge>
+                                {step.marks.map((mark, markIndex) => (
+                                  <span
+                                    key={`${mark}-${markIndex}`}
+                                    className="rounded-md bg-neutral-50 px-1.5 py-0.5 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200 ring-inset"
+                                  >
+                                    {mark}
+                                  </span>
+                                ))}
+                                <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-neutral-400">
+                                  {formatAttemptDuration(step.durationMs)}
+                                </span>
+                                {step.error ? <p className="w-full leading-5 text-neutral-500">{step.error}</p> : null}
+                              </div>
+                            );
+                          })
+                        ) : (
+                          <pre className="overflow-x-auto px-3 py-2.5 leading-6 whitespace-pre-wrap break-all text-neutral-600">
+                            {group.raw}
+                          </pre>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {detailUpstreamError.length ? (
                 <div className="space-y-2">
                   <div className="text-sm font-medium text-neutral-700">上游报错</div>

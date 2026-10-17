@@ -350,17 +350,33 @@ def add_postprocess_detail(
 
 
 def _flatten_account_trail(trails: list[list[str]]) -> list[str]:
-    """把多份轨迹拼成一条账号顺序，去掉流式 chunk 造成的连续重复。"""
+    """把多份轨迹拼成一条账号顺序。
+
+    每个流式 chunk 都会带一份完整的轨迹，多图并行时不同图片的换号顺序还可能
+    不同（A→B 和 B→A）。以前只跳过「与上一份完全相同」的副本，副本一旦轮转
+    （A→B、B→A、A→B…）就会拼成 A→B→A→B…——日志上看着像换了二十个号，
+    实际只有两个。
+
+    现在只合并「带来新账号」的轨迹：一份轨迹里的账号如果都已经在这条轨迹上，
+    说明它只是同一段换号过程的重复/轮转副本，整份跳过。
+    """
     flat: list[str] = []
-    previous: list[str] | None = None
+    seen: set[str] = set()
     for trail in trails:
-        if not trail or trail == previous:
-            # 同一个 chunk 会带同一份轨迹，多图时也可能完全相同，只算一次。
+        if not trail:
             continue
-        previous = trail
-        for email in trail:
-            if not flat or flat[-1] != email:
-                flat.append(email)
+        # 先吃掉轨迹内部的相邻重复：同一个号被连续尝试两次只留一次。
+        normalized = [
+            email for index, email in enumerate(trail)
+            if index == 0 or email != trail[index - 1]
+        ]
+        if all(email in seen for email in normalized):
+            continue
+        for email in normalized:
+            if flat and flat[-1] == email:
+                continue
+            flat.append(email)
+            seen.add(email)
     return flat
 
 

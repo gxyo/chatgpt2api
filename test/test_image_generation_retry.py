@@ -441,6 +441,62 @@ class AttemptTrailLogTests(unittest.TestCase):
         self.assertEqual(items[0]["detail"]["account_trail"],
                          "token-a@example.test → token-b@example.test")
 
+    def test_repeated_chunk_trails_collapse_to_one_round(self):
+        """每个流式 chunk 都会带一份同样的轨迹，不能拼成 A → B → A → B。"""
+        call = LoggedCall(
+            {"id": "k1", "name": "管理员", "role": "admin"},
+            "/v1/images/edits", "gpt-image-2", "图生图",
+        )
+        chunks = [
+            {"object": "image.generation.result", "data": [{"url": "ok"}],
+             "_account_trail": ["token-a@example.test", "token-b@example.test"]},
+        ] * 20
+
+        list(call.stream(iter(chunks)))
+
+        self.assertEqual(
+            self.service.list()[0]["detail"]["account_trail"],
+            "token-a@example.test → token-b@example.test",
+        )
+
+    def test_rotated_chunk_trails_do_not_ping_pong(self):
+        """多图并行时副本顺序可能相反（B → A）；和 A → B 拼在一起就是一圈圈重复。"""
+        call = LoggedCall(
+            {"id": "k1", "name": "管理员", "role": "admin"},
+            "/v1/images/edits", "gpt-image-2", "图生图",
+        )
+        chunks = []
+        for _ in range(10):
+            chunks.append({"_account_trail": ["token-a@example.test", "token-b@example.test"],
+                           "data": [{"url": "a"}]})
+            chunks.append({"_account_trail": ["token-b@example.test", "token-a@example.test"],
+                           "data": [{"url": "b"}]})
+
+        list(call.stream(iter(chunks)))
+
+        self.assertEqual(
+            self.service.list()[0]["detail"]["account_trail"],
+            "token-a@example.test → token-b@example.test",
+        )
+
+    def test_trails_with_new_accounts_are_still_merged(self):
+        """只丢弃「没有新账号」的副本：别的图片确实换了新号时要保留。"""
+        call = LoggedCall(
+            {"id": "k1", "name": "管理员", "role": "admin"},
+            "/v1/images/edits", "gpt-image-2", "图生图",
+        )
+        chunks = [
+            {"_account_trail": ["token-a@example.test", "token-b@example.test"], "data": [{"url": "a"}]},
+            {"_account_trail": ["token-c@example.test", "token-d@example.test"], "data": [{"url": "b"}]},
+        ]
+
+        list(call.stream(iter(chunks)))
+
+        self.assertEqual(
+            self.service.list()[0]["detail"]["account_trail"],
+            "token-a@example.test → token-b@example.test → token-c@example.test → token-d@example.test",
+        )
+
     def _stats(self):
         today = beijing_today()
         return ImageStatsService(self.service.path).summary(today, today)["totals"]
