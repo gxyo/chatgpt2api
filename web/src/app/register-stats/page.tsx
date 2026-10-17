@@ -32,6 +32,7 @@ const RATE_DOT = "bg-brand";
 
 // 与请求统计页保持同一套区间口径，默认今天。
 const PRESETS = [
+  { key: "yesterday", label: "昨天", days: 1 },
   { key: "today", label: "今天", days: 1 },
   { key: "week", label: "近 7 天", days: 7 },
   { key: "month", label: "近 30 天", days: 30 },
@@ -113,7 +114,8 @@ function RegisterStatsContent() {
   }, [preset, startDate, endDate]);
 
   const applyPreset = (key: PresetKey, days: number) => {
-    const end = getBeijingToday();
+    // 「昨天」是独立的一天，不能按 days 从今天往前数，否则区间会跨到今天。
+    const end = key === "yesterday" ? shiftDate(getBeijingToday(), -1) : getBeijingToday();
     const start = key === "all" ? startDate : days <= 1 ? end : shiftDate(end, -(days - 1));
     // 区间没变就不进加载态（effect 不会重跑），变了才清空卡片数字，避免挂着上一个区间的数。
     if (key === preset && (key === "all" || (start === startDate && end === endDate))) {

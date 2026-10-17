@@ -31,6 +31,7 @@ const LIFETIME_DOT = "bg-[#7c5c24] dark:bg-[#c9a45a]";
 
 // days=0 表示不按天数取区间，交给后端按已有记录算「全部」。
 const PRESETS = [
+  { key: "yesterday", label: "昨天", days: 1 },
   { key: "today", label: "今天", days: 1 },
   { key: "week", label: "近 7 天", days: 7 },
   { key: "month", label: "近 30 天", days: 30 },
@@ -112,7 +113,8 @@ function StatsContent() {
       setPreset("all");
       return;
     }
-    const end = getBeijingToday();
+    // 「昨天」是独立的一天，不能按 days 从今天往前数，否则区间会跨到今天。
+    const end = key === "yesterday" ? shiftDate(getBeijingToday(), -1) : getBeijingToday();
     setStartDate(days <= 1 ? end : shiftDate(end, -(days - 1)));
     setEndDate(end);
     setPreset(key);
