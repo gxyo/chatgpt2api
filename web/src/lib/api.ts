@@ -222,7 +222,14 @@ export type RegisterConfig = {
   threads: number;
   mode: "total" | "quota" | "available";
   target_quota: number;
-  target_available: number;
+  /** 白天时段（北京时间 HH:MM）及其目标可用账号数。 */
+  available_day_start: string;
+  available_day_end: string;
+  available_day_target: number;
+  /** 夜间时段（北京时间 HH:MM）及其目标可用账号数。 */
+  available_night_start: string;
+  available_night_end: string;
+  available_night_target: number;
   refresh_batch_size: number;
   check_interval: number;
   /** 单个域名注册成功后的冷却秒数；0 表示不限制。 */
@@ -240,6 +247,9 @@ export type RegisterConfig = {
     success_rate?: number;
     current_quota?: number;
     current_available?: number;
+    /** 当前命中的时段（白天/夜间/空）与对应目标，仅可用账号模式下有意义。 */
+    available_period?: string;
+    available_target?: number;
     started_at?: string;
     updated_at?: string;
     finished_at?: string;

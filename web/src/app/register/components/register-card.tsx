@@ -24,7 +24,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { formatBeijingTimeOfDay } from "@/lib/beijing-time";
 
-import { useSettingsStore } from "../../settings/store";
+import { useSettingsStore, type RegisterScheduleField } from "../../settings/store";
 import { DomainListField } from "./domain-list-field";
 
 /** 表单控件统一尺寸，省得每个字段各写一遍。 */
@@ -122,7 +122,7 @@ export function RegisterCard() {
   const setThreads = useSettingsStore((state) => state.setRegisterThreads);
   const setMode = useSettingsStore((state) => state.setRegisterMode);
   const setTargetQuota = useSettingsStore((state) => state.setRegisterTargetQuota);
-  const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
+  const setSchedule = useSettingsStore((state) => state.setRegisterScheduleField);
   const setRefreshBatchSize = useSettingsStore((state) => state.setRegisterRefreshBatchSize);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
   const setDomainCooldown = useSettingsStore((state) => state.setRegisterDomainCooldown);
@@ -286,14 +286,63 @@ export function RegisterCard() {
                       disabled={locked || config.mode !== "quota"}
                     />
                   </Field>
-                  <Field label="目标可用账号" hint="仅「可用账号数量」模式下生效">
-                    <Input
-                      value={String(config.target_available || "")}
-                      onChange={(event) => setTargetAvailable(event.target.value)}
-                      className={FIELD_CLASS}
-                      disabled={locked || config.mode !== "available"}
-                    />
-                  </Field>
+                  <div className={`sm:col-span-2 ${PROVIDER_CARD_CLASS}`}>
+                    <div>
+                      <div className="text-sm text-neutral-700">目标可用账号</div>
+                      <p className="mt-0.5 text-xs text-neutral-400">
+                        仅「可用账号数量」模式下生效；按北京时间取当前时段的目标。时段外暂停注册，起止相同表示该时段不生效。
+                      </p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {(
+                        [
+                          { label: "白天", startField: "available_day_start", endField: "available_day_end", targetField: "available_day_target" },
+                          { label: "夜间", startField: "available_night_start", endField: "available_night_end", targetField: "available_night_target" },
+                        ] as const satisfies ReadonlyArray<{
+                          label: string;
+                          startField: RegisterScheduleField;
+                          endField: RegisterScheduleField;
+                          targetField: RegisterScheduleField;
+                        }>
+                      ).map((period) => (
+                        <div key={period.label} className="space-y-3 rounded-lg border border-neutral-200 bg-white p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-medium text-neutral-700">{period.label}</span>
+                            <div className="flex items-center gap-1.5">
+                              <Input
+                                type="time"
+                                value={config[period.startField] || ""}
+                                onChange={(event) => setSchedule(period.startField, event.target.value)}
+                                className="h-9 w-[7.5rem] rounded-lg border-neutral-200 bg-white tabular-nums"
+                                disabled={locked || config.mode !== "available"}
+                              />
+                              <span className="text-xs text-neutral-400">至</span>
+                              <Input
+                                type="time"
+                                value={config[period.endField] || ""}
+                                onChange={(event) => setSchedule(period.endField, event.target.value)}
+                                className="h-9 w-[7.5rem] rounded-lg border-neutral-200 bg-white tabular-nums"
+                                disabled={locked || config.mode !== "available"}
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="shrink-0 text-xs text-neutral-500">目标可用账号</span>
+                            <Input
+                              type="number"
+                              min={1}
+                              step={1}
+                              value={String(config[period.targetField] || "")}
+                              onChange={(event) => setSchedule(period.targetField, event.target.value)}
+                              className="h-9 w-24 rounded-lg border-neutral-200 bg-white tabular-nums"
+                              disabled={locked || config.mode !== "available"}
+                            />
+                            <span className="text-xs text-neutral-400">个</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                   <Field label="每注册几个后刷新" hint="完成后刷新号池，并按最新缺口继续补号">
                     <Input
                       type="number"

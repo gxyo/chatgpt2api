@@ -18,7 +18,12 @@ class RegisterConfigRequest(BaseModel):
     threads: int | None = None
     mode: str | None = None
     target_quota: int | None = None
-    target_available: int | None = None
+    available_day_start: str | None = None
+    available_day_end: str | None = None
+    available_day_target: int | None = None
+    available_night_start: str | None = None
+    available_night_end: str | None = None
+    available_night_target: int | None = None
     refresh_batch_size: int | None = None
     check_interval: int | None = None
     domain_cooldown: int | None = None

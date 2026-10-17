@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -12,9 +13,19 @@ from services.account_service import account_service
 from services.config import DATA_DIR
 from services.register import browser_reaper, mail_provider, openai_register
 from services.register_stats_service import RegisterStatsStore
+from utils.beijing_time import beijing_now
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
+
+# 可用账号数量模式的两个时段。时间按北京时间解释，默认刚好覆盖一整天。
+DEFAULT_AVAILABLE_DAY_START = "08:00"
+DEFAULT_AVAILABLE_DAY_END = "20:00"
+DEFAULT_AVAILABLE_NIGHT_START = "20:00"
+DEFAULT_AVAILABLE_NIGHT_END = "08:00"
+DEFAULT_AVAILABLE_TARGET = 10
+
+_CLOCK_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 # 撞上 PID/线程耗尽后自动清理残留浏览器进程的次数上限。清完还是起不来说明不是
 # 泄漏而是真的到顶了，再重试只是刷屏，此时才停下等人工处理。
@@ -56,6 +67,38 @@ def _safe_count(value: object) -> int:
         return 0
 
 
+def _positive_int(value: object, default: int) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return max(1, int(default))
+
+
+def _normalize_clock(value: object, default: str) -> str:
+    """把时段边界收敛成 HH:MM；存储被手改坏时退回默认值，避免 int() 拆分钟时抛错。"""
+    text = str(value or "").strip()
+    return text if _CLOCK_PATTERN.match(text) else default
+
+
+def _clock_minutes(value: str) -> int:
+    hour, minute = value.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def _clock_in_window(now_minutes: int, start: str, end: str) -> bool:
+    """判断一天中的第几分钟是否落在 [start, end) 内。
+
+    起 > 止表示时段跨零点（如 20:00-08:00）；起止相同视为该时段不生效。
+    """
+    start_minutes = _clock_minutes(start)
+    end_minutes = _clock_minutes(end)
+    if start_minutes == end_minutes:
+        return False
+    if start_minutes < end_minutes:
+        return start_minutes <= now_minutes < end_minutes
+    return now_minutes >= start_minutes or now_minutes < end_minutes
+
+
 def _normalize_cloudflare_domain_stats(value: object) -> list[dict]:
     rows = value if isinstance(value, list) else []
     normalized: list[dict] = []
@@ -86,7 +129,7 @@ def _normalize_cloudflare_domain_stats(value: object) -> list[dict]:
 
 
 def _default_config() -> dict:
-    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "refresh_batch_size": 5, "check_interval": 5, "domain_cooldown": 0, "enabled": False, "cloudflare_domain_stats": [], "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
+    return {**openai_register.config, "mode": "total", "target_quota": 100, "available_day_start": DEFAULT_AVAILABLE_DAY_START, "available_day_end": DEFAULT_AVAILABLE_DAY_END, "available_day_target": DEFAULT_AVAILABLE_TARGET, "available_night_start": DEFAULT_AVAILABLE_NIGHT_START, "available_night_end": DEFAULT_AVAILABLE_NIGHT_END, "available_night_target": DEFAULT_AVAILABLE_TARGET, "refresh_batch_size": 5, "check_interval": 5, "domain_cooldown": 0, "enabled": False, "cloudflare_domain_stats": [], "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0, "available_period": "", "available_target": 0}}
 
 
 def _normalize(raw: dict) -> dict:
@@ -96,7 +139,15 @@ def _normalize(raw: dict) -> dict:
     cfg["threads"] = max(1, int(cfg.get("threads") or 1))
     cfg["mode"] = str(cfg.get("mode") or "total").strip() if str(cfg.get("mode") or "total").strip() in {"total", "quota", "available"} else "total"
     cfg["target_quota"] = max(1, int(cfg.get("target_quota") or 1))
-    cfg["target_available"] = max(1, int(cfg.get("target_available") or 1))
+    # 旧版只有一个 target_available；升级后用它同时作为白天/夜间的初值，然后彻底移除。
+    legacy_available = _positive_int(raw.get("target_available"), DEFAULT_AVAILABLE_TARGET)
+    cfg["available_day_target"] = _positive_int(raw.get("available_day_target"), legacy_available)
+    cfg["available_night_target"] = _positive_int(raw.get("available_night_target"), legacy_available)
+    cfg.pop("target_available", None)
+    cfg["available_day_start"] = _normalize_clock(raw.get("available_day_start"), DEFAULT_AVAILABLE_DAY_START)
+    cfg["available_day_end"] = _normalize_clock(raw.get("available_day_end"), DEFAULT_AVAILABLE_DAY_END)
+    cfg["available_night_start"] = _normalize_clock(raw.get("available_night_start"), DEFAULT_AVAILABLE_NIGHT_START)
+    cfg["available_night_end"] = _normalize_clock(raw.get("available_night_end"), DEFAULT_AVAILABLE_NIGHT_END)
     cfg["refresh_batch_size"] = max(1, int(cfg.get("refresh_batch_size") or 5))
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
     # 0 表示不限制；冷却时长以秒为单位，不设下限。
@@ -333,7 +384,7 @@ class RegisterService:
             self._drop_mail_proxy()
             self._logs = []
             metrics = self._pool_metrics()
-            self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
+            self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "available_period": "", "available_target": 0, "started_at": _now(), "updated_at": _now()}
             self._sync_engine_config()
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
@@ -356,7 +407,7 @@ class RegisterService:
     def reset(self) -> dict:
         with self._lock:
             self._logs = []
-            self._config["stats"] = {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, **self._pool_metrics(), "updated_at": _now()}
+            self._config["stats"] = {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, **self._pool_metrics(), "available_period": "", "available_target": 0, "updated_at": _now()}
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": 0.0})
             self._save()
@@ -414,6 +465,33 @@ class RegisterService:
             self._append_log(f"检查前刷新账号信息和额度完成：成功 {refreshed} 个", "green")
         return True
 
+    def _available_schedule(self, cfg: dict) -> dict:
+        """按北京时间判断当前所处时段，返回该时段的目标可用账号数。
+
+        两个时段允许跨零点（起 > 止，如 20:00-08:00）；起止相同视为该时段不生效；
+        两个时段重叠时白天优先。都不匹配时 period 为空，调用方据此暂停注册。
+        """
+        now = beijing_now()
+        now_minutes = now.hour * 60 + now.minute
+        periods = (
+            (
+                "白天",
+                str(cfg.get("available_day_start") or DEFAULT_AVAILABLE_DAY_START),
+                str(cfg.get("available_day_end") or DEFAULT_AVAILABLE_DAY_END),
+                _positive_int(cfg.get("available_day_target"), DEFAULT_AVAILABLE_TARGET),
+            ),
+            (
+                "夜间",
+                str(cfg.get("available_night_start") or DEFAULT_AVAILABLE_NIGHT_START),
+                str(cfg.get("available_night_end") or DEFAULT_AVAILABLE_NIGHT_END),
+                _positive_int(cfg.get("available_night_target"), DEFAULT_AVAILABLE_TARGET),
+            ),
+        )
+        for name, start, end, target in periods:
+            if _clock_in_window(now_minutes, start, end):
+                return {"period": name, "target": target, "window": f"{start}-{end}", "now": now.strftime("%H:%M")}
+        return {"period": "", "target": 0, "window": "", "now": now.strftime("%H:%M")}
+
     def _target_plan(self, cfg: dict, submitted: int) -> dict:
         mode = str(cfg.get("mode") or "total")
         if mode in {"quota", "available"} and not self._refresh_pool_before_check():
@@ -430,9 +508,22 @@ class RegisterService:
             quota_gap = max(0, target_quota - metrics["current_quota"])
             return {"reached": reached, "batch_size": 0 if reached else min(refresh_batch_size, max(1, quota_gap))}
         if mode == "available":
-            target_available = int(cfg.get("target_available") or 1)
+            schedule = self._available_schedule(cfg)
+            self._bump(available_period=schedule["period"], available_target=schedule["target"])
+            if not schedule["period"]:
+                self._append_log(
+                    f"检查号池：当前北京时间 {schedule['now']} 不在白天/夜间注册时段内，暂停注册",
+                    "yellow",
+                )
+                return {"reached": True, "batch_size": 0}
+            target_available = schedule["target"]
             reached = metrics["current_available"] >= target_available
-            self._append_log(f"检查号池：当前正常账号={metrics['current_available']}，目标账号={cfg.get('target_available')}，当前剩余额度={metrics['current_quota']}，{'跳过注册' if reached else '继续注册'}", "yellow")
+            self._append_log(
+                f"检查号池（{schedule['period']}时段 {schedule['window']}，当前 {schedule['now']}）："
+                f"当前正常账号={metrics['current_available']}，目标账号={target_available}，"
+                f"当前剩余额度={metrics['current_quota']}，{'跳过注册' if reached else '继续注册'}",
+                "yellow",
+            )
             missing = max(0, target_available - metrics["current_available"])
             return {"reached": reached, "batch_size": 0 if reached else min(refresh_batch_size, missing)}
         return {"reached": submitted >= int(cfg.get("total") or 1), "batch_size": 0}

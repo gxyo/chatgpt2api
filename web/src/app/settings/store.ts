@@ -30,6 +30,15 @@ function normalizeOptionalInterval(value: unknown, defaultValue: number | null =
   return Math.floor(interval);
 }
 
+/** 可用账号数量模式下可编辑的时段字段。 */
+export type RegisterScheduleField =
+  | "available_day_start"
+  | "available_day_end"
+  | "available_day_target"
+  | "available_night_start"
+  | "available_night_end"
+  | "available_night_target";
+
 const DEFAULT_UPSTREAM_MODEL_NAME = "gpt-5-5";
 const THINKING_EFFORT_CHOICES = ["auto", "standard", "extended", "max"] as const;
 type ThinkingEffort = (typeof THINKING_EFFORT_CHOICES)[number];
@@ -170,7 +179,7 @@ type SettingsStore = {
   setRegisterThreads: (value: string) => void;
   setRegisterMode: (value: "total" | "quota" | "available") => void;
   setRegisterTargetQuota: (value: string) => void;
-  setRegisterTargetAvailable: (value: string) => void;
+  setRegisterScheduleField: (field: RegisterScheduleField, value: string) => void;
   setRegisterRefreshBatchSize: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
   setRegisterDomainCooldown: (value: string) => void;
@@ -482,8 +491,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, target_quota: Number(value) || 0 } } : {});
   },
 
-  setRegisterTargetAvailable: (value) => {
-    set((state) => state.registerConfig ? { registerConfig: { ...state.registerConfig, target_available: Number(value) || 0 } } : {});
+  setRegisterScheduleField: (field, value) => {
+    set((state) => {
+      if (!state.registerConfig) return {};
+      const patch = (
+        field.endsWith("_target") ? { [field]: Number(value) || 0 } : { [field]: value }
+      ) as Partial<RegisterConfig>;
+      return { registerConfig: { ...state.registerConfig, ...patch } };
+    });
   },
 
   setRegisterRefreshBatchSize: (value) => {
@@ -556,7 +571,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         threads: Math.max(1, Number(registerConfig.threads) || 1),
         mode: registerConfig.mode,
         target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
-        target_available: Math.max(1, Number(registerConfig.target_available) || 1),
+        available_day_start: registerConfig.available_day_start || "08:00",
+        available_day_end: registerConfig.available_day_end || "20:00",
+        available_day_target: Math.max(1, Number(registerConfig.available_day_target) || 1),
+        available_night_start: registerConfig.available_night_start || "20:00",
+        available_night_end: registerConfig.available_night_end || "08:00",
+        available_night_target: Math.max(1, Number(registerConfig.available_night_target) || 1),
         refresh_batch_size: Math.max(1, Number(registerConfig.refresh_batch_size) || 5),
         check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
         domain_cooldown: Math.max(0, Number(registerConfig.domain_cooldown) || 0),
@@ -584,7 +604,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           threads: Math.max(1, Number(registerConfig.threads) || 1),
           mode: registerConfig.mode,
           target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
-          target_available: Math.max(1, Number(registerConfig.target_available) || 1),
+          available_day_start: registerConfig.available_day_start || "08:00",
+          available_day_end: registerConfig.available_day_end || "20:00",
+          available_day_target: Math.max(1, Number(registerConfig.available_day_target) || 1),
+          available_night_start: registerConfig.available_night_start || "20:00",
+          available_night_end: registerConfig.available_night_end || "08:00",
+          available_night_target: Math.max(1, Number(registerConfig.available_night_target) || 1),
           refresh_batch_size: Math.max(1, Number(registerConfig.refresh_batch_size) || 5),
           check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
           domain_cooldown: Math.max(0, Number(registerConfig.domain_cooldown) || 0),

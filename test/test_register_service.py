@@ -3,8 +3,31 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+
+
+def available_schedule(
+    *,
+    day_target: int = 1,
+    night_target: int = 1,
+    day_start: str = "08:00",
+    day_end: str = "20:00",
+    night_start: str = "20:00",
+    night_end: str = "08:00",
+) -> dict:
+    """可用账号模式的完整时段配置，避免测试依赖 _normalize 的默认值。"""
+    return {
+        "mode": "available",
+        "target_quota": 1,
+        "available_day_start": day_start,
+        "available_day_end": day_end,
+        "available_day_target": day_target,
+        "available_night_start": night_start,
+        "available_night_end": night_end,
+        "available_night_target": night_target,
+    }
 
 
 class FakeAccountService:
@@ -166,10 +189,8 @@ class RegisterServiceTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp_dir:
                 service = register_module.RegisterService(Path(tmp_dir) / "register.json")
 
-                reached = service._target_reached(
-                    {"mode": "available", "target_available": 1, "target_quota": 1},
-                    submitted=0,
-                )
+                with patch.object(register_module, "beijing_now", return_value=datetime(2026, 10, 17, 12, 0)):
+                    reached = service._target_reached(available_schedule(day_target=1), submitted=0)
                 saved = json.loads((Path(tmp_dir) / "register.json").read_text(encoding="utf-8"))
 
             self.assertTrue(reached)
@@ -206,10 +227,11 @@ class RegisterServiceTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp_dir:
                 service = register_module.RegisterService(Path(tmp_dir) / "register.json")
 
-                plan = service._target_plan(
-                    {"mode": "available", "target_available": 40, "target_quota": 1, "refresh_batch_size": 3},
-                    submitted=0,
-                )
+                with patch.object(register_module, "beijing_now", return_value=datetime(2026, 10, 17, 12, 0)):
+                    plan = service._target_plan(
+                        {**available_schedule(day_target=40), "refresh_batch_size": 3},
+                        submitted=0,
+                    )
 
             self.assertFalse(plan["reached"])
             self.assertEqual(plan["batch_size"], 3)
@@ -252,8 +274,7 @@ class RegisterServiceTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp_dir:
                 service = register_module.RegisterService(Path(tmp_dir) / "register.json")
                 service.update({
-                    "mode": "available",
-                    "target_available": 5,
+                    **available_schedule(day_target=5, night_target=5),
                     "refresh_batch_size": 2,
                     "check_interval": 1,
                     "threads": 1,
@@ -266,7 +287,8 @@ class RegisterServiceTests(unittest.TestCase):
                         fake_account_service.add_account(task_number)
                     return {"ok": succeeded}
 
-                with patch.object(register_module.openai_register, "worker", side_effect=worker_result):
+                with patch.object(register_module.openai_register, "worker", side_effect=worker_result), \
+                     patch.object(register_module, "beijing_now", return_value=datetime(2026, 10, 17, 12, 0)):
                     service.start()
                     self.assertIsNotNone(service._runner)
                     service._runner.join(timeout=5)
@@ -278,6 +300,93 @@ class RegisterServiceTests(unittest.TestCase):
                 self.assertIn("本轮计划补号 2 个，完成后刷新号池并重新计算缺口", [
                     item["text"] for item in service.get()["logs"]
                 ])
+        finally:
+            register_module.account_service = original_account_service
+
+    def test_clock_window_supports_cross_midnight(self) -> None:
+        from services.register_service import _clock_in_window
+
+        self.assertTrue(_clock_in_window(23 * 60, "20:00", "08:00"))
+        self.assertTrue(_clock_in_window(7 * 60 + 59, "20:00", "08:00"))
+        self.assertFalse(_clock_in_window(8 * 60, "20:00", "08:00"))
+        self.assertFalse(_clock_in_window(20 * 60, "08:00", "20:00"))
+        # 起止相同表示该时段不生效。
+        self.assertFalse(_clock_in_window(12 * 60, "08:00", "08:00"))
+
+    def test_available_mode_uses_the_target_of_the_current_period(self) -> None:
+        from services import register_service as register_module
+
+        class FixedAccountService:
+            def list_tokens(self) -> list[str]:
+                return ["token-a"]
+
+            def refresh_accounts(self, tokens: list[str], defer_invalid_removal: bool = True) -> dict:
+                return {"refreshed": len(tokens), "errors": [], "items": self.list_accounts()}
+
+            def list_accounts(self) -> list[dict]:
+                return [{"access_token": "token-a", "status": "正常", "quota": 5}]
+
+        original_account_service = register_module.account_service
+        try:
+            register_module.account_service = FixedAccountService()
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                service = register_module.RegisterService(Path(tmp_dir) / "register.json")
+                cfg = {**available_schedule(day_target=3, night_target=1), "refresh_batch_size": 5}
+
+                with patch.object(register_module, "beijing_now", return_value=datetime(2026, 10, 17, 12, 0)):
+                    day_plan = service._target_plan(cfg, submitted=0)
+                day_snapshot = service.get()["stats"]
+
+                with patch.object(register_module, "beijing_now", return_value=datetime(2026, 10, 17, 22, 0)):
+                    night_plan = service._target_plan(cfg, submitted=0)
+                night_snapshot = service.get()["stats"]
+
+            # 当前 1 个正常账号：白天目标 3 → 还差 2，按缺口补号；夜间目标 1 → 已达标。
+            self.assertFalse(day_plan["reached"])
+            self.assertEqual(day_plan["batch_size"], 2)
+            self.assertEqual(day_snapshot["available_period"], "白天")
+            self.assertEqual(day_snapshot["available_target"], 3)
+            self.assertTrue(night_plan["reached"])
+            self.assertEqual(night_plan["batch_size"], 0)
+            self.assertEqual(night_snapshot["available_period"], "夜间")
+            self.assertEqual(night_snapshot["available_target"], 1)
+        finally:
+            register_module.account_service = original_account_service
+
+    def test_available_mode_pauses_outside_configured_periods(self) -> None:
+        from services import register_service as register_module
+
+        class FixedAccountService:
+            def list_tokens(self) -> list[str]:
+                return []
+
+            def refresh_accounts(self, tokens: list[str], defer_invalid_removal: bool = True) -> dict:
+                return {"refreshed": 0, "errors": [], "items": []}
+
+            def list_accounts(self) -> list[dict]:
+                return []
+
+        original_account_service = register_module.account_service
+        try:
+            register_module.account_service = FixedAccountService()
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                service = register_module.RegisterService(Path(tmp_dir) / "register.json")
+                cfg = available_schedule(
+                    day_target=7,
+                    night_target=3,
+                    day_start="08:00",
+                    day_end="10:00",
+                    night_start="18:00",
+                    night_end="19:00",
+                )
+
+                with patch.object(register_module, "beijing_now", return_value=datetime(2026, 10, 17, 12, 0)):
+                    plan = service._target_plan(cfg, submitted=0)
+                logs = [item["text"] for item in service.get()["logs"]]
+
+            self.assertTrue(plan["reached"])
+            self.assertEqual(plan["batch_size"], 0)
+            self.assertTrue(any("不在白天/夜间注册时段内" in text for text in logs))
         finally:
             register_module.account_service = original_account_service
 
