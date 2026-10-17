@@ -55,6 +55,21 @@ function normalizePricingDraft(value: unknown): Record<string, string | number> 
   return result;
 }
 
+/** 定价表里被删除/隐藏的模型：去空白、去重。 */
+function normalizeHiddenPricingModels(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const result: string[] = [];
+  for (const item of value) {
+    const model = String(item ?? "").trim();
+    if (model && !result.includes(model)) {
+      result.push(model);
+    }
+  }
+  return result;
+}
+
 /** 提交前收紧：空白视为未定价（丢弃），0 保留为免费，负数/非法值丢弃。 */
 function normalizePricingForSave(value: unknown): Record<string, number> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -88,6 +103,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         : DEFAULT_UPSTREAM_MODEL_NAME,
     default_thinking_effort: normalizeThinkingEffort(config.default_thinking_effort),
     model_pricing: normalizePricingDraft(config.model_pricing),
+    hidden_pricing_models: normalizeHiddenPricingModels(config.hidden_pricing_models),
     refresh_account_interval_minute: normalizeOptionalInterval(config.refresh_account_interval_minute, 5),
     refresh_all_accounts_interval_minute: normalizeOptionalInterval(config.refresh_all_accounts_interval_minute),
     image_retention_days: Number(config.image_retention_days || 30),
@@ -235,6 +251,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         default_upstream_model_name: String(config.default_upstream_model_name || "").trim(),
         default_thinking_effort: normalizeThinkingEffort(config.default_thinking_effort),
         model_pricing: normalizePricingForSave(config.model_pricing),
+        hidden_pricing_models: normalizeHiddenPricingModels(config.hidden_pricing_models),
         global_system_prompt: String(config.global_system_prompt || "").trim(),
         sensitive_words: (config.sensitive_words || []).map((item) => String(item).trim()).filter(Boolean),
         ai_review: {
@@ -360,17 +377,36 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const key = model.trim();
       if (!key) return {};
       const pricing = state.config.model_pricing || {};
-      if (key in pricing) return {};
-      return { config: { ...state.config, model_pricing: { ...pricing, [key]: "" } } };
+      const hidden = state.config.hidden_pricing_models || [];
+      // 重新添加被删除的预设模型时，要把它从隐藏列表里恢复出来。
+      if (key in pricing && !hidden.includes(key)) return {};
+      return {
+        config: {
+          ...state.config,
+          model_pricing: { ...pricing, [key]: key in pricing ? pricing[key] : "" },
+          hidden_pricing_models: hidden.filter((item) => item !== key),
+        },
+      };
     });
   },
 
   removePricingModel: (model) => {
     set((state) => {
       if (!state.config) return {};
+      const key = model.trim();
+      if (!key) return {};
       const pricing = { ...(state.config.model_pricing || {}) };
-      delete pricing[model];
-      return { config: { ...state.config, model_pricing: pricing } };
+      delete pricing[key];
+      return {
+        config: {
+          ...state.config,
+          model_pricing: pricing,
+          hidden_pricing_models: normalizeHiddenPricingModels([
+            ...(state.config.hidden_pricing_models || []),
+            key,
+          ]),
+        },
+      };
     });
   },
 

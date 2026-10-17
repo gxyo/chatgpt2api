@@ -43,8 +43,13 @@ export function ModelPricingCard() {
   const saveConfig = useSettingsStore((state) => state.saveConfig);
 
   const pricing = config?.model_pricing || {};
+  const hiddenModels = config?.hidden_pricing_models || [];
   const customModels = Object.keys(pricing).filter((model) => !PRESET_MODELS.includes(model));
-  const rows = [...PRESET_MODELS, ...customModels];
+  // 删除按钮对每一行都可用：预设模型删掉后记入隐藏列表，重新添加时恢复。
+  const rows = [
+    ...PRESET_MODELS.filter((model) => !hiddenModels.includes(model)),
+    ...customModels,
+  ];
 
   const handleAddModel = () => {
     const model = customModel.trim();
@@ -123,43 +128,36 @@ export function ModelPricingCard() {
               <span />
             </div>
             <div className="divide-y divide-neutral-100">
-              {rows.map((model) => {
-                const isPreset = PRESET_MODELS.includes(model);
-                return (
-                  <div key={model} className="grid grid-cols-[minmax(0,1fr)_9rem_2rem] items-center gap-3 px-4 py-2.5">
-                    <span className="truncate font-mono text-xs text-neutral-800" title={model}>
-                      {model}
-                    </span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs text-neutral-500">¥</span>
-                      <Input
-                        type="text"
-                        inputMode="decimal"
-                        value={pricing[model] === undefined ? "" : String(pricing[model])}
-                        onChange={(event) => setModelPrice(model, event.target.value)}
-                        placeholder="未定价"
-                        aria-label={`${model} 单价`}
-                        className="h-8 rounded-lg border-neutral-200 bg-white text-sm tabular-nums"
-                      />
-                    </div>
-                    {isPreset ? (
-                      <span />
-                    ) : (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="size-8 rounded-lg text-neutral-400 hover:text-red-600"
-                        onClick={() => removePricingModel(model)}
-                        aria-label={`删除 ${model} 的定价`}
-                        title="删除该模型"
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
-                    )}
+              {rows.map((model) => (
+                <div key={model} className="grid grid-cols-[minmax(0,1fr)_9rem_2rem] items-center gap-3 px-4 py-2.5">
+                  <span className="truncate font-mono text-xs text-neutral-800" title={model}>
+                    {model}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-neutral-500">¥</span>
+                    <Input
+                      type="text"
+                      inputMode="decimal"
+                      value={pricing[model] === undefined ? "" : String(pricing[model])}
+                      onChange={(event) => setModelPrice(model, event.target.value)}
+                      placeholder="未定价"
+                      aria-label={`${model} 单价`}
+                      className="h-8 rounded-lg border-neutral-200 bg-white text-sm tabular-nums"
+                    />
                   </div>
-                );
-              })}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="size-8 rounded-lg text-neutral-400 hover:text-red-600"
+                    onClick={() => removePricingModel(model)}
+                    aria-label={`删除 ${model} 的定价`}
+                    title="删除该模型"
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              ))}
             </div>
           </div>
 

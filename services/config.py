@@ -153,6 +153,20 @@ def _normalize_model_pricing(value: object) -> dict[str, float]:
     return result
 
 
+def _normalize_hidden_pricing_models(value: object) -> list[str]:
+    """定价表中被手动隐藏的模型名（只影响设置页展示，不影响计费）。"""
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        model = str(item or "").strip()
+        if model and model not in seen:
+            seen.add(model)
+            result.append(model)
+    return result
+
+
 def _normalize_log_cleanup_time(value: object) -> str:
     parts = str(value or "").strip().split(":")
     if len(parts) != 2:
@@ -426,6 +440,10 @@ class ConfigStore:
         return _normalize_model_pricing(self.data.get("model_pricing"))
 
     @property
+    def hidden_pricing_models(self) -> list[str]:
+        return _normalize_hidden_pricing_models(self.data.get("hidden_pricing_models"))
+
+    @property
     def images_dir(self) -> Path:
         path = DATA_DIR / "images"
         path.mkdir(parents=True, exist_ok=True)
@@ -494,6 +512,7 @@ class ConfigStore:
         data["default_upstream_model_name"] = self.default_upstream_model_name
         data["default_thinking_effort"] = self.default_thinking_effort
         data["model_pricing"] = self.model_pricing
+        data["hidden_pricing_models"] = self.hidden_pricing_models
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
         data.pop("auth-key", None)
         return data
@@ -546,6 +565,10 @@ class ConfigStore:
             )
         if "model_pricing" in next_data:
             next_data["model_pricing"] = _normalize_model_pricing(next_data.get("model_pricing"))
+        if "hidden_pricing_models" in next_data:
+            next_data["hidden_pricing_models"] = _normalize_hidden_pricing_models(
+                next_data.get("hidden_pricing_models")
+            )
         self.data = next_data
         self._save()
         return self.get()

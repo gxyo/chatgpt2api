@@ -222,6 +222,33 @@ class ConfigLoadingTests(unittest.TestCase):
 
             self.assertEqual(config["model_pricing"], {})
 
+    def test_hidden_pricing_models_default_to_empty_and_are_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            self.assertEqual(store.hidden_pricing_models, [])
+            self.assertEqual(store.get()["hidden_pricing_models"], [])
+
+            updated = store.update({
+                "hidden_pricing_models": [
+                    " gpt-image-2 ",
+                    "",
+                    "gpt-image-2",  # 去重
+                    "auto",
+                    5,
+                ],
+            })
+            saved = json.loads(config_file.read_text(encoding="utf-8"))
+            expected = ["gpt-image-2", "auto", "5"]
+            self.assertEqual(updated["hidden_pricing_models"], expected)
+            self.assertEqual(saved["hidden_pricing_models"], expected)
+            self.assertEqual(store.hidden_pricing_models, expected)
+
+            non_list = store.update({"hidden_pricing_models": "gpt-image-2"})
+            self.assertEqual(non_list["hidden_pricing_models"], [])
+
     def test_upstream_model_name_is_trimmed_and_empty_falls_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "config.json"

@@ -121,6 +121,8 @@ export type SettingsConfig = {
   default_thinking_effort?: string;
   /** 模型单价表（每张图片，人民币）。0 表示免费；键缺失表示未定价。 */
   model_pricing?: Record<string, string | number>;
+  /** 设置页定价表中被手动删除/隐藏的模型，只影响列表展示。 */
+  hidden_pricing_models?: string[];
   [key: string]: unknown;
 };
 
