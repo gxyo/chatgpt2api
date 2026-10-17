@@ -403,6 +403,24 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(outputs[0].kind, "result")
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
 
+    def test_local_timeout_retry_is_labelled_as_timeout_not_upstream_error(self):
+        # 本地预算耗尽时长这样说「本次尝试超时」：它和上游真的返回错误是两回事，
+        # 时间线里混着写会让人以为渠道故障。
+        def stream_fn(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                raise ImagePollTimeoutError("image request deadline exceeded")
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        # 内置的轮询换号会先接管；这里归零，直接验证配置的「生成失败重试」文案。
+        with mock.patch.object(conversation, "MAX_POLL_TIMEOUT_RETRIES", 0):
+            outputs, _ = self._run(["token-a", "token-b"], stream_fn, 1)
+
+        timeline = conversation.collect_image_outputs(outputs)["_image_timeline"]
+        retry_steps = [step for group in timeline for step in group["steps"] if step["step"] == "retry"]
+        self.assertEqual(len(retry_steps), 1)
+        self.assertIn("本次尝试超时", retry_steps[0]["detail"])
+        self.assertNotIn("上游返回", retry_steps[0]["detail"])
+
     def test_poll_timeout_after_deadline_expires_retries_with_a_fresh_budget(self):
         # 轮询超时通常正好把原始预算耗尽。配置了「生成失败重试次数」时，
         # 换号重试必须能拿到一份新预算，否则 deadline 检查会把它拦死。

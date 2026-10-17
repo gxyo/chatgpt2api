@@ -103,6 +103,12 @@ RETRYABLE_IMAGE_FAILURE_MESSAGES = frozenset({
     "upstream authentication token is invalid",
     IMAGE_POLL_TIMEOUT_MESSAGE,
 })
+# 这两条是本地预算耗尽时自己生成的，不是上游返回的原文。时间线和日志里要分开写，
+# 否则看起来像是「上游报错了」，排查时会把 80s 超时误判成渠道故障。
+LOCAL_TIMEOUT_FAILURE_MESSAGES = frozenset({
+    IMAGE_POLL_TIMEOUT_MESSAGE,
+    "image request deadline exceeded",
+})
 
 
 def is_retryable_image_failure(message: object) -> bool:
@@ -2081,12 +2087,23 @@ def _generate_single_image_attempts(
             "index": index,
             "error": str(failure)[:200],
         })
+        # 本地超时和上游报错分开措辞：前者是「没在预算内等到图」，后者才是渠道问题。
+        timeout_failure = str(failure).strip() in LOCAL_TIMEOUT_FAILURE_MESSAGES
+        if timeout_failure:
+            reason = (
+                f"本次尝试超时：{request_budget_secs:.0f}s 预算内没等到上游图片"
+                if request_budget_secs
+                else "本次尝试超时：预算内没等到上游图片"
+            )
+            action = f"换号重试第 {generation_retry_count}/{generation_retry_limit} 次"
+        else:
+            reason = f"上游返回可重试错误（{str(failure)[:80]}）"
+            action = f"按设置换号重试第 {generation_retry_count}/{generation_retry_limit} 次"
         mark_timeline(
             "retry",
             "换号重试",
             (
-                f"上游返回可重试错误（{str(failure)[:80]}）；"
-                f"按设置换号重试第 {generation_retry_count}/{generation_retry_limit} 次"
+                f"{reason}；{action}"
                 + (f"，预算续期 {request_budget_secs:.0f}s" if request_budget_secs else "")
             ),
             retry_count=generation_retry_count,
