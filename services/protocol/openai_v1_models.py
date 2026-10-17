@@ -7,6 +7,11 @@ from services.openai_backend_api import OpenAIBackendAPI
 from utils.helper import CODEX_IMAGE_MODEL
 
 
+def list_upstream_models() -> dict[str, Any]:
+    """直连上游取模型列表，原样返回，不做本地合并或归一化。"""
+    return OpenAIBackendAPI().list_models_raw()
+
+
 def list_models() -> dict[str, Any]:
     result = OpenAIBackendAPI().list_models()
     data = result.get("data")

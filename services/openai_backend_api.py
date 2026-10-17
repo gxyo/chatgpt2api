@@ -3356,3 +3356,29 @@ class OpenAIBackendAPI:
             })
         data.sort(key=lambda item: item["id"])
         return {"object": "list", "data": data}
+
+    def list_models_raw(self) -> Dict[str, Any]:
+        """原样返回上游 models 响应，不做归一化或本地合并，供管理端排查。"""
+        self._bootstrap()
+        if self.access_token:
+            path = "/backend-api/models?history_and_training_disabled=false"
+            route = "/backend-api/models"
+            context = "auth_models"
+            channel = "authenticated"
+        else:
+            path = "/backend-anon/models?iim=false&is_gizmo=false"
+            route = "/backend-anon/models"
+            context = "anon_models"
+            channel = "anonymous"
+        response = self._fast_request(
+            "get",
+            path,
+            context,
+            headers=self._headers(route),
+        )
+        return {
+            "channel": channel,
+            "endpoint": self.base_url + path,
+            "status_code": response.status_code,
+            "payload": response.json(),
+        }

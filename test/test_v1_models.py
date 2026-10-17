@@ -13,6 +13,42 @@ AUTH_KEY = "chatgpt2api"
 BASE_URL = "http://localhost:8000"
 
 
+class UpstreamModelListTests(unittest.TestCase):
+    def test_list_models_raw_returns_upstream_payload_untouched(self):
+        api = openai_v1_models.OpenAIBackendAPI()
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"models": [{"slug": "gpt-5-6"}]}
+        with (
+            mock.patch.object(api, "_bootstrap"),
+            mock.patch.object(api, "_headers", return_value={}),
+            mock.patch.object(api, "_fast_request", return_value=response) as fast_request,
+        ):
+            result = api.list_models_raw()
+
+        self.assertEqual(result["channel"], "anonymous")
+        self.assertEqual(result["status_code"], 200)
+        self.assertEqual(
+            result["endpoint"],
+            "https://chatgpt.com/backend-anon/models?iim=false&is_gizmo=false",
+        )
+        # 原样返回：没有 id/object 归一化，也没有补上本地图片模型。
+        self.assertEqual(result["payload"], {"models": [{"slug": "gpt-5-6"}]})
+        self.assertEqual(fast_request.call_args.args[0], "get")
+        self.assertEqual(fast_request.call_args.args[1], "/backend-anon/models?iim=false&is_gizmo=false")
+
+    def test_list_upstream_models_service_does_not_merge_local_models(self):
+        raw = {
+            "channel": "anonymous",
+            "endpoint": "https://chatgpt.com/backend-anon/models",
+            "status_code": 200,
+            "payload": {"models": [{"slug": "gpt-5-6"}]},
+        }
+        with mock.patch.object(openai_v1_models.OpenAIBackendAPI, "list_models_raw", return_value=raw):
+            result = openai_v1_models.list_upstream_models()
+
+        self.assertEqual(result, raw)
+
+
 class ModelListTests(unittest.TestCase):
     def test_list_models_only_returns_image_models_backed_by_account_types(self):
         with (

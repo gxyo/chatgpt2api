@@ -272,6 +272,18 @@ export async function fetchModels() {
   return httpRequest<ModelListResponse>("/v1/models");
 }
 
+/** 上游模型列表的原始响应（管理端调试用，未经本项目本地合并）。 */
+export type UpstreamModelListResponse = {
+  channel: "anonymous" | "authenticated";
+  endpoint: string;
+  status_code: number;
+  payload: unknown;
+};
+
+export async function fetchUpstreamModels() {
+  return httpRequest<UpstreamModelListResponse>("/api/accounts/upstream-models");
+}
+
 export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",

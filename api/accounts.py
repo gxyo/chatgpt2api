@@ -15,10 +15,12 @@ from pydantic import BaseModel, Field
 
 from services.auth_service import auth_service
 from utils.beijing_time import beijing_now
+from utils.helper import public_error_message
 
 from api.support import require_admin
 from services.account_service import account_service
 from services.oauth_login_service import OAuthLoginError, oauth_login_service
+from services.protocol import openai_v1_models
 
 
 
@@ -160,6 +162,15 @@ def create_router() -> APIRouter:
     async def get_accounts(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"items": account_service.list_accounts()}
+
+    @router.get("/api/accounts/upstream-models")
+    async def get_upstream_models(authorization: str | None = Header(default=None)):
+        """调试用：直连 ChatGPT 上游取模型列表，不经过 /v1/models 的本地合并。"""
+        require_admin(authorization)
+        try:
+            return await run_in_threadpool(openai_v1_models.list_upstream_models)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail={"error": public_error_message(exc)}) from exc
 
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):

@@ -52,6 +52,7 @@ import {
   fetchModels,
   fetchRefreshProgress,
   fetchReLoginProgress,
+  fetchUpstreamModels,
   reLoginAccounts,
   refreshAccounts,
   testProxy,
@@ -190,7 +191,7 @@ function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [availableModels, setAvailableModels] = useState<Model[]>([]);
-  // 「获取模型列表」弹窗：展示 GET /v1/models 的原样响应，方便排查上游到底给了什么。
+  // 「获取模型列表」弹窗：直连 ChatGPT 上游取模型列表，看它到底返回了什么。
   const [isModelsDialogOpen, setIsModelsDialogOpen] = useState(false);
   const [isFetchingModelList, setIsFetchingModelList] = useState(false);
   const [modelsRaw, setModelsRaw] = useState<string | null>(null);
@@ -263,8 +264,8 @@ function AccountsPageContent() {
     setIsFetchingModelList(true);
     setModelsError(null);
     try {
-      const data = await fetchModels();
-      // 不裁剪字段：弹窗要展示接口原样返回的内容。
+      const data = await fetchUpstreamModels();
+      // 不裁剪字段：弹窗要展示上游原样返回的内容。
       setModelsRaw(JSON.stringify(data, null, 2));
     } catch (error) {
       setModelsRaw(null);
@@ -291,15 +292,28 @@ function AccountsPageContent() {
     }
   };
 
-  const rawModelCount = useMemo(() => {
+  const rawModelMeta = useMemo(() => {
     if (!modelsRaw) {
-      return 0;
+      return { count: 0, channel: "", endpoint: "" };
     }
     try {
-      const parsed = JSON.parse(modelsRaw) as { data?: unknown };
-      return Array.isArray(parsed.data) ? parsed.data.length : 0;
+      const parsed = JSON.parse(modelsRaw) as {
+        channel?: string;
+        endpoint?: string;
+        payload?: { models?: unknown; data?: unknown };
+      };
+      const models = Array.isArray(parsed.payload?.models)
+        ? parsed.payload.models
+        : Array.isArray(parsed.payload?.data)
+          ? parsed.payload.data
+          : [];
+      return {
+        count: models.length,
+        channel: parsed.channel === "authenticated" ? "登录通道" : "匿名通道",
+        endpoint: parsed.endpoint || "",
+      };
     } catch {
-      return 0;
+      return { count: 0, channel: "", endpoint: "" };
     }
   }, [modelsRaw]);
 
@@ -883,9 +897,9 @@ function AccountsPageContent() {
           <DialogHeader className="gap-2">
             <DialogTitle>获取模型列表</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              直接请求{" "}
+              直连 ChatGPT 上游获取模型，返回内容未经过本项目{" "}
               <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">GET /v1/models</code>
-              ，下面是接口原样返回的内容。
+              的本地合并。
             </DialogDescription>
           </DialogHeader>
           {isFetchingModelList ? (
@@ -900,7 +914,10 @@ function AccountsPageContent() {
           ) : modelsRaw ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2 text-xs text-neutral-500">
-                <span>共 {rawModelCount} 个模型</span>
+                <span className="min-w-0 truncate" title={rawModelMeta.endpoint}>
+                  {rawModelMeta.channel ? `${rawModelMeta.channel} · ` : ""}
+                  {rawModelMeta.endpoint || "上游"} · 共 {rawModelMeta.count} 个模型
+                </span>
                 <Button variant="outline" size="sm" onClick={() => void copyModelsRaw()}>
                   <Copy className="size-3.5" />
                   复制 JSON
