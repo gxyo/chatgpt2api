@@ -454,7 +454,7 @@ function LogsContent() {
           </Select>
           {isCallLog ? (
             <Select value={status} onValueChange={setStatus}>
-              <SelectTrigger className="h-10 w-[130px] rounded-xl border-neutral-200 bg-white"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-10 w-[150px] rounded-xl border-neutral-200 bg-white"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value={LogStatus.All}>全部状态</SelectItem>
                 <SelectItem value={LogStatus.Success}>成功</SelectItem>
