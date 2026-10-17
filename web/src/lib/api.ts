@@ -100,6 +100,10 @@ export type SettingsConfig = {
   image_cleanup_interval_unit?: "days" | "minutes" | string;
   image_cleanup_interval_minutes?: number | string;
   image_cleanup_time?: string;
+  /** 定时清理是否保留当天图片（按天清理时生效）。 */
+  image_cleanup_keep_today?: boolean | string;
+  /** 日志清理是否保留当天日志；关闭后清理会带上当天已产生的日志。 */
+  log_cleanup_keep_today?: boolean | string;
   image_poll_timeout_secs?: number | string;
   image_generation_retry_count?: number | string;
   image_account_concurrency?: number | string;
@@ -769,6 +773,8 @@ export type LogRetentionInfo = {
   auto_cleanup: boolean;
   /** 每天自动清理的时刻，北京时间（UTC+8）的 HH:MM。 */
   cleanup_time: string;
+  /** 清理时是否保留当天已写入的日志。 */
+  keep_today: boolean;
   size_bytes: number;
   /** 日志文件最后写入时间（Unix 秒）。 */
   updated_at: number;
@@ -778,6 +784,8 @@ export type LogCleanupResult = {
   days: number;
   /** 该日期（含）之后的日志被保留，之前的被删除。 */
   cutoff_day: string;
+  /** 本次是否保留了当天已写入的日志。 */
+  keep_today: boolean;
   removed: number;
   kept: number;
   size_bytes: number;
@@ -787,11 +795,12 @@ export async function fetchLogRetention() {
   return httpRequest<LogRetentionInfo>("/api/logs/retention");
 }
 
-/** 只提交这三个键，配置接口按合并处理，不会影响其他设置。 */
+/** 只提交这几个键，配置接口按合并处理，不会影响其他设置。 */
 export async function saveLogRetention(settings: {
   log_retention_days?: number;
   log_auto_cleanup?: boolean;
   log_cleanup_time?: string;
+  log_cleanup_keep_today?: boolean;
 }) {
   return httpRequest<{ config: SettingsConfig }>("/api/settings", {
     method: "POST",
@@ -799,10 +808,13 @@ export async function saveLogRetention(settings: {
   });
 }
 
-export async function cleanupSystemLogs(days?: number) {
+export async function cleanupSystemLogs(days?: number, keepToday?: boolean) {
   return httpRequest<LogCleanupResult>("/api/logs/cleanup", {
     method: "POST",
-    body: days === undefined ? {} : { days },
+    body: {
+      ...(days === undefined ? {} : { days }),
+      ...(keepToday === undefined ? {} : { keep_today: keepToday }),
+    },
   });
 }
 

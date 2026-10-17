@@ -124,6 +124,7 @@ class ImageCleanupTests(unittest.TestCase):
         cleanup_config.image_cleanup_schedule_configured = True
         cleanup_config.image_cleanup_interval_days = 3
         cleanup_config.image_cleanup_time = "09:30"
+        cleanup_config.image_cleanup_keep_today = False
         state_file = self.root / "image_cleanup_state.json"
         state_file.write_text(json.dumps({
             "schedule": "3:09:30@+08:00",
@@ -143,6 +144,30 @@ class ImageCleanupTests(unittest.TestCase):
         state = json.loads(state_file.read_text(encoding="utf-8"))
         self.assertEqual(state["last_run_at"], "2026-09-28T09:31:00")
         self.assertEqual(state["next_run_at"], "2026-10-01T09:30:00")
+
+    def test_scheduled_cleanup_can_keep_the_current_day(self):
+        """勾选「保留当天」后，05:00 清理只删到昨天，今天 00:00 之后的图片不动。"""
+        cleanup_config = mock.Mock()
+        cleanup_config.images_dir = self.images_dir
+        cleanup_config.image_cleanup_schedule_configured = True
+        cleanup_config.image_cleanup_interval_days = 1
+        cleanup_config.image_cleanup_time = "05:00"
+        cleanup_config.image_cleanup_keep_today = True
+        state_file = self.root / "image_cleanup_state.json"
+        state_file.write_text(json.dumps({
+            "schedule": "1:05:00@+08:00",
+            "next_run_at": "2026-09-28T05:00:00",
+        }), encoding="utf-8")
+
+        with mock.patch.object(image_service, "config", cleanup_config), mock.patch.object(
+            image_service,
+            "delete_images",
+            return_value={"removed": 1},
+        ) as delete_mock:
+            result = image_service.run_scheduled_image_cleanup_if_due(datetime(2026, 9, 28, 5, 1))
+
+        delete_mock.assert_called_once_with(end_date="2026-09-27", all_matching=True)
+        self.assertEqual(result, {"removed": 1})
 
     def test_scheduled_cleanup_uses_beijing_time_regardless_of_host_timezone(self):
         expected = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=8)

@@ -31,13 +31,14 @@ def next_cleanup_at(now: datetime, scheduled_time: str) -> datetime:
     return candidate
 
 
-def cutoff_day_for(days: int) -> str:
+def cutoff_day_for(days: int, now: datetime | None = None) -> str:
     """保留最近 `days` 天时，该删到哪一天为止。
 
     days=1 表示只留今天，删掉今天之前的所有日志。
     """
     keep = max(1, int(days))
-    return (beijing_now() - timedelta(days=keep - 1)).strftime("%Y-%m-%d")
+    current = now or beijing_now()
+    return (current - timedelta(days=keep - 1)).strftime("%Y-%m-%d")
 
 
 def log_storage_info() -> dict[str, object]:
@@ -51,20 +52,34 @@ def log_storage_info() -> dict[str, object]:
         "days": config.log_retention_days,
         "auto_cleanup": config.log_auto_cleanup,
         "cleanup_time": config.log_cleanup_time,
+        "keep_today": bool(getattr(config, "log_cleanup_keep_today", True)),
         "size_bytes": size_bytes,
         "updated_at": updated_at,
     }
 
 
-def cleanup_logs(days: int | None = None) -> dict[str, object]:
+def cleanup_logs(
+    days: int | None = None,
+    keep_today: bool | None = None,
+    now: datetime | None = None,
+) -> dict[str, object]:
     """按保留期清理日志，返回删了多少条、还剩多少条。
+
+    keep_today 为 False 时，还会删除当天清理时刻之前已写入的日志（例如每天 05:00
+    清理会把当天 00:00-05:00 的日志一并删掉）；为 None 时读取配置，默认保留当天。
 
     只删日志，不动统计：统计服务已经把这些请求聚合到自己的快照里了，
     日志被截断后它只会把增量游标往前挪，不会重新计数。
     """
+    current = now or beijing_now()
     retention = config.log_retention_days if days is None else max(1, int(days))
-    cutoff_day = cutoff_day_for(retention)
-    result = log_service.cleanup_before(cutoff_day)
+    if keep_today is None:
+        keep_today = bool(getattr(config, "log_cleanup_keep_today", True))
+    cutoff_day = cutoff_day_for(retention, now=current)
+    result = log_service.cleanup_before(
+        cutoff_day,
+        include_today_before="" if keep_today else current.strftime("%Y-%m-%d %H:%M:%S"),
+    )
     try:
         size_bytes = log_service.path.stat().st_size
     except OSError:
@@ -72,12 +87,14 @@ def cleanup_logs(days: int | None = None) -> dict[str, object]:
     logger.info({
         "event": "log_cleanup_done",
         "cutoff_day": cutoff_day,
+        "keep_today": keep_today,
         "removed": result["removed"],
         "kept": result["kept"],
     })
     return {
         "days": retention,
         "cutoff_day": cutoff_day,
+        "keep_today": keep_today,
         "removed": result["removed"],
         "kept": result["kept"],
         "size_bytes": size_bytes,
@@ -134,7 +151,7 @@ def run_scheduled_log_cleanup_if_due(now: datetime | None = None) -> dict[str, o
         if current < next_run_at:
             return None
 
-        result = cleanup_logs()
+        result = cleanup_logs(now=current)
         # 跳过停机期间错过的那些时刻：只留"下一次"，不做补跑。
         while next_run_at <= current:
             next_run_at += timedelta(days=1)

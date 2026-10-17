@@ -133,6 +133,27 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config["image_cleanup_interval_days"], 5)
             self.assertEqual(config["image_cleanup_time"], "07:05")
 
+    def test_cleanup_keep_today_flags_default_to_preserving_existing_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            # 图片清理默认删除执行日当天的数据（旧行为）；日志清理默认保留当天。
+            self.assertFalse(store.image_cleanup_keep_today)
+            self.assertTrue(store.log_cleanup_keep_today)
+
+            config = store.update({
+                "image_cleanup_keep_today": "yes",
+                "log_cleanup_keep_today": "0",
+            })
+
+            self.assertIs(config["image_cleanup_keep_today"], True)
+            self.assertIs(config["log_cleanup_keep_today"], False)
+            saved = json.loads(config_file.read_text(encoding="utf-8"))
+            self.assertIs(saved["image_cleanup_keep_today"], True)
+            self.assertIs(saved["log_cleanup_keep_today"], False)
+
     def test_invalid_image_cleanup_schedule_uses_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "config.json"

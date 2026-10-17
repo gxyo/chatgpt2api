@@ -35,10 +35,11 @@ def beijing_today() -> str:
 class StubSettings:
     """替代 ConfigStore，只暴露清理逻辑真正读的那几个开关。"""
 
-    def __init__(self, *, days: int = 2, auto: bool = True, cleanup_time: str = "03:00"):
+    def __init__(self, *, days: int = 2, auto: bool = True, cleanup_time: str = "03:00", keep_today: bool = True):
         self.log_retention_days = days
         self.log_auto_cleanup = auto
         self.log_cleanup_time = cleanup_time
+        self.log_cleanup_keep_today = keep_today
 
 
 class LogServiceCleanupTests(unittest.TestCase):
@@ -64,6 +65,21 @@ class LogServiceCleanupTests(unittest.TestCase):
 
             self.assertEqual(result, {"removed": 2, "kept": 1})
             self.assertEqual(self.remaining_days(service), ["2026-09-29"])
+
+    def test_cleanup_can_include_the_current_day_up_to_a_moment(self):
+        """「不保留当天」时，只删当天该时刻及之前写入的日志，之后的保留。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-10-18 03:00:00"),
+                log_line("2026-10-18 05:00:00"),
+                log_line("2026-10-18 06:00:00"),
+            ])
+
+            result = service.cleanup_before("2026-10-18", include_today_before="2026-10-18 05:00:00")
+
+            self.assertEqual(result, {"removed": 2, "kept": 1})
+            self.assertEqual(self.remaining_days(service), ["2026-10-18"])
+            self.assertIn("06:00:00", service.path.read_text(encoding="utf-8"))
 
     def test_cleanup_keeps_unparseable_lines(self):
         """读不懂的行一律留着，宁可少删也不丢内容。"""
@@ -211,6 +227,36 @@ class CleanupReportTests(unittest.TestCase):
         self.assertEqual(result["days"], 1)
         self.assertEqual(result["cutoff_day"], cutoff_day_for(1))
 
+    def test_keep_today_false_removes_the_current_day_up_to_now(self):
+        self.log_path.write_text(
+            "\n".join([
+                log_line("2026-10-17 10:00:00"),
+                log_line("2026-10-18 03:00:00"),
+                log_line("2026-10-18 06:00:00"),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        result = cleanup_logs(2, keep_today=False, now=datetime(2026, 10, 18, 5, 0, 0))
+
+        self.assertIs(result["keep_today"], False)
+        self.assertEqual(result["removed"], 1)
+        remaining = self.log_path.read_text(encoding="utf-8")
+        self.assertIn("2026-10-17 10:00:00", remaining)
+        self.assertIn("2026-10-18 06:00:00", remaining)
+        self.assertNotIn("2026-10-18 03:00:00", remaining)
+
+    def test_cleanup_keeps_today_by_default(self):
+        self.log_path.write_text(
+            "\n".join([log_line("2026-10-18 03:00:00"), log_line("2026-10-18 06:00:00")]) + "\n",
+            encoding="utf-8",
+        )
+
+        result = cleanup_logs(1, now=datetime(2026, 10, 18, 5, 0, 0))
+
+        self.assertIs(result["keep_today"], True)
+        self.assertEqual(result["removed"], 0)
+
     def test_storage_info_reports_size_and_settings(self):
         info = log_storage_info()
 
@@ -218,6 +264,7 @@ class CleanupReportTests(unittest.TestCase):
         self.assertEqual(info["days"], 7)
         self.assertIs(info["auto_cleanup"], True)
         self.assertEqual(info["cleanup_time"], "03:00")
+        self.assertIs(info["keep_today"], True)
 
     def test_storage_info_tolerates_a_missing_file(self):
         self.log_path.unlink()

@@ -431,6 +431,7 @@ function LogsContent() {
   const [retentionDays, setRetentionDays] = useState("30");
   const [autoCleanup, setAutoCleanup] = useState(false);
   const [cleanupTime, setCleanupTime] = useState("03:00");
+  const [keepToday, setKeepToday] = useState(true);
   const [isSavingRetention, setIsSavingRetention] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
@@ -484,6 +485,7 @@ function LogsContent() {
       setRetentionDays(String(data.days));
       setAutoCleanup(data.auto_cleanup);
       setCleanupTime(data.cleanup_time || "03:00");
+      setKeepToday(data.keep_today !== false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "读取日志清理设置失败");
     }
@@ -508,6 +510,7 @@ function LogsContent() {
         log_retention_days: parsedRetentionDays,
         log_auto_cleanup: autoCleanup,
         log_cleanup_time: cleanupTime,
+        log_cleanup_keep_today: keepToday,
       });
       await loadRetention();
       toast.success("已保存日志清理设置");
@@ -522,7 +525,7 @@ function LogsContent() {
     setIsCleaning(true);
     try {
       // 用输入框里的天数，而不是已保存的设置：弹窗承诺删到哪一天，就按哪一天执行。
-      const data = await cleanupSystemLogs(parsedRetentionDays);
+      const data = await cleanupSystemLogs(parsedRetentionDays, keepToday);
       toast.success(
         data.removed > 0
           ? `已清理 ${data.removed} 条日志，保留 ${data.kept} 条（统计不受影响）`
@@ -748,6 +751,13 @@ function LogsContent() {
               <label className="flex items-center gap-2 text-sm text-neutral-600">
                 <Checkbox checked={autoCleanup} onCheckedChange={(checked) => setAutoCleanup(Boolean(checked))} />
                 每天自动清理
+              </label>
+              <label
+                className="flex items-center gap-2 text-sm text-neutral-600"
+                title="勾选后清理不会删除当天已产生的日志；取消勾选后，每天定时清理还会删掉当天清理时刻之前写入的日志（例如 05:00 清理会删掉当天 00:00-05:00 的日志）。"
+              >
+                <Checkbox checked={keepToday} onCheckedChange={(checked) => setKeepToday(Boolean(checked))} />
+                保留当天日志
               </label>
               <label
                 className="flex items-center gap-2 text-sm text-neutral-600"
@@ -1193,7 +1203,8 @@ function LogsContent() {
           <DialogHeader className="gap-2">
             <DialogTitle>清理日志</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              将删除 {retentionValid ? cleanupCutoffDay(parsedRetentionDays) : "—"} 之前的所有日志，保留最近 {retentionValid ? parsedRetentionDays : "—"} 天。
+              将删除 {retentionValid ? cleanupCutoffDay(parsedRetentionDays) : "—"} 之前的所有日志，保留最近 {retentionValid ? parsedRetentionDays : "—"} 天
+              {keepToday ? "，今天已产生的日志会保留。" : "，并删除今天 00:00 至当前时刻的日志。"}
               统计页的请求数与峰值不受影响，删除后无法恢复。
             </DialogDescription>
           </DialogHeader>

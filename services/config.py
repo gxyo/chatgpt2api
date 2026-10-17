@@ -356,6 +356,24 @@ class ConfigStore:
         return _normalize_image_cleanup_time(self.data.get("image_cleanup_time"))
 
     @property
+    def image_cleanup_keep_today(self) -> bool:
+        """定时清理是否保留当天图片。
+
+        默认关闭，保持原有「删除到执行日期」的行为；开启后只在执行日之前删，
+        执行日 00:00 之后生成的图片会留到下一次清理。
+        """
+        return _normalize_bool(self.data.get("image_cleanup_keep_today", False))
+
+    @property
+    def log_cleanup_keep_today(self) -> bool:
+        """日志清理是否保留当天日志。
+
+        默认开启，与原有按天保留的行为一致；关闭后定时/立即清理还会删掉
+        当天清理时刻之前已经写入的日志。
+        """
+        return _normalize_bool(self.data.get("log_cleanup_keep_today", True))
+
+    @property
     def image_cleanup_interval_unit(self) -> str:
         """定时清理周期单位：days（每 N 天固定时刻）/ minutes（每 N 分钟）。"""
         return _normalize_image_cleanup_interval_unit(self.data.get("image_cleanup_interval_unit"))
@@ -511,6 +529,8 @@ class ConfigStore:
         data["image_cleanup_interval_unit"] = self.image_cleanup_interval_unit
         data["image_cleanup_interval_minutes"] = self.image_cleanup_interval_minutes
         data["image_cleanup_time"] = self.image_cleanup_time
+        data["image_cleanup_keep_today"] = self.image_cleanup_keep_today
+        data["log_cleanup_keep_today"] = self.log_cleanup_keep_today
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
@@ -556,6 +576,14 @@ class ConfigStore:
         if "image_cleanup_interval_minutes" in next_data:
             next_data["image_cleanup_interval_minutes"] = _normalize_image_cleanup_interval_minutes(
                 next_data.get("image_cleanup_interval_minutes")
+            )
+        if "image_cleanup_keep_today" in next_data:
+            next_data["image_cleanup_keep_today"] = _normalize_bool(
+                next_data.get("image_cleanup_keep_today"), False
+            )
+        if "log_cleanup_keep_today" in next_data:
+            next_data["log_cleanup_keep_today"] = _normalize_bool(
+                next_data.get("log_cleanup_keep_today"), True
             )
         if "image_quota_error_message" in next_data:
             next_data["image_quota_error_message"] = _normalize_image_quota_error_message(

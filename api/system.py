@@ -52,6 +52,8 @@ class LogExportRequest(BaseModel):
     ids: list[str] = []
 class LogCleanupRequest(BaseModel):
     days: int | None = None
+    # None 表示沿用配置里的「保留当天日志」开关。
+    keep_today: bool | None = None
 
 
 def _log_export_response(text: str, count: int) -> Response:
@@ -180,7 +182,7 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         if body.days is not None and body.days < 1:
             raise HTTPException(status_code=400, detail={"error": "保留天数至少为 1"})
-        return await run_in_threadpool(cleanup_logs, body.days)
+        return await run_in_threadpool(cleanup_logs, body.days, body.keep_today)
 
     @router.get("/api/stats/images")
     async def get_image_stats(

@@ -124,6 +124,8 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_cleanup_time: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(config.image_cleanup_time || ""))
       ? String(config.image_cleanup_time)
       : "03:00",
+    image_cleanup_keep_today: Boolean(config.image_cleanup_keep_today),
+    log_cleanup_keep_today: config.log_cleanup_keep_today !== false,
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 75),
     image_generation_retry_count: Math.max(0, Math.floor(Number(config.image_generation_retry_count) || 0)),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
@@ -155,6 +157,7 @@ type SettingsStore = {
   setImageCleanupIntervalUnit: (value: string) => void;
   setImageCleanupIntervalMinutes: (value: string) => void;
   setImageCleanupTime: (value: string) => void;
+  setImageCleanupKeepToday: (value: boolean) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageGenerationRetryCount: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
@@ -242,6 +245,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_cleanup_time: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(config.image_cleanup_time || ""))
           ? String(config.image_cleanup_time)
           : "03:00",
+        image_cleanup_keep_today: Boolean(config.image_cleanup_keep_today),
+        log_cleanup_keep_today: config.log_cleanup_keep_today !== false,
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 75),
         image_generation_retry_count: Math.max(0, Math.floor(Number(config.image_generation_retry_count) || 0)),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
@@ -311,6 +316,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageCleanupTime: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_cleanup_time: value } } : {});
+  },
+
+  setImageCleanupKeepToday: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_cleanup_keep_today: value } } : {});
   },
 
   setImagePollTimeoutSecs: (value) => {

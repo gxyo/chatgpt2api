@@ -312,7 +312,12 @@ def run_scheduled_image_cleanup_if_due(now: datetime | None = None) -> dict[str,
         if current < next_run_at:
             return None
 
-        result = delete_images(end_date=current.date().isoformat(), all_matching=True)
+        # 按天清理默认删到执行日（含当天 0 点到执行时刻生成的图片）；开了「保留当天」
+        # 就只删到昨天，把今天已生成的图片留到下一次清理。
+        end_date = current.date()
+        if config.image_cleanup_interval_unit != "minutes" and config.image_cleanup_keep_today:
+            end_date -= timedelta(days=1)
+        result = delete_images(end_date=end_date.isoformat(), all_matching=True)
         while next_run_at <= current:
             next_run_at += step
         _save_image_cleanup_state(state_path, {

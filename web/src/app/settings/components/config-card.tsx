@@ -26,6 +26,7 @@ export function ConfigCard() {
   const setImageCleanupIntervalUnit = useSettingsStore((state) => state.setImageCleanupIntervalUnit);
   const setImageCleanupIntervalMinutes = useSettingsStore((state) => state.setImageCleanupIntervalMinutes);
   const setImageCleanupTime = useSettingsStore((state) => state.setImageCleanupTime);
+  const setImageCleanupKeepToday = useSettingsStore((state) => state.setImageCleanupKeepToday);
   const cleanupUnit = config?.image_cleanup_interval_unit === "minutes" ? "minutes" : "days";
   const cleanupByMinutes = cleanupUnit === "minutes";
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
@@ -138,7 +139,22 @@ export function ConfigCard() {
             <p className="text-xs leading-5 text-neutral-500">
               {cleanupByMinutes
                 ? "按分钟间隔清理时此项不生效。"
-                : "按北京时间（UTC+8）执行，删除执行日期及之前的全部图片。"}
+                : "按北京时间（UTC+8）执行，默认删除执行日期及之前的全部图片。"}
+            </p>
+          </div>
+          <div className="space-y-2">
+            <label className="flex items-center gap-3 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-700">
+              <Checkbox
+                checked={Boolean(config?.image_cleanup_keep_today)}
+                onCheckedChange={(checked) => setImageCleanupKeepToday(Boolean(checked))}
+                disabled={cleanupByMinutes}
+              />
+              清理时保留当天图片
+            </label>
+            <p className="text-xs leading-5 text-neutral-500">
+              {cleanupByMinutes
+                ? "按分钟间隔清理时此项不生效。"
+                : "勾选后只删除昨天及更早的图片：例如每天 05:00 清理，今天 00:00-05:00 生成的图片会保留到下次清理。按天清理时生效。"}
             </p>
           </div>
           <div className="space-y-2">
