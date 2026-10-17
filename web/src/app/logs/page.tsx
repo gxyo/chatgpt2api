@@ -29,6 +29,7 @@ const LogStatus = {
   All: "all",
   Success: "success",
   Failed: "failed",
+  PolicyViolation: "policy_violation",
 } as const;
 
 const typeLabels: Record<string, string> = {
@@ -105,7 +106,15 @@ function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
   if (status === "failed") return "失败";
+  if (status === "policy_violation") return "违反安全策略";
   return "-";
+}
+
+function getStatusVariant(item: SystemLog) {
+  const status = item.detail?.status;
+  if (status === "failed") return "danger";
+  if (status === "policy_violation") return "warning";
+  return "success";
 }
 
 function LogsContent() {
@@ -336,6 +345,7 @@ function LogsContent() {
                 <SelectItem value={LogStatus.All}>全部状态</SelectItem>
                 <SelectItem value={LogStatus.Success}>成功</SelectItem>
                 <SelectItem value={LogStatus.Failed}>失败</SelectItem>
+                <SelectItem value={LogStatus.PolicyViolation}>违反安全策略</SelectItem>
               </SelectContent>
             </Select>
           ) : null}
@@ -506,7 +516,7 @@ function LogsContent() {
                       {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
-                          <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
+                          <Badge variant={getStatusVariant(item)} className="rounded-md">
                             {getStatus(item)}
                           </Badge>
                         </TableCell>

@@ -13,10 +13,14 @@ from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.image_upscale_service import parse_size_long_edge
 from services.log_service import (
+    LOG_STATUS_FAILED,
+    LOG_STATUS_POLICY_VIOLATION,
+    LOG_STATUS_SUCCESS,
     LOG_TYPE_CALL,
     add_attempt_trail_detail,
     add_postprocess_detail,
     image_request_detail,
+    is_policy_violation_error,
     log_service,
     merge_extra_detail,
 )
@@ -325,14 +329,17 @@ class ImageTaskService:
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[],
                               duration_ms=duration_ms,
                               **({"conversation_id": conversation_id} if conversation_id else {}))
+            # 上游内容审核拦截单独记一类：任务本身仍是 error（没产出图片），
+            # 但统计口径上不算「生成失败」。
+            violation = is_policy_violation_error(exc)
             self._log_call(
                 identity,
                 mode,
                 model,
                 started,
-                "调用失败",
+                "违反安全策略" if violation else "调用失败",
                 request_preview=request_text(payload.get("prompt")),
-                status="failed",
+                status=LOG_STATUS_POLICY_VIOLATION if violation else LOG_STATUS_FAILED,
                 error=error_message,
                 account_email=account_email,
                 exc=exc,
@@ -388,7 +395,7 @@ class ImageTaskService:
         suffix: str,
         *,
         request_preview: str = "",
-        status: str = "success",
+        status: str = LOG_STATUS_SUCCESS,
         error: str = "",
         urls: list[str] | None = None,
         account_email: str = "",

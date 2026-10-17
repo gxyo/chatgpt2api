@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 const REQUESTS_DOT = "bg-[#2a78d6] dark:bg-[#3987e5]";
 const SUCCESS_DOT = "bg-[#2a78d6]/50 dark:bg-[#3987e5]/50";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
+const POLICY_DOT = "bg-[#d97706] dark:bg-[#f0a13a]";
 const NEUTRAL_DOT = "bg-neutral-300 dark:bg-neutral-600";
 const LIVE_DOT = "bg-[#2fa96b] dark:bg-[#3fc07f]";
 
@@ -178,7 +179,7 @@ function StatsContent() {
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <StatTile
           label="请求数"
           value={String(totals?.requests ?? 0)}
@@ -194,8 +195,14 @@ function StatsContent() {
         <StatTile
           label="生成失败"
           value={String(totals?.failed ?? 0)}
-          caption="含内容拦截与上游异常"
+          caption="上游异常等，不含安全拦截"
           tone={FAILED_DOT}
+        />
+        <StatTile
+          label="违反安全策略"
+          value={String(totals?.policy_violation ?? 0)}
+          caption="被内容审核拦截，不计入失败"
+          tone={POLICY_DOT}
         />
         <StatTile
           label="成功率"

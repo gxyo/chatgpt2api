@@ -23,6 +23,14 @@ LOG_TYPE_ACCOUNT = "account"
 # 注册机失败日志：只记失败（成功的注册没有排查价值），单独一个日志页看，
 # 走的是同一份 logs.jsonl 与同一套筛选/导出/清理，新增一种类型即可。
 LOG_TYPE_REGISTER = "register"
+
+# 调用结果（detail.status）。「违反安全策略」既不是成功也不是失败：请求本身
+# 被上游内容审核拦下了，单独一类，免得混进失败率里污染排障口径。
+LOG_STATUS_SUCCESS = "success"
+LOG_STATUS_FAILED = "failed"
+LOG_STATUS_POLICY_VIOLATION = "policy_violation"
+# ImageGenerationError.code：conversation 把上游内容审核拦截统一标成这个 code。
+POLICY_VIOLATION_CODE = "content_policy_violation"
 INTERNAL_RESPONSE_KEYS = {
     "_account_email", "_conversation_id", "_account_trail", "_attempts_summary", "_postprocess",
 }
@@ -540,6 +548,34 @@ def _next_item(items):
         return False, None
 
 
+def is_policy_violation_error(exc: BaseException | None) -> bool:
+    """沿异常链判断这次调用是否被内容安全策略拦下。
+
+    上游拦截会被 conversation 包装成 ImageGenerationError(code=content_policy_violation)，
+    本地敏感词/AI 审核则是 ContentPolicyViolation；多图并行时外层还可能再包一层，
+    所以必须顺着 __cause__/__context__ 找。
+    """
+    from services.content_filter import ContentPolicyViolation
+    from services.openai_backend_api import ImageContentPolicyError, is_content_policy_error
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (ImageContentPolicyError, ContentPolicyViolation)):
+            return True
+        # conversation 会把「上游返回了一段文本而不是图片」统一标成
+        # content_policy_violation，其中也包括普通的「本次生图失败」；只有
+        # 文案本身像内容审核拒绝时才归到这一类，别把普通失败也算进来。
+        if (
+            str(getattr(current, "code", "") or "").strip() == POLICY_VIOLATION_CODE
+            and is_content_policy_error(str(current))
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 @dataclass
 class LoggedCall:
     identity: dict[str, object]
@@ -558,14 +594,14 @@ class LoggedCall:
         try:
             result = await run_in_threadpool(handler, *args)
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), exc=exc, account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""))
+            self.log_failure(exc, account_email=getattr(exc, "account_email", ""),
+                             conversation_id=getattr(exc, "conversation_id", ""))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail), exc=exc)
+            self.log_failure(exc, error=str(exc.detail))
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), exc=exc, account_email=getattr(exc, "account_email", ""))
+            self.log_failure(exc, account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
@@ -583,14 +619,14 @@ class LoggedCall:
         try:
             has_first, first = await run_in_threadpool(_next_item, result)
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), exc=exc, account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""))
+            self.log_failure(exc, account_email=getattr(exc, "account_email", ""),
+                             conversation_id=getattr(exc, "conversation_id", ""))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail), exc=exc)
+            self.log_failure(exc, error=str(exc.detail))
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), exc=exc, account_email=getattr(exc, "account_email", ""))
+            self.log_failure(exc, account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             return _protocol_error_response(exc, 502, sse)
@@ -618,11 +654,9 @@ class LoggedCall:
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
             failed = True
-            self.log(
-                "流式调用失败",
-                status="failed",
-                error=str(exc),
-                exc=exc,
+            self.log_failure(
+                exc,
+                summary="流式调用失败",
                 urls=urls,
                 account_email=(account_emails[0] if account_emails else getattr(exc, "account_email", "")),
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
@@ -642,7 +676,19 @@ class LoggedCall:
                          account_trails=account_trails, attempts_summaries=attempts_summaries,
                          postprocess=postprocess)
 
-    def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
+    def log_failure(self, exc: BaseException, summary: str = "调用失败", error: str = "",
+                    **kwargs: Any) -> None:
+        """记一条失败日志；内容策略拦截单独记成「违反安全策略」。"""
+        violation = is_policy_violation_error(exc)
+        self.log(
+            "违反安全策略" if violation else summary,
+            status=LOG_STATUS_POLICY_VIOLATION if violation else LOG_STATUS_FAILED,
+            error=error or str(exc),
+            exc=exc,
+            **kwargs,
+        )
+
+    def log(self, suffix: str, result: object = None, status: str = LOG_STATUS_SUCCESS, error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
             exc: BaseException | None = None, account_trails: list[list[str]] | None = None,
             attempts_summaries: list[str] | None = None,

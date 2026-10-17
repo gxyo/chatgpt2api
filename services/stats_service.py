@@ -6,7 +6,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from services.log_service import LOG_TYPE_CALL, log_service
+from services.log_service import (
+    LOG_STATUS_FAILED,
+    LOG_STATUS_POLICY_VIOLATION,
+    LOG_STATUS_SUCCESS,
+    LOG_TYPE_CALL,
+    log_service,
+)
 from services.stats_range import (
     GRANULARITY_DAY,
     GRANULARITY_HOUR,
@@ -25,16 +31,19 @@ IMAGE_ENDPOINT_MODES = {
     "/v1/images/generations": "generate",
     "/v1/images/edits": "edit",
 }
-# 网页端的生图任务只在「内容审核拦截」时以这两个 endpoint 记一次失败日志；
-# 任务真正跑完后由 image_task_service 以 /v1/images/* 记日志，因此这里只统计 failed，
-# 避免同一次请求被重复计数。
+# 网页端的生图任务只在「本地审核拦截 / 任务启动失败」时以这两个 endpoint 记日志；
+# 任务真正跑完后由 image_task_service 以 /v1/images/* 记日志，因此这里只统计
+# failed / policy_violation，避免同一次请求被重复计数。
 IMAGE_TASK_ENDPOINT_MODES = {
     "/api/image-tasks/generations": "generate",
     "/api/image-tasks/edits": "edit",
 }
 MODE_LABELS = {"generate": "文生图", "edit": "图生图"}
 
-_STATUS_SUCCESS = "success"
+_STATUS_SUCCESS = LOG_STATUS_SUCCESS
+_STATUS_FAILED = LOG_STATUS_FAILED
+_STATUS_POLICY_VIOLATION = LOG_STATUS_POLICY_VIOLATION
+_STATUSES = (_STATUS_SUCCESS, _STATUS_FAILED, _STATUS_POLICY_VIOLATION)
 
 # 聚合快照的落盘格式版本。格式变了就换版本号，旧快照会被忽略并重建。
 SNAPSHOT_VERSION = 1
@@ -51,7 +60,7 @@ _iter_days = iter_days
 
 
 def _empty_mode_bucket() -> dict[str, int]:
-    return {"requests": 0, "success": 0, "failed": 0}
+    return {"requests": 0, "success": 0, "failed": 0, "policy_violation": 0}
 
 
 def _empty_bucket() -> dict[str, Any]:
@@ -59,6 +68,7 @@ def _empty_bucket() -> dict[str, Any]:
         "requests": 0,
         "success": 0,
         "failed": 0,
+        "policy_violation": 0,
         "duration_ms": 0,
         "modes": {mode: _empty_mode_bucket() for mode in MODE_LABELS},
     }
@@ -68,7 +78,7 @@ def _restore_bucket(value: Any) -> dict[str, Any]:
     """把快照里读回来的桶重新整成内部结构，字段缺失或类型不对的按 0 处理。"""
     source = value if isinstance(value, dict) else {}
     bucket = _empty_bucket()
-    for key in ("requests", "success", "failed", "duration_ms"):
+    for key in ("requests", "success", "failed", "policy_violation", "duration_ms"):
         try:
             bucket[key] = max(0, int(source.get(key) or 0))
         except (TypeError, ValueError):
@@ -78,7 +88,7 @@ def _restore_bucket(value: Any) -> dict[str, Any]:
         for mode, mode_value in modes.items():
             target = bucket["modes"].setdefault(str(mode), _empty_mode_bucket())
             mode_source = mode_value if isinstance(mode_value, dict) else {}
-            for key in ("requests", "success", "failed"):
+            for key in ("requests", "success", "failed", "policy_violation"):
                 try:
                     target[key] = max(0, int(mode_source.get(key) or 0))
                 except (TypeError, ValueError):
@@ -118,11 +128,14 @@ def _parse_image_event(raw_line: str) -> tuple[str, str, str, int] | None:
         return None
 
     endpoint = str(detail.get("endpoint") or "")
-    status = _STATUS_SUCCESS if str(detail.get("status") or "") == _STATUS_SUCCESS else "failed"
+    raw_status = str(detail.get("status") or "")
+    status = raw_status if raw_status in _STATUSES else _STATUS_FAILED
     mode = IMAGE_ENDPOINT_MODES.get(endpoint)
     if mode is None:
         mode = IMAGE_TASK_ENDPOINT_MODES.get(endpoint)
-        if mode is None or status != "failed":
+        # 任务接口只在「失败 / 违反安全策略」时记日志；成功由任务服务以
+        # /v1/images/* 再记一次，这里必须忽略，否则同一次请求会被数两遍。
+        if mode is None or status == _STATUS_SUCCESS:
             return None
 
     time_text = str(item.get("time") or "")
@@ -141,12 +154,12 @@ def _merge_day(hours: dict[str, dict[str, Any]], day: str) -> dict[str, Any]:
         if bucket is None:
             continue
         merged["requests"] += bucket["requests"]
-        merged["success"] += bucket["success"]
-        merged["failed"] += bucket["failed"]
+        for key in _STATUSES:
+            merged[key] += bucket[key]
         merged["duration_ms"] += bucket["duration_ms"]
         for mode, mode_bucket in bucket["modes"].items():
             target = merged["modes"].setdefault(mode, _empty_mode_bucket())
-            for key in ("requests", "success", "failed"):
+            for key in ("requests", *_STATUSES):
                 target[key] += mode_bucket.get(key, 0)
     return merged
 
@@ -160,17 +173,18 @@ def _point(key: str, label: str, full_label: str, bucket: dict[str, Any] | None)
         "requests": source["requests"],
         "success": source["success"],
         "failed": source["failed"],
+        "policy_violation": source["policy_violation"],
     }
 
 
 def _merge_totals(totals: dict[str, Any], bucket: dict[str, Any]) -> None:
     totals["requests"] += bucket["requests"]
-    totals["success"] += bucket["success"]
-    totals["failed"] += bucket["failed"]
+    for key in _STATUSES:
+        totals[key] += bucket[key]
     totals["duration_ms"] += bucket["duration_ms"]
     for mode, mode_bucket in bucket["modes"].items():
         target = totals["modes"].setdefault(mode, _empty_mode_bucket())
-        for key in ("requests", "success", "failed"):
+        for key in ("requests", *_STATUSES):
             target[key] += mode_bucket.get(key, 0)
 
 
@@ -376,6 +390,9 @@ class ImageStatsService:
             peak = None
 
         requests = totals["requests"]
+        # 成功率只按「成功 + 失败」算：违反安全策略是上游拒绝生成，不是我们这边
+        # 的失败，混进分母会把成功率无端拉低。
+        rate_base = totals["success"] + totals["failed"]
         by_mode = [
             {
                 "mode": mode,
@@ -383,6 +400,7 @@ class ImageStatsService:
                 "requests": totals["modes"][mode]["requests"],
                 "success": totals["modes"][mode]["success"],
                 "failed": totals["modes"][mode]["failed"],
+                "policy_violation": totals["modes"][mode]["policy_violation"],
             }
             for mode, label in MODE_LABELS.items()
         ]
@@ -399,7 +417,8 @@ class ImageStatsService:
                 "requests": requests,
                 "success": totals["success"],
                 "failed": totals["failed"],
-                "success_rate": (totals["success"] / requests) if requests else 0.0,
+                "policy_violation": totals["policy_violation"],
+                "success_rate": (totals["success"] / rate_base) if rate_base else 0.0,
                 "avg_duration_ms": int(totals["duration_ms"] / requests) if requests else 0,
             },
             "by_mode": by_mode,

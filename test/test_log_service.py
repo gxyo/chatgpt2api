@@ -222,6 +222,56 @@ class LoggedCallDetailTests(unittest.TestCase):
             self.assertEqual(detail["upscale_images"], 1)
             self.assertNotIn("_postprocess", detail)
 
+    def test_policy_violation_is_logged_as_its_own_status(self):
+        from services.protocol.conversation import ImageGenerationError
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = LogService(Path(tmp_dir) / "logs.jsonl")
+            error = ImageGenerationError(
+                "非常抱歉，生成的图片可能违反了我们的内容政策。",
+                status_code=400,
+                error_type="invalid_request_error",
+                code="content_policy_violation",
+            )
+            call = LoggedCall({"id": "k1", "name": "管理员", "role": "admin"},
+                              "/v1/images/generations", "gpt-image-2", "文生图")
+            with mock.patch.object(log_service_module, "log_service", service):
+                call.log_failure(error)
+
+            item = service.list()[0]
+            self.assertEqual(item["summary"], "文生图违反安全策略")
+            self.assertEqual(item["detail"]["status"], "policy_violation")
+
+    def test_policy_violation_is_found_through_a_wrapping_exception(self):
+        from services.openai_backend_api import ImageContentPolicyError
+        from services.protocol.conversation import ImageGenerationError
+
+        wrapped = ImageGenerationError("boom", code="upstream_error")
+        wrapped.__cause__ = ImageContentPolicyError("content policy")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = LogService(Path(tmp_dir) / "logs.jsonl")
+            call = LoggedCall({"id": "k1", "name": "管理员", "role": "admin"},
+                              "/v1/images/generations", "gpt-image-2", "文生图")
+            with mock.patch.object(log_service_module, "log_service", service):
+                call.log_failure(wrapped)
+
+            self.assertEqual(service.list()[0]["detail"]["status"], "policy_violation")
+
+    def test_generic_message_failure_is_not_mistaken_for_a_policy_violation(self):
+        from services.protocol.conversation import ImageGenerationError
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = LogService(Path(tmp_dir) / "logs.jsonl")
+            # message 输出统一带这个 code，但文案只是普通失败，不能算安全拦截。
+            error = ImageGenerationError("本次生图失败，请重试。", code="content_policy_violation")
+            call = LoggedCall({"id": "k1", "name": "管理员", "role": "admin"},
+                              "/v1/images/generations", "gpt-image-2", "文生图")
+            with mock.patch.object(log_service_module, "log_service", service):
+                call.log_failure(error)
+
+            self.assertEqual(service.list()[0]["detail"]["status"], "failed")
+
     def test_failure_without_diagnostics_keeps_the_old_shape(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = LogService(Path(tmp_dir) / "logs.jsonl")

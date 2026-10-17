@@ -27,7 +27,8 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
     try:
         await run_in_threadpool(check_request, text)
     except HTTPException as exc:
-        call.log("调用失败", status="failed", error=str(exc.detail), exc=exc)
+        # 本地敏感词/AI 审核拒绝会被记成「违反安全策略」，其余 HTTP 错误仍是失败。
+        call.log_failure(exc, error=str(exc.detail))
         raise
 
 

@@ -567,6 +567,8 @@ export type ImageStatsPoint = {
   requests: number;
   success: number;
   failed: number;
+  /** 被内容安全策略拦截的数量；注册统计复用这个类型时没有该字段。 */
+  policy_violation?: number;
 };
 
 export type ImageStatsBreakdown = {
@@ -575,6 +577,7 @@ export type ImageStatsBreakdown = {
   requests: number;
   success: number;
   failed: number;
+  policy_violation: number;
 };
 
 export type ImageStatsResponse = {
@@ -590,6 +593,7 @@ export type ImageStatsResponse = {
     requests: number;
     success: number;
     failed: number;
+    policy_violation: number;
     success_rate: number;
     avg_duration_ms: number;
   };

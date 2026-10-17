@@ -102,7 +102,9 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
           </thead>
           <tbody>
             {modes.map((item) => {
-              const rate = item.requests > 0 ? item.success / item.requests : 0;
+              // 成功率只按成功 + 失败算，安全策略拦截不参与分母。
+              const rateBase = item.success + item.failed;
+              const rate = rateBase > 0 ? item.success / rateBase : 0;
               return (
                 <tr
                   key={item.mode}
@@ -129,7 +131,7 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
                         />
                       </span>
                       <span className="w-12 shrink-0 tabular-nums text-neutral-700 dark:text-neutral-200">
-                        {item.requests > 0 ? formatRate(rate) : "-"}
+                        {rateBase > 0 ? formatRate(rate) : "-"}
                       </span>
                     </div>
                   </td>

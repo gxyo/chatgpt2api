@@ -213,7 +213,7 @@ _CONTENT_POLICY_KEYWORDS = (
 )
 
 
-def _is_content_policy_error(error_msg: str) -> bool:
+def is_content_policy_error(error_msg: str) -> bool:
     """检查错误消息是否为内容政策违规。"""
     if not error_msg:
         return False
@@ -2395,7 +2395,7 @@ class OpenAIBackendAPI:
             elif isinstance(content, str) and content.strip():
                 text_parts.append(content.strip())
             msg_text = "\n".join(text_parts)
-            if msg_text and _is_content_policy_error(msg_text):
+            if msg_text and is_content_policy_error(msg_text):
                 return msg_text[:500]
         return ""
 

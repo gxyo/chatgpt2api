@@ -11,6 +11,18 @@ from utils.log import logger
 
 DEFAULT_REVIEW_PROMPT = "判断用户请求是否允许。只回答 ALLOW 或 REJECT。"
 
+
+class ContentPolicyViolation(HTTPException):
+    """请求内容被本地安全审核拒绝（敏感词或 AI 审核）。
+
+    用独立类型而不是普通 HTTPException，调用日志才能把它记成「违反安全策略」，
+    而不是混进普通失败里。
+    """
+
+    def __init__(self, message: str):
+        super().__init__(status_code=400, detail={"error": message})
+
+
 # Strip base64 image data URIs before review: a text-only review model can't
 # analyze image bytes, and a single inlined image easily blows past the token
 # budget of the upstream review service.
@@ -154,7 +166,7 @@ def check_request(text: str) -> None:
     # Local sensitive-word match runs on the raw text (cheap, no network).
     for word in config.sensitive_words:
         if word in text:
-            raise HTTPException(status_code=400, detail={"error": "检测到敏感词，拒绝本次任务"})
+            raise ContentPolicyViolation("检测到敏感词，拒绝本次任务")
     review = config.ai_review
     if not review.get("enabled"):
         return
@@ -232,7 +244,7 @@ def check_request(text: str) -> None:
     if _is_allow_decision(decision):
         return
     if _is_reject_decision(decision):
-        raise HTTPException(status_code=400, detail={"error": "AI 审核未通过，拒绝本次任务"})
+        raise ContentPolicyViolation("AI 审核未通过，拒绝本次任务")
     # Ambiguous decisions (e.g. "MAYBE", empty content) fall back to fail-open policy.
     _on_failure({
         "event": "ai_review_ambiguous_decision",

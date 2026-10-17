@@ -39,7 +39,7 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(len(result["series"]), 24)
         self.assertEqual(result["range"]["start_date"], "2026-09-28")
         self.assertEqual(result["totals"], {
-            "requests": 3, "success": 2, "failed": 1,
+            "requests": 3, "success": 2, "failed": 1, "policy_violation": 0,
             "success_rate": 2 / 3, "avg_duration_ms": 100,
         })
         by_label = {point["label"]: point for point in result["series"]}
@@ -96,9 +96,31 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(result["totals"]["success"], 1)
         self.assertEqual(result["totals"]["failed"], 1)
         self.assertEqual(result["by_mode"], [
-            {"mode": "generate", "label": "文生图", "requests": 2, "success": 1, "failed": 1},
-            {"mode": "edit", "label": "图生图", "requests": 0, "success": 0, "failed": 0},
+            {"mode": "generate", "label": "文生图", "requests": 2, "success": 1, "failed": 1, "policy_violation": 0},
+            {"mode": "edit", "label": "图生图", "requests": 0, "success": 0, "failed": 0, "policy_violation": 0},
         ])
+
+    def test_policy_violations_are_counted_separately_from_failures(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations"),
+                log_line("2026-09-28 10:30:00", "/v1/images/generations", status="failed"),
+                log_line("2026-09-28 11:00:00", "/v1/images/generations", status="policy_violation"),
+                # 网页端任务被本地审核拦截：也记在任务接口下，同样单独计数。
+                log_line("2026-09-28 12:00:00", "/api/image-tasks/edits", status="policy_violation"),
+            ])
+
+            result = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(result["totals"]["requests"], 4)
+        self.assertEqual(result["totals"]["success"], 1)
+        self.assertEqual(result["totals"]["failed"], 1)
+        self.assertEqual(result["totals"]["policy_violation"], 2)
+        # 成功率的分母只有成功 + 失败：1 成功、1 失败 → 50%，两条拦截不参与。
+        self.assertEqual(result["totals"]["success_rate"], 0.5)
+        by_label = {point["label"]: point for point in result["series"]}
+        self.assertEqual(by_label["11:00"]["policy_violation"], 1)
+        self.assertEqual(by_label["11:00"]["failed"], 0)
 
     def test_non_image_and_non_call_entries_are_ignored(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -414,7 +436,10 @@ class SnapshotPersistenceTests(unittest.TestCase):
             restarted = ImageStatsService(path)
             after_restart = restarted.summary("2026-09-28", "2026-09-30")
 
-        self.assertEqual(after_cleanup["totals"], {"requests": 2, "success": 1, "failed": 1, "success_rate": 0.5, "avg_duration_ms": 100})
+        self.assertEqual(after_cleanup["totals"], {
+            "requests": 2, "success": 1, "failed": 1, "policy_violation": 0,
+            "success_rate": 0.5, "avg_duration_ms": 100,
+        })
         self.assertEqual(after_restart["series"][0]["requests"], 1)
         self.assertEqual(after_restart["totals"]["requests"], 2)
 

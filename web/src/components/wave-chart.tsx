@@ -64,6 +64,7 @@ const FAILED_FILL = "fill-[#e34948] dark:fill-[#e66767]";
 // 套在 span 上不产生任何可见效果（色点会变成空白），必须用 bg-*。
 const REQUESTS_DOT = "bg-[#2a78d6] dark:bg-[#3987e5]";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
+const POLICY_DOT = "bg-[#d97706] dark:bg-[#f0a13a]";
 
 function niceScale(max: number) {
   const safeMax = Math.max(1, Math.ceil(max));
@@ -458,9 +459,22 @@ export function WaveChart({
               </span>
               <span className="tabular-nums">{active.failed}</span>
             </div>
+            {active.policy_violation ? (
+              <div className="flex items-center justify-between gap-4">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className={cn("size-2 rounded-full", POLICY_DOT)} />
+                  违反安全策略
+                </span>
+                <span className="tabular-nums">{active.policy_violation}</span>
+              </div>
+            ) : null}
             <div className="flex items-center justify-between gap-4 border-t border-neutral-100 pt-1 dark:border-white/10">
               <span>成功率</span>
-              <span className="tabular-nums">{active.requests ? formatRate(active.success / active.requests) : "-"}</span>
+              <span className="tabular-nums">
+                {active.success + active.failed
+                  ? formatRate(active.success / (active.success + active.failed))
+                  : "-"}
+              </span>
             </div>
           </div>
         </div>
