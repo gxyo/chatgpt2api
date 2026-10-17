@@ -18,12 +18,12 @@ type ModeTone = {
 };
 
 // 调用方式之间是「身份」而非「量级」：直接用主题里的图表色板，
-// 宝蓝（chart-1）+ 紫罗兰（chart-4）。两个色相相邻但能明确区分，
+// 文生图用紫罗兰（chart-4）、图生图用宝蓝（chart-1）。两个色相相邻但能明确区分，
 // 比同色深浅和蓝绿搭配都更干净，浅色/深色模式各自有对应明度。
 // 图例和表头直接写出名称与百分比，颜色只做辅助。
 const MODE_TONES: Record<string, ModeTone> = {
-  generate: { bar: "bg-chart-1", stroke: "stroke-chart-1", opacity: 1 },
-  edit: { bar: "bg-chart-4", stroke: "stroke-chart-4", opacity: 1 },
+  generate: { bar: "bg-chart-4", stroke: "stroke-chart-4", opacity: 1 },
+  edit: { bar: "bg-chart-1", stroke: "stroke-chart-1", opacity: 1 },
 };
 // 认不出的方式走中性灰：不占分类槽位（后端目前只会给出这两种），也不会伪装成一个序列。
 const FALLBACK_TONE: ModeTone = {
