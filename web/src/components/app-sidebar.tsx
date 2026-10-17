@@ -47,8 +47,8 @@ const adminNavGroups: NavGroup[] = [
   {
     label: "记录",
     items: [
-      { href: "/register-logs", label: "注册日志", icon: FileWarning },
       { href: "/logs", label: "日志管理", icon: ScrollText },
+      { href: "/register-logs", label: "注册日志", icon: FileWarning },
       { href: "/image-manager", label: "图片管理", icon: Images },
     ],
   },
