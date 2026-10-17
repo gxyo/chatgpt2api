@@ -212,7 +212,7 @@ function StatsContent() {
         <StatTile
           label="成功率"
           value={totals ? formatRate(totals.success_rate) : "-"}
-          caption={`按成功图片 /（成功图片 + 失败） · 平均耗时 ${formatDuration(totals?.avg_duration_ms ?? 0)}`}
+          caption={`平均耗时 ${formatDuration(totals?.avg_duration_ms ?? 0)}`}
           tone={NEUTRAL_DOT}
         />
       </div>
