@@ -291,6 +291,34 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertNotIn(prose, str(failure))
         self.assertEqual((failure.body or {}).get("upstream_text"), prose)
 
+    def test_text_reply_attempt_is_labelled_as_text_reply_not_generation_error(self):
+        prose = "已将圣诞镂空桌布融入美式客厅。"
+
+        def stream_fn(backend, request, index=1, total=1):
+            yield ImageOutput(
+                kind="message",
+                model=request.model,
+                index=index,
+                total=total,
+                text=prose,
+                text_reply=True,
+                conversation_id="conv-text",
+            )
+
+        failure, _ = self._run_expecting_error(
+            ["token-a", "token-b", "token-c", "token-d"], stream_fn, 0,
+        )
+
+        # 「只回了文本」不是生成失败：尝试卡片要看到具体是哪一步、原话预览。
+        attempts = (failure.image_diagnostics or {})["attempts"]
+        for attempt in attempts:
+            self.assertEqual(attempt["outcome"], "text_reply")
+            self.assertIn("上游只回了文本", attempt["error"])
+            self.assertIn(prose, attempt["error"])
+        summary = (failure.image_diagnostics or {})["attempts_summary"]
+        self.assertIn("text_reply", summary)
+        self.assertNotIn("generation_error", summary)
+
     def test_text_reply_retries_after_progress_events(self):
         prose = "已将圣诞镂空桌布融入美式客厅。"
 

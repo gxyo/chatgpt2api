@@ -2606,6 +2606,15 @@ def _generate_single_image_attempts(
                 exc_body = getattr(exc, "body", None)
                 if isinstance(exc_body, dict):
                     upstream_text = str(exc_body.get("upstream_text") or "")
+                # 这不是「生成失败」，而是上游只回了正文、没有出图。尝试轨迹里
+                # 单独标一类，免得所有失败都被一个 generation_error 盖住。
+                text_preview = " ".join(upstream_text.split())
+                attempt_outcome = "text_reply"
+                attempt_error = (
+                    f"上游只回了文本，没有出图（{len(upstream_text)} 字）：{text_preview[:60]}"
+                    if text_preview
+                    else "上游只回了文本，没有出图"
+                )
                 text_reply_retry_count += 1
                 diagnostics["text_reply"] = {
                     "chars": len(upstream_text or error_text),

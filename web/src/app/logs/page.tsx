@@ -66,6 +66,7 @@ const attemptOutcomes: Record<string, AttemptOutcomeStyle> = {
   transient_upstream: { label: "上游抖动", variant: "warning" },
   mainline_rejected: { label: "主链路拒绝", variant: "warning" },
   content_policy: { label: "内容拦截", variant: "danger" },
+  text_reply: { label: "只回文本", variant: "warning" },
   generation_error: { label: "生成失败", variant: "danger" },
   no_image: { label: "未返回图片", variant: "danger" },
   empty_stream: { label: "空流", variant: "warning" },
@@ -917,76 +918,71 @@ function LogsContent() {
                       })}
                     </div>
                   </div>
-                  {accountTrail.length ? (
-                    <div className="space-y-2">
-                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
-                        <Route className="size-4 text-neutral-400" />
-                        账号轨迹
-                        <span className="text-xs font-normal text-neutral-400">按尝试顺序</span>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-neutral-200 bg-white p-3">
-                        {accountTrail.map((email, index) => (
-                          <Fragment key={`${email}-${index}`}>
-                            {index > 0 ? <ArrowRight className="size-3.5 shrink-0 text-neutral-300" /> : null}
-                            <span className="inline-flex max-w-full items-center gap-1.5 rounded-lg bg-neutral-100 py-1 pr-2 pl-1 text-xs text-neutral-700">
-                              <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-white text-[10px] font-semibold text-neutral-500">
-                                {index + 1}
-                              </span>
-                              <span className="break-all">{email}</span>
-                            </span>
-                          </Fragment>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
                 </div>
                 <div className="min-h-0 space-y-4 lg:overflow-y-auto lg:pr-2 lg:[scrollbar-width:thin]">
-                  {attemptGroups.length ? (
+                  {attemptGroups.length || accountTrail.length ? (
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
                         <ListChecks className="size-4 text-neutral-400" />
                         尝试轨迹
-                        <span className="text-xs font-normal text-neutral-400">每次换号的结局、耗时与现场</span>
+                        <span className="text-xs font-normal text-neutral-400">按尝试顺序：账号、结局、耗时与现场</span>
                       </div>
-                      <div className="space-y-2">
-                        {attemptGroups.map((group, groupIndex) => (
-                          <div key={groupIndex} className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
-                            {group.parsed ? (
-                              group.steps.map((step, stepIndex) => {
-                                const outcome = attemptOutcomeStyle(step.outcome);
-                                return (
-                                  <div
-                                    key={stepIndex}
-                                    className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 px-3 py-2.5 text-xs ${stepIndex > 0 ? "border-t border-neutral-100" : ""}`}
-                                  >
-                                    <span className="inline-flex h-5 min-w-8 shrink-0 items-center justify-center rounded-md bg-neutral-100 px-1 font-mono text-[11px] font-semibold text-neutral-600">
-                                      {step.index}
-                                    </span>
-                                    <span className="break-all font-medium text-neutral-700">{step.email || "未选出账号"}</span>
-                                    <Badge variant={outcome.variant} className="rounded-md">{outcome.label}</Badge>
-                                    {step.marks.map((mark, markIndex) => (
-                                      <span
-                                        key={`${mark}-${markIndex}`}
-                                        className="rounded-md bg-neutral-50 px-1.5 py-0.5 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200 ring-inset"
-                                      >
-                                        {mark}
+                      {attemptGroups.length ? (
+                        <div className="space-y-2">
+                          {attemptGroups.map((group, groupIndex) => (
+                            <div key={groupIndex} className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
+                              {group.parsed ? (
+                                group.steps.map((step, stepIndex) => {
+                                  const outcome = attemptOutcomeStyle(step.outcome);
+                                  return (
+                                    <div
+                                      key={stepIndex}
+                                      className={`flex flex-wrap items-start gap-x-3 gap-y-1.5 px-3 py-2.5 text-xs ${stepIndex > 0 ? "border-t border-neutral-100" : ""}`}
+                                    >
+                                      <span className="inline-flex h-5 min-w-8 shrink-0 items-center justify-center rounded-md bg-neutral-100 px-1 font-mono text-[11px] font-semibold text-neutral-600">
+                                        {step.index}
                                       </span>
-                                    ))}
-                                    <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-neutral-400">
-                                      {formatAttemptDuration(step.durationMs)}
-                                    </span>
-                                    {step.error ? <p className="w-full leading-5 text-neutral-500">{step.error}</p> : null}
-                                  </div>
-                                );
-                              })
-                            ) : (
-                              <pre className="overflow-x-auto px-3 py-2.5 leading-6 whitespace-pre-wrap break-all text-neutral-600">
-                                {group.raw}
-                              </pre>
-                            )}
-                          </div>
-                        ))}
-                      </div>
+                                      <span className="break-all font-medium text-neutral-700">{step.email || "未选出账号"}</span>
+                                      <Badge variant={outcome.variant} className="rounded-md">{outcome.label}</Badge>
+                                      {step.marks.map((mark, markIndex) => (
+                                        <span
+                                          key={`${mark}-${markIndex}`}
+                                          className="rounded-md bg-neutral-50 px-1.5 py-0.5 font-mono text-[11px] text-neutral-500 ring-1 ring-neutral-200 ring-inset"
+                                        >
+                                          {mark}
+                                        </span>
+                                      ))}
+                                      <span className="ml-auto shrink-0 font-mono text-[11px] tabular-nums text-neutral-400">
+                                        {formatAttemptDuration(step.durationMs)}
+                                      </span>
+                                      {step.error ? <p className="w-full leading-5 text-neutral-500">{step.error}</p> : null}
+                                    </div>
+                                  );
+                                })
+                              ) : (
+                                <pre className="overflow-x-auto px-3 py-2.5 leading-6 whitespace-pre-wrap break-all text-neutral-600">
+                                  {group.raw}
+                                </pre>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        /* 旧日志只有 account_trail、没有逐次尝试的摘要，退化成一串账号。 */
+                        <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-neutral-200 bg-white p-3">
+                          {accountTrail.map((email, index) => (
+                            <Fragment key={`${email}-${index}`}>
+                              {index > 0 ? <ArrowRight className="size-3.5 shrink-0 text-neutral-300" /> : null}
+                              <span className="inline-flex max-w-full items-center gap-1.5 rounded-lg bg-neutral-100 py-1 pr-2 pl-1 text-xs text-neutral-700">
+                                <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-white text-[10px] font-semibold text-neutral-500">
+                                  {index + 1}
+                                </span>
+                                <span className="break-all">{email}</span>
+                              </span>
+                            </Fragment>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ) : null}
                   {timelineGroups.length ? (
