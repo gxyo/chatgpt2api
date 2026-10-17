@@ -6,7 +6,9 @@ import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
 import { DateRangeFilter } from "@/components/date-range-filter";
+import { FilterCard, FilterField } from "@/components/filter-card";
 import { ImageLightbox } from "@/components/image-lightbox";
+import { PageHeader } from "@/components/page-header";
 import { PageSizeSelect } from "@/components/page-size-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -274,28 +276,29 @@ function ImageManagerContent() {
 
   return (
     <section className="space-y-5">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div className="space-y-1.5">
-          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">图片管理</h1>
-          <p className="text-[13px] leading-5 text-muted-foreground">
-            按日期与标签浏览、下载或清理已生成的图片。
-          </p>
-        </div>
-        <div className="flex flex-wrap justify-end gap-2">
+      <PageHeader
+        title="图片管理"
+        description="按日期与标签浏览、下载或清理已生成的图片。"
+      />
+
+      <FilterCard>
+        <FilterField label="时间范围">
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
-          <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700">
-            清除筛选条件
+        </FilterField>
+        <div className="flex items-center gap-2 sm:ml-auto">
+          <Button variant="ghost" onClick={clearFilters} className="h-10 px-3 text-muted-foreground">
+            清除筛选
           </Button>
-          <Button onClick={() => void loadImages()} disabled={isLoading} className="h-10 rounded-xl bg-brand px-4 text-white hover:bg-brand/90">
-            {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
-            查询
-          </Button>
-          <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || items.length === 0 || (!startDate && !endDate)} className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50">
+          <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || items.length === 0 || (!startDate && !endDate)} className="h-10 border-rose-200 px-4 text-rose-600 hover:bg-rose-50">
             <Trash2 className="size-4" />
             删除匹配日期
           </Button>
+          <Button onClick={() => void loadImages()} disabled={isLoading} className="h-10 px-5">
+            {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
+            查询
+          </Button>
         </div>
-      </div>
+      </FilterCard>
 
       {allTags.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
@@ -345,44 +348,76 @@ function ImageManagerContent() {
         </div>
       ) : null}
 
-      {/* Storage Stats Panel */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 mb-4">
+      {/* 存储概览：四项指标共用一张卡，磁盘占用画成可用条。 */}
+      <Card className="overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4">
+          <div>
+            <div className="text-[15px] font-semibold tracking-tight">存储空间</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              图片与缩略图占用；剩余空间低于 500 MB 时建议清理
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" className="h-9 px-3" disabled={storageLoading} onClick={() => { void loadStorage(); }}>
+              <RefreshCw className={`size-3.5 ${storageLoading ? "animate-spin" : ""}`} />刷新
+            </Button>
+            <Button size="sm" variant="outline" className="h-9 border-rose-200 px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+              onClick={() => setDeleteMode("byDate")}>
+              <Trash2 className="size-3.5" />
+              按日期删除
+            </Button>
+          </div>
+        </div>
         {storage ? (
-          <>
-            <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+          <div className="grid gap-px bg-border sm:grid-cols-2 lg:grid-cols-4">
+            <div className="bg-card px-5 py-4">
               <div className="text-xs font-medium text-muted-foreground">磁盘总量</div>
-              <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{storage.disk_total_mb >= 1024 ? `${(storage.disk_total_mb / 1024).toFixed(1)} GB` : `${storage.disk_total_mb} MB`}</div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight tabular-nums">
+                {storage.disk_total_mb >= 1024 ? `${(storage.disk_total_mb / 1024).toFixed(1)} GB` : `${storage.disk_total_mb} MB`}
+              </div>
+              {(() => {
+                const usedPercent = storage.disk_total_mb > 0
+                  ? Math.min(100, Math.max(0, Math.round(((storage.disk_total_mb - storage.disk_free_mb) / storage.disk_total_mb) * 100)))
+                  : 0;
+                return (
+                  <div className="mt-3">
+                    <div className="h-1.5 overflow-hidden rounded-full bg-brand/12">
+                      <div className="h-full rounded-full bg-brand transition-[width] duration-500" style={{ width: `${usedPercent}%` }} />
+                    </div>
+                    <div className="mt-1.5 flex justify-between text-[11px] text-muted-foreground">
+                      <span>已用 {usedPercent}%</span>
+                      <span className="tabular-nums">{storage.disk_free_mb >= 1024 ? `${(storage.disk_free_mb / 1024).toFixed(1)} GB` : `${storage.disk_free_mb} MB`} 可用</span>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
-            <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+            <div className="bg-card px-5 py-4">
               <div className="text-xs font-medium text-muted-foreground">剩余空间</div>
-              <div className={`mt-2 text-xl font-semibold tracking-tight tabular-nums ${storage.disk_free_mb < 200 ? "text-rose-500" : storage.disk_free_mb < 500 ? "text-amber-500" : "text-emerald-600"}`}>{storage.disk_free_mb >= 1024 ? `${(storage.disk_free_mb / 1024).toFixed(1)} GB` : `${storage.disk_free_mb} MB`}</div>
+              <div className={`mt-2 text-2xl font-semibold tracking-tight tabular-nums ${storage.disk_free_mb < 200 ? "text-rose-500" : storage.disk_free_mb < 500 ? "text-amber-500" : "text-emerald-600"}`}>
+                {storage.disk_free_mb >= 1024 ? `${(storage.disk_free_mb / 1024).toFixed(1)} GB` : `${storage.disk_free_mb} MB`}
+              </div>
+              <div className="mt-2 text-[11px] text-muted-foreground">{storage.disk_free_mb < 500 ? "空间偏紧，建议清理旧图片" : "空间充足"}</div>
             </div>
-            <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+            <div className="bg-card px-5 py-4">
               <div className="text-xs font-medium text-muted-foreground">图片数量</div>
-              <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{storage.image_count}</div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight tabular-nums">{storage.image_count}</div>
+              <div className="mt-2 text-[11px] text-muted-foreground">张原图（含缩略图）</div>
             </div>
-            <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+            <div className="bg-card px-5 py-4">
               <div className="text-xs font-medium text-muted-foreground">图片占用</div>
-              <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{storage.image_size_mb >= 1024 ? `${(storage.image_size_mb / 1024).toFixed(1)} GB` : `${storage.image_size_mb} MB`}</div>
+              <div className="mt-2 text-2xl font-semibold tracking-tight tabular-nums">
+                {storage.image_size_mb >= 1024 ? `${(storage.image_size_mb / 1024).toFixed(1)} GB` : `${storage.image_size_mb} MB`}
+              </div>
+              <div className="mt-2 text-[11px] text-muted-foreground">原图与缩略图合计</div>
             </div>
-            <div className="col-span-2 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
-              <span className="w-full text-xs font-medium text-muted-foreground">快捷操作</span>
-              <Button size="sm" variant="outline" className="h-8 text-xs" disabled={storageLoading} onClick={() => { void loadStorage(); }}>
-                <RefreshCw className={`mr-1 size-3.5 ${storageLoading ? "animate-spin" : ""}`} />刷新
-              </Button>
-              <Button size="sm" variant="outline" className="h-8 border-rose-200 text-xs text-rose-600 hover:bg-rose-50 hover:text-rose-700"
-                onClick={() => setDeleteMode("byDate")}>
-                <Trash2 className="mr-1 size-3.5" />
-                按日期删除
-              </Button>
-            </div>
-          </>
+          </div>
         ) : (
-          <div className="col-span-full rounded-xl border border-border bg-card p-3 text-center text-sm text-muted-foreground">
+          <div className="px-5 py-6 text-center text-sm text-muted-foreground">
             {storageLoading ? "加载存储信息..." : "存储信息加载失败"}
           </div>
         )}
-      </div>
+      </Card>
 
       {/* Delete by date dialog */}
       <Dialog open={deleteMode === "byDate"} onOpenChange={() => setDeleteMode(null)}>
@@ -420,10 +455,13 @@ function ImageManagerContent() {
 
       <Card>
         <CardContent className="p-0">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-neutral-100 px-5 py-4">
-            <div className="flex flex-wrap items-center gap-3 text-sm text-neutral-600">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+            <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
               <ImageIcon className="size-4" />
-              共 {filteredItems.length} 张
+              <span className="text-[15px] font-semibold tracking-tight text-foreground">图片库</span>
+              <span className="rounded-full bg-brand-soft px-2 py-0.5 text-[11px] font-semibold text-brand tabular-nums">
+                {filteredItems.length}
+              </span>
               {selectedTags.length > 0 ? <span className="text-neutral-400">（筛选自 {items.length} 张）</span> : null}
               <label className="flex items-center gap-2">
                 <Checkbox className={IMAGE_MANAGER_CHECKBOX_CLASS} checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.map(imageKey), Boolean(checked))} />

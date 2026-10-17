@@ -13,7 +13,7 @@ export function PageTransition({ children }: { children: React.ReactNode }) {
   return (
     <div
       key={pathname}
-      className="animate-page-enter mx-auto box-border flex w-full max-w-[1440px] flex-1 flex-col gap-2 px-4 py-4 sm:gap-5 sm:px-6 sm:py-5 lg:px-8 lg:py-6"
+      className="animate-page-enter mx-auto box-border flex w-full max-w-[1520px] flex-1 flex-col gap-2 px-4 py-4 sm:gap-5 sm:px-6 sm:py-5 lg:px-9 lg:py-8"
     >
       {children}
     </div>

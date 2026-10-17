@@ -1489,19 +1489,21 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <>
-      <section className="mx-auto grid min-h-0 w-full max-w-[1380px] flex-1 grid-cols-1 gap-2 overflow-hidden px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:gap-3 sm:px-3 sm:pb-6 lg:grid-cols-[240px_minmax(0,1fr)]">
-        <div className="hidden h-full min-h-0 border-r border-neutral-200/70 pr-3 lg:block">
-          <ImageSidebar
-            conversations={conversations}
-            isLoadingHistory={isLoadingHistory}
-            selectedConversationId={selectedConversationId}
-            onCreateDraft={handleCreateDraft}
-            onClearHistory={openClearHistoryConfirm}
-            onSelectConversation={setSelectedConversationId}
-            onDeleteConversation={openDeleteConversationConfirm}
-            onRenameConversation={handleRenameConversation}
-            formatConversationTime={formatConversationTime}
-          />
+      <section className="mx-auto grid min-h-0 w-full max-w-[1460px] flex-1 grid-cols-1 gap-3 overflow-hidden px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:pb-6 lg:grid-cols-[264px_minmax(0,1fr)]">
+        <div className="hidden h-full min-h-0 lg:block">
+          <div className="flex h-full min-h-0 flex-col rounded-[18px] border border-border bg-card p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <ImageSidebar
+              conversations={conversations}
+              isLoadingHistory={isLoadingHistory}
+              selectedConversationId={selectedConversationId}
+              onCreateDraft={handleCreateDraft}
+              onClearHistory={openClearHistoryConfirm}
+              onSelectConversation={setSelectedConversationId}
+              onDeleteConversation={openDeleteConversationConfirm}
+              onRenameConversation={handleRenameConversation}
+              formatConversationTime={formatConversationTime}
+            />
+          </div>
         </div>
 
         <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>

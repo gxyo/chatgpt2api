@@ -49,8 +49,9 @@
 :root {
   --radius: 0.75rem;
   /* 画布是带一点冷调子的浅灰，卡片纯白浮在上面；主色从近黑换成品牌蓝，
-     蓝色同时承担主按钮、选中态与图表主序列，和参考稿是同一套语义。 */
-  --background: oklch(0.973 0.004 247);
+     蓝色同时承担主按钮、选中态与图表主序列，和参考稿是同一套语义。
+     画布比之前再深半档，白卡才真正「浮」起来。 */
+  --background: oklch(0.962 0.006 252);
   --foreground: oklch(0.21 0.015 255);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.21 0.015 255);
@@ -123,6 +124,31 @@
   --sidebar-accent-foreground: oklch(0.97 0.004 250);
   --sidebar-border: oklch(1 0 0 / 9%);
   --sidebar-ring: oklch(0.62 0.02 250);
+}
+
+/* 深色悬浮侧栏：在侧栏范围内把语义色整体翻转成「深色表面」。
+   主题切换按钮、版本弹窗入口这些复用 text-muted-foreground / hover:bg-muted
+   的组件不用各自加 dark: 前缀，就能自动变成白字 + 白色微光。 */
+.app-sidebar {
+  --background: oklch(0.185 0.026 256);
+  --foreground: oklch(0.98 0.003 250);
+  --card: oklch(0.185 0.026 256);
+  --card-foreground: oklch(0.98 0.003 250);
+  --popover: oklch(0.22 0.026 256);
+  --popover-foreground: oklch(0.98 0.003 250);
+  --muted: oklch(1 0 0 / 8%);
+  --muted-foreground: oklch(0.79 0.012 250);
+  --accent: oklch(1 0 0 / 10%);
+  --accent-foreground: oklch(0.98 0.003 250);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 16%);
+  --ring: oklch(0.7 0.15 250);
+  --brand-soft: oklch(1 0 0 / 10%);
+  --sidebar: oklch(0.185 0.026 256);
+  --sidebar-foreground: oklch(0.98 0.003 250);
+  --sidebar-accent: oklch(1 0 0 / 10%);
+  --sidebar-accent-foreground: oklch(0.98 0.003 250);
+  --sidebar-border: oklch(1 0 0 / 12%);
 }
 
 @layer base {
@@ -239,6 +265,20 @@ html:not(.dark) .border-white\/90 {
 .dark .shadow-xs,
 .dark [class*="shadow-"] {
   box-shadow: none !important;
+}
+
+/* 侧栏里的主题切换 / 版本号按钮还带着早期的中性灰工具类，
+   在深色面板上把 hover 后的近黑色改回白色。放在文件末尾以压过上面的 .dark 映射。 */
+.app-sidebar .text-neutral-500,
+.app-sidebar .text-neutral-400,
+.app-sidebar .text-neutral-600 {
+  color: var(--muted-foreground) !important;
+}
+
+.app-sidebar .hover\:text-neutral-900:hover,
+.app-sidebar .hover\:text-neutral-800:hover,
+.app-sidebar .hover\:text-neutral-700:hover {
+  color: oklch(0.98 0.003 250) !important;
 }
 
 @keyframes grow {

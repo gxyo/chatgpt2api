@@ -6,6 +6,8 @@ import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
 import { DateRangeFilter } from "@/components/date-range-filter";
+import { FilterCard, FilterField } from "@/components/filter-card";
+import { PageHeader } from "@/components/page-header";
 import { PageSizeSelect } from "@/components/page-size-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -150,14 +152,13 @@ function RegisterLogsContent() {
 
   return (
     <section className="space-y-5">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div className="space-y-1.5">
-          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">注册日志</h1>
-          <p className="text-[13px] leading-5 text-muted-foreground">
-            只记录注册失败的记录（成功的注册不写日志），每条都带邮箱域名、停在的步骤和完整过程。
-          </p>
-        </div>
-        <div className="flex flex-wrap justify-end gap-2">
+      <PageHeader
+        title="注册日志"
+        description="只记录注册失败的记录（成功的注册不写日志），每条都带邮箱域名、停在的步骤和完整过程。"
+      />
+
+      <FilterCard>
+        <FilterField label="时间范围">
           <DateRangeFilter
             startDate={startDate}
             endDate={endDate}
@@ -166,52 +167,60 @@ function RegisterLogsContent() {
               setEndDate(end);
             }}
           />
-          <Button
-            variant="outline"
-            onClick={() => {
-              setStartDate("");
-              setEndDate("");
-            }}
-            className="h-10 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700"
-          >
-            清除筛选条件
-          </Button>
-          <Button
-            onClick={() => void loadLogs()}
-            disabled={isLoading}
-            className="h-10 rounded-xl bg-brand px-4 text-white hover:bg-brand/90"
-          >
-            {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
-            查询
-          </Button>
-          <label className="flex h-10 items-center gap-2 rounded-xl border border-neutral-200 bg-white px-3 text-sm text-neutral-600">
-            导出最近
+        </FilterField>
+        <FilterField label="导出最近">
+          <label className="flex h-10 items-center gap-2 rounded-xl border border-border bg-card px-3 text-sm text-muted-foreground">
             <Input
               value={exportLimit}
               onChange={(event) => setExportLimit(event.target.value)}
               inputMode="numeric"
               aria-label="导出条数"
-              className="h-8 w-14 rounded-lg border-neutral-200 bg-white px-1 text-center"
+              className="h-8 w-14 rounded-lg px-1 text-center"
             />
             条
           </label>
+        </FilterField>
+        <div className="flex items-center gap-2 sm:ml-auto">
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setStartDate("");
+              setEndDate("");
+            }}
+            className="h-10 px-3 text-muted-foreground"
+          >
+            清除筛选
+          </Button>
           <Button
             variant="outline"
             onClick={() => void exportLogs()}
             disabled={isExporting || !exportLimitValid}
             title="导出最近 N 条注册失败日志的完整报文（txt），按时间由旧到新排列"
-            className="h-10 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700"
+            className="h-10 px-4"
           >
             {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
             导出日志
           </Button>
+          <Button
+            onClick={() => void loadLogs()}
+            disabled={isLoading}
+            className="h-10 px-5"
+          >
+            {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
+            查询
+          </Button>
         </div>
-      </div>
+      </FilterCard>
 
       <Card className="overflow-hidden">
         <CardContent className="p-0">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-neutral-100 px-5 py-4 text-sm text-neutral-600">
-            <span>共 {isLoading && items.length === 0 ? "—" : items.length} 条</span>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5 text-sm text-muted-foreground">
+            <div className="flex items-center gap-2">
+              <span className="text-[15px] font-semibold tracking-tight text-foreground">失败记录</span>
+              <span className="rounded-full bg-brand-soft px-2 py-0.5 text-[11px] font-semibold text-brand tabular-nums">
+                {isLoading && items.length === 0 ? "—" : items.length}
+              </span>
+            </div>
             <Button variant="ghost" className="h-8 rounded-lg px-3 text-neutral-500" onClick={() => void loadLogs()} disabled={isLoading}>
               <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
               刷新

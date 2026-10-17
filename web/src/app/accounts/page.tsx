@@ -24,7 +24,10 @@ import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, statCardClass } from "@/components/ui/card";
+import { FilterCard, FilterField } from "@/components/filter-card";
+import { PageHeader } from "@/components/page-header";
+import { Card, CardContent } from "@/components/ui/card";
+import { SegmentedControl } from "@/components/ui/segmented";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -699,43 +702,40 @@ function AccountsPageContent() {
 
   return (
     <>
-      <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-1.5">
-          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">号池管理</h1>
-          <p className="text-[13px] leading-5 text-muted-foreground">
-            管理账号状态、额度与专属代理，异常账号可以批量刷新或移除。
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-neutral-200 bg-white/80 px-4 text-neutral-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
-            disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
-          >
-            <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-            一键刷新所有账号信息和额度
-          </Button>
-          <AccountImportDialog
-            disabled={isLoading || isRefreshing || isDeleting}
-            onImported={(items) => {
-              setAccounts(items);
-              setSelectedIds([]);
-              setPage(1);
-            }}
-          />
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-neutral-200 bg-white/80 px-4 text-neutral-700 hover:bg-white"
-            onClick={() => downloadTokens(accounts)}
-            disabled={accounts.length === 0}
-          >
-            <Download className="size-4" />
-            导出全部 Token
-          </Button>
-        </div>
-      </section>
+      <PageHeader
+        title="号池管理"
+        description="管理账号状态、额度与专属代理，异常账号可以批量刷新或移除。"
+        actions={
+          <>
+            <Button
+              variant="outline"
+              className="h-10 px-4"
+              onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
+              disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
+            >
+              <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+              一键刷新所有账号信息和额度
+            </Button>
+            <AccountImportDialog
+              disabled={isLoading || isRefreshing || isDeleting}
+              onImported={(items) => {
+                setAccounts(items);
+                setSelectedIds([]);
+                setPage(1);
+              }}
+            />
+            <Button
+              variant="outline"
+              className="h-10 px-4"
+              onClick={() => downloadTokens(accounts)}
+              disabled={accounts.length === 0}
+            >
+              <Download className="size-4" />
+              导出全部 Token
+            </Button>
+          </>
+        }
+      />
 
       {/* 进度条 */}
       {progress.visible && (
@@ -829,32 +829,39 @@ function AccountsPageContent() {
       </Dialog>
 
       <section className="space-y-3">
-        <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-          {metricCards.map((item) => {
-            const Icon = item.icon;
-            const value = (refreshSummary ?? summary)[item.key];
-            return (
-              <Card key={item.key} className={statCardClass}>
-                <CardContent className="p-4">
-                  <div className="mb-4 flex items-start justify-between">
-                    <span className="text-xs font-medium text-neutral-400">{item.label}</span>
-                    <Icon className="size-4 text-neutral-400" />
+        {/* 六项指标共享一张卡，用发丝线切成六格——参考稿的概览区就是这么组织的。 */}
+        <Card className="overflow-hidden">
+          <div className="flex items-center justify-between gap-2 border-b border-border px-5 py-4">
+            <div className="text-[15px] font-semibold tracking-tight">号池概览</div>
+            <div className="text-xs text-muted-foreground">实时状态</div>
+          </div>
+          <div className="grid grid-cols-2 gap-px bg-border sm:grid-cols-3 xl:grid-cols-6">
+            {metricCards.map((item) => {
+              const Icon = item.icon;
+              const value = (refreshSummary ?? summary)[item.key];
+              return (
+                <div key={item.key} className="bg-card px-5 py-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-muted-foreground">{item.label}</span>
+                    <Icon className="size-4 text-muted-foreground/70" />
                   </div>
-                  <div className={cn("text-[1.75rem] font-semibold tracking-tight", item.color)}>
+                  <div className={cn("mt-2.5 text-[28px] leading-none font-semibold tracking-tight tabular-nums", item.color)}>
                     <span className={typeof value === "number" ? "" : "text-[1.1rem]"}>
                       {typeof value === "number" ? formatCompact(value) : value}
                     </span>
                   </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
         <Card>
-          <CardContent className="p-4">
-            <div className="mb-3 text-sm font-medium text-neutral-700">
-              系统可用模型
-              <span className="ml-1 text-neutral-400">({availableModels.length})</span>
+          <CardContent className="p-5">
+            <div className="mb-3 flex items-center gap-2">
+              <span className="text-[15px] font-semibold tracking-tight">系统可用模型</span>
+              <span className="rounded-full bg-brand-soft px-2 py-0.5 text-[11px] font-semibold text-brand tabular-nums">
+                {availableModels.length}
+              </span>
             </div>
             <div className="flex flex-wrap gap-2">
               {availableModels.length > 0 ? (
@@ -862,7 +869,7 @@ function AccountsPageContent() {
                   <button
                     key={model.id}
                     type="button"
-                    className="inline-flex cursor-pointer items-center rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 transition hover:border-neutral-300 hover:bg-neutral-50"
+                    className="inline-flex cursor-pointer items-center rounded-full border border-border bg-muted/40 px-3 py-1.5 text-xs font-medium text-foreground transition hover:border-brand/30 hover:bg-brand-soft hover:text-brand"
                     onClick={() => {
                       void navigator.clipboard.writeText(model.id);
                       toast.success("模型名已复制");
@@ -889,17 +896,10 @@ function AccountsPageContent() {
       </section>
 
       <section className="space-y-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <h2 className="text-lg font-semibold tracking-tight">账户列表</h2>
-            <Badge variant="secondary" className="rounded-lg bg-neutral-200 px-2 py-0.5 text-neutral-700">
-              {filteredAccounts.length}
-            </Badge>
-          </div>
-
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
-            <div className="relative min-w-[260px]">
-              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-neutral-400" />
+        <FilterCard>
+          <FilterField label="搜索邮箱">
+            <div className="relative min-w-[220px]">
+              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground/70" />
               <Input
                 value={query}
                 onChange={(event) => {
@@ -907,9 +907,11 @@ function AccountsPageContent() {
                   setPage(1);
                 }}
                 placeholder="搜索邮箱"
-                className="h-10 rounded-xl border-neutral-200 bg-white/85 pl-10"
+                className="h-10 rounded-xl pl-10"
               />
             </div>
+          </FilterField>
+          <FilterField label="账号类型">
             <Select
               value={typeFilter}
               onValueChange={(value) => {
@@ -917,7 +919,7 @@ function AccountsPageContent() {
                 setPage(1);
               }}
             >
-              <SelectTrigger className="h-10 w-full rounded-xl border-neutral-200 bg-white/85 lg:w-[150px]">
+              <SelectTrigger className="h-10 w-full rounded-xl sm:w-[150px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -928,26 +930,25 @@ function AccountsPageContent() {
                 ))}
               </SelectContent>
             </Select>
-            <Select
+          </FilterField>
+          <FilterField label="账号状态">
+            <SegmentedControl
               value={statusFilter}
-              onValueChange={(value) => {
+              ariaLabel="账号状态"
+              options={accountStatusOptions.map((option) => ({
+                value: option.value,
+                label: option.value === "all" ? "全部" : option.label,
+              }))}
+              onChange={(value) => {
                 setStatusFilter(value as AccountStatus | "all");
                 setPage(1);
               }}
-            >
-              <SelectTrigger className="h-10 w-full rounded-xl border-neutral-200 bg-white/85 lg:w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {accountStatusOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            />
+          </FilterField>
+          <div className="ml-auto pb-2 text-xs text-muted-foreground sm:pb-2.5">
+            共 <span className="font-semibold tabular-nums text-foreground">{filteredAccounts.length}</span> 个账户
           </div>
-        </div>
+        </FilterCard>
 
         {isLoading && accounts.length === 0 ? (
           <Card>
@@ -970,8 +971,12 @@ function AccountsPageContent() {
           )}
         >
           <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-neutral-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-wrap items-center gap-2 text-sm text-neutral-500">
+            <div className="flex flex-col gap-3 border-b border-border px-5 py-3.5 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                <span className="mr-1 text-[15px] font-semibold tracking-tight text-foreground">账户列表</span>
+                <Badge variant="secondary" className="mr-1 rounded-full px-2 py-0.5 text-[11px] tabular-nums">
+                  {filteredAccounts.length}
+                </Badge>
                 <Button
                   variant="ghost"
                   className="h-8 rounded-lg px-3 text-neutral-500 hover:bg-neutral-100"
@@ -1102,7 +1107,7 @@ function AccountsPageContent() {
                         <td className="px-4 py-3">
                           <div className="text-xs leading-5 text-neutral-500">{account.email ?? "—"}</div>
                         </td>
-                        <td className="px-4 py-3 text-xs leading-5 text-neutral-500">
+                        <td className="px-4 py-3 text-xs leading-5 whitespace-nowrap text-neutral-500">
                           {(() => {
                             const raw = (account as any).created_at;
                             if (!raw) return "—";
@@ -1123,7 +1128,7 @@ function AccountsPageContent() {
                           {(() => {
                             const restore = formatRestoreAt(account.restore_at);
                             return (
-                              <div className="space-y-0.5">
+                              <div className="space-y-0.5 whitespace-nowrap">
                                 {restore.relative ? <div className="font-medium text-neutral-700">{restore.relative}</div> : null}
                                 <div>{restore.absolute}</div>
                               </div>

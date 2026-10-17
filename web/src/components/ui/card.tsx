@@ -7,8 +7,8 @@ function Card({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="card"
       className={cn(
-        // 参考稿的卡片：纯白面 + 一像素冷灰边 + 几乎看不见的浅投影，圆角 16px。
-        "bg-card text-card-foreground flex flex-col rounded-2xl border border-border shadow-[0_1px_2px_rgba(15,23,42,0.035)]",
+        // 参考稿的卡片：纯白面 + 一像素冷灰边 + 几乎看不见的浅投影，圆角 18px。
+        "bg-card text-card-foreground flex flex-col rounded-[18px] border border-border shadow-[0_1px_2px_rgba(15,23,42,0.04),0_2px_8px_-4px_rgba(15,23,42,0.04)]",
         className,
       )}
       {...props}
@@ -64,7 +64,7 @@ function CardContent({ className, ...props }: React.ComponentProps<"div">) {
  * 保持白面细边的静态观感，hover 只轻微提亮描边 + 投影，不位移，避免整页数字跳动。
  */
 export const statCardClass = cn(
-  "group relative rounded-2xl border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,0.035)]",
+  "group relative rounded-[18px] border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,0.04),0_2px_8px_-4px_rgba(15,23,42,0.04)]",
   "transition-[box-shadow,border-color] duration-200 ease-out",
   "hover:border-brand/25 hover:shadow-[0_1px_2px_rgba(15,23,42,0.04),0_10px_30px_-18px_rgba(13,115,200,0.35)]",
 );

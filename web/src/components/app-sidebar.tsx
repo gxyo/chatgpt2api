@@ -71,7 +71,7 @@ const brandLinkClass =
 /** 品牌标识：品牌蓝实心方块，和按钮、图表是同一套主色。 */
 function BrandMark() {
   return (
-    <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-brand text-white shadow-sm shadow-brand/30">
+    <span className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-[#2563eb] text-white shadow-[0_6px_16px_-6px_rgba(37,99,235,0.8)]">
       <Sparkles className="size-4" />
     </span>
   );
@@ -143,7 +143,7 @@ function NavList({
       {groups.map((group, groupIndex) => (
         <div key={group.label ?? groupIndex} className="flex flex-col gap-0.5">
           {group.label ? (
-            <div className="px-3 pt-4 pb-1.5 text-[11px] font-medium tracking-wide text-muted-foreground/70">
+            <div className="px-3 pt-5 pb-1.5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground/60 uppercase">
               {group.label}
             </div>
           ) : null}
@@ -162,16 +162,16 @@ function NavList({
                 }}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors",
+                  "relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] transition-colors",
                   active
-                    ? "bg-brand-soft font-semibold text-brand"
+                    ? "bg-[#2563eb] font-semibold text-white shadow-[0_10px_24px_-12px_rgba(37,99,235,0.95)]"
                     : "font-medium text-muted-foreground hover:bg-muted hover:text-foreground",
                 )}
               >
                 <Icon
                   className={cn(
-                    "size-4 shrink-0 transition-colors",
-                    active ? "text-brand" : "text-muted-foreground/70",
+                    "size-[18px] shrink-0 transition-colors",
+                    active ? "text-white" : "text-muted-foreground/80",
                   )}
                 />
                 <span className="truncate">{item.label}</span>
@@ -190,8 +190,8 @@ function UserBadge({ session }: { session: StoredAuthSession }) {
   const initial = displayName.slice(0, 1).toUpperCase();
 
   return (
-    <div className="flex items-center gap-2.5 px-2 py-1.5">
-      <span className="grid size-8 shrink-0 place-items-center rounded-full bg-brand-soft text-xs font-semibold text-brand">
+    <div className="flex items-center gap-2.5 rounded-xl border border-border/70 bg-white/[0.04] px-2.5 py-2">
+      <span className="grid size-8 shrink-0 place-items-center rounded-full bg-[#2563eb] text-[11px] font-semibold text-white">
         {initial}
       </span>
       <div className="min-w-0 flex-1">
@@ -215,7 +215,7 @@ function LogoutButton({ onLogout }: { onLogout: () => void }) {
   );
 }
 
-/** 桌面端左侧导航栏，固定在视口左侧，内容区靠左内边距让位。 */
+/** 桌面端左侧导航栏：深色悬浮面板，固定在一角，内容区靠左内边距让位。 */
 export function AppSidebar() {
   const pathname = usePathname();
   const { session, handleLogout } = useNavSession(pathname);
@@ -227,8 +227,8 @@ export function AppSidebar() {
   const navGroups = session.role === "admin" ? adminNavGroups : userNavGroups;
 
   return (
-    <aside className="fixed inset-y-0 left-0 z-40 hidden w-60 flex-col border-r border-border bg-sidebar lg:flex">
-      <div className="flex h-14 shrink-0 items-center px-5">
+    <aside className="app-sidebar fixed inset-y-3 left-3 z-40 hidden w-[248px] flex-col overflow-hidden rounded-[26px] border border-white/[0.06] bg-[#0d1526] text-white shadow-[0_30px_80px_-30px_rgba(2,6,23,0.75)] lg:flex dark:bg-[#0a1120]">
+      <div className="flex h-16 shrink-0 items-center px-5">
         <Link href={BRAND_HREF} className={brandLinkClass}>
           <BrandMark />
           chatgpt2api
@@ -239,7 +239,7 @@ export function AppSidebar() {
       </div>
       <div className="shrink-0 border-t border-border p-3">
         <UserBadge session={session} />
-        <div className="mt-1 flex items-center justify-between gap-1 px-1">
+        <div className="mt-2 flex items-center justify-between gap-1 px-1">
           <div className="flex items-center gap-1">
             <ThemeToggle />
             <VersionReleaseDialog />
@@ -270,8 +270,8 @@ export function MobileNavBar() {
           <Menu className="size-4" />
           <span className="sr-only">打开导航</span>
         </SheetTrigger>
-        <SheetContent side="left" className="w-72 gap-0 p-0">
-          <div className="flex h-14 shrink-0 items-center px-5">
+        <SheetContent side="left" className="app-sidebar w-72 gap-0 border-white/[0.06] bg-[#0d1526] p-0 text-white dark:bg-[#0a1120]">
+          <div className="flex h-16 shrink-0 items-center px-5">
             <Link href={BRAND_HREF} className={brandLinkClass} onClick={() => setOpen(false)}>
               <BrandMark />
               chatgpt2api

@@ -67,13 +67,13 @@ export function ImageSidebar({
       <div className="flex h-full min-h-0 flex-col gap-2 py-1 sm:gap-3 sm:py-2">
         {!hideActionButtons && (
           <div className="flex items-center gap-2">
-            <Button className="h-10 flex-1 rounded-xl bg-brand text-white hover:bg-brand/90" onClick={onCreateDraft}>
+            <Button className="h-10 flex-1 rounded-xl" onClick={onCreateDraft}>
               <MessageSquarePlus className="size-4" />
               新建对话
             </Button>
             <Button
               variant="outline"
-              className="h-10 rounded-xl border-neutral-200 bg-white/85 px-3 text-neutral-600 hover:bg-white"
+              className="h-10 rounded-xl px-3 text-muted-foreground"
               onClick={() => void onClearHistory()}
               disabled={conversations.length === 0}
             >
@@ -103,11 +103,11 @@ export function ImageSidebar({
                 <div
                   key={conversation.id}
                   className={cn(
-                    "group relative w-full border-l-2 text-left transition",
-                    hideActionButtons ? "px-4 py-3.5" : "px-3 py-2 sm:py-3",
+                    "group relative w-full rounded-xl border text-left transition-colors",
+                    hideActionButtons ? "px-4 py-3.5" : "px-3 py-2.5",
                     active
-                      ? "border-neutral-900 bg-black/[0.035] text-neutral-950"
-                      : "border-transparent text-neutral-700 hover:border-neutral-300 hover:bg-white/40",
+                      ? "border-brand/25 bg-brand-soft text-foreground"
+                      : "border-transparent text-foreground/80 hover:bg-muted",
                   )}
                 >
                   <button
@@ -127,22 +127,22 @@ export function ImageSidebar({
                             if (e.key === "Escape") cancelRename();
                           }}
                           onClick={(e) => e.stopPropagation()}
-                          className="w-full truncate rounded border border-neutral-300 bg-white px-1 py-0.5 text-sm outline-none focus:border-neutral-500"
+                          className="w-full truncate rounded-md border border-border bg-card px-1.5 py-0.5 text-sm outline-none focus:border-brand/50"
                         />
                       ) : (
                         <span className="truncate">{conversation.title}</span>
                       )}
                     </div>
-                    <div className={cn("mt-1 text-xs", active ? "text-neutral-500" : "text-neutral-400")}>
+                    <div className={cn("mt-1 text-xs", active ? "text-brand/80" : "text-muted-foreground")}>
                       {conversation.turns.length} 轮 · {formatConversationTime(conversation.updatedAt)}
                     </div>
                     {stats.running > 0 || stats.queued > 0 ? (
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
                         {stats.running > 0 ? (
-                          <span className="rounded-full bg-blue-50 px-2 py-1 text-blue-600">处理中 {stats.running}</span>
+                          <span className="rounded-full bg-brand-soft px-2 py-1 font-medium text-brand">处理中 {stats.running}</span>
                         ) : null}
                         {stats.queued > 0 ? (
-                          <span className="rounded-full bg-amber-50 px-2 py-1 text-amber-700">排队 {stats.queued}</span>
+                          <span className="rounded-full bg-amber-500/10 px-2 py-1 font-medium text-amber-700 dark:text-amber-400">排队 {stats.queued}</span>
                         ) : null}
                       </div>
                     ) : null}

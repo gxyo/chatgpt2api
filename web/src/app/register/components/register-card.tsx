@@ -733,7 +733,8 @@ export function RegisterCard() {
               }
             />
 
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {/* 指标区不拆成 8 张独立小卡，用一层发丝线网格分隔，和号池概览同一套语言。 */}
+            <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-4">
               {[
                 ["成功 / 成功率", `${stats.success} / ${stats.success_rate || 0}%`],
                 ["失败", stats.fail],
@@ -744,9 +745,9 @@ export function RegisterCard() {
                 ["当前额度", stats.current_quota || 0],
                 ["正常账号", stats.current_available || 0],
               ].map(([label, value]) => (
-                <div key={label} className="rounded-xl border border-neutral-200 bg-white px-3 py-2">
-                  <div className="text-xs text-neutral-400">{label}</div>
-                  <div className="mt-1 text-sm font-semibold text-neutral-800 tabular-nums">{value}</div>
+                <div key={label} className="bg-card px-3 py-2.5">
+                  <div className="text-[11px] leading-4 text-muted-foreground">{label}</div>
+                  <div className="mt-0.5 text-sm leading-5 font-semibold text-foreground tabular-nums">{value}</div>
                 </div>
               ))}
             </div>
@@ -758,7 +759,7 @@ export function RegisterCard() {
               </Button>
               <Button
                 variant="outline"
-                className="h-9 rounded-xl border-neutral-200 bg-white px-3 text-neutral-700"
+                className="h-9 rounded-xl border-border bg-card px-3 text-foreground"
                 onClick={() => void reset()}
                 disabled={isSaving || config.enabled}
               >
@@ -767,7 +768,7 @@ export function RegisterCard() {
               </Button>
               <Button
                 variant="outline"
-                className="h-9 rounded-xl border-neutral-200 bg-white px-3 text-neutral-700"
+                className="h-9 rounded-xl border-border bg-card px-3 text-foreground"
                 onClick={() => void save()}
                 disabled={isSaving || config.enabled}
               >

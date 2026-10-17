@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { LoaderCircle } from "lucide-react";
 
+import { PageHeader } from "@/components/page-header";
 import webConfig from "@/constants/common-env";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import type { RegisterConfig } from "@/lib/api";
@@ -46,14 +47,11 @@ function RegisterPageContent() {
   return (
     <>
       <RegisterDataController />
-      <section className="mb-2 flex flex-col gap-1 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-1.5">
-          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">ChatGPT 注册机</h1>
-          <p className="text-[13px] leading-5 text-muted-foreground">
-            批量注册账号并写入号池，运行状态与结果会实时同步到注册统计。
-          </p>
-        </div>
-      </section>
+      <PageHeader
+        className="mb-2"
+        title="ChatGPT 注册机"
+        description="批量注册账号并写入号池，运行状态与结果会实时同步到注册统计。"
+      />
       <section className="flex min-h-0 flex-1 flex-col">
         <RegisterCard />
       </section>

@@ -5,7 +5,9 @@ import { LoaderCircle, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
-import { StatTile } from "@/components/stat-tile";
+import { FilterCard, FilterField } from "@/components/filter-card";
+import { MetricGrid } from "@/components/metric-grid";
+import { PageHeader } from "@/components/page-header";
 import { WaveChart } from "@/components/wave-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -166,14 +168,13 @@ function RegisterStatsContent() {
 
   return (
     <section className="space-y-5">
-      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-        <div className="space-y-1.5">
-          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">账号注册统计</h1>
-          <p className="text-[13px] leading-5 text-muted-foreground">
-            Cloudflare 临时邮箱注册结果统计，卡片与波形跟随所选区间；改动注册机页的域名不会清空历史。
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+      <PageHeader
+        title="账号注册统计"
+        description="Cloudflare 临时邮箱注册结果统计，卡片与波形跟随所选区间；改动注册机页的域名不会清空历史。"
+      />
+
+      <FilterCard>
+        <FilterField label="统计区间">
           <SegmentedControl
             value={preset}
             ariaLabel="统计区间"
@@ -185,8 +186,10 @@ function RegisterStatsContent() {
               }
             }}
           />
+        </FilterField>
+        <div className="flex items-center gap-2 sm:ml-auto">
           <Button
-            className="h-10 px-4"
+            className="h-10 px-5"
             onClick={() => void refresh()}
             disabled={isLoading || isHistoryLoading}
           >
@@ -198,86 +201,97 @@ function RegisterStatsContent() {
             刷新
           </Button>
         </div>
-      </div>
+      </FilterCard>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatTile
-          label="成功"
-          value={cardsLoading ? "—" : String(totals.success)}
-          caption={`${presetLabel} · Cloudflare 临时邮箱`}
-          tone={SUCCESS_DOT}
-        />
-        <StatTile
-          label="失败"
-          value={cardsLoading ? "—" : String(totals.failed)}
-          caption={`${presetLabel} · 含超时与上游异常`}
-          tone={FAILED_DOT}
-        />
-        <StatTile
-          label="总数"
-          value={cardsLoading ? "—" : String(totals.requests)}
-          caption={`${presetLabel} · 成功 + 失败`}
-          tone={TOTAL_DOT}
-        />
-        <StatTile
-          label="成功率"
-          value={cardsLoading ? "—" : totals.requests ? `${(totals.success_rate * 100).toFixed(1)}%` : "-"}
-          caption={`${presetLabel} · 按总数加权`}
-          tone={RATE_DOT}
-        />
-      </div>
-
-      <Card>
-        <CardContent className="space-y-4 p-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className="font-semibold text-neutral-900 dark:text-neutral-50">注册结果波形</div>
-              <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
-                {rangeLabel || " "}
+      <Card className="overflow-hidden">
+        <div className="grid xl:grid-cols-[minmax(0,1.65fr)_minmax(340px,1fr)]">
+          <div className="flex min-w-0 flex-col p-5 lg:p-6">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-[15px] font-semibold tracking-tight">注册结果波形</div>
+                <div className="mt-1 text-xs text-muted-foreground">{rangeLabel || " "}</div>
+                {/* 卡片和波形都来自同一份区间账本，只能从本功能上线后开始记——不写清楚会被当成 bug。 */}
+                <div className="mt-0.5 text-xs text-muted-foreground/70">
+                  波形自本功能上线后开始记录，更早的历史不在图中
+                </div>
               </div>
-              {/* 卡片和波形都来自同一份区间账本，只能从本功能上线后开始记——不写清楚会被当成 bug。 */}
-              <div className="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
-                波形自本功能上线后开始记录，更早的历史不在图中
-              </div>
+              {history?.peak ? (
+                <Badge variant="info" className="rounded-full px-2.5 py-1 tabular-nums">
+                  峰值 {history.peak.success} · {history.peak.full_label}
+                </Badge>
+              ) : null}
             </div>
-            {history?.peak ? (
-              <Badge variant="info" className="rounded-md px-2.5 py-1 tabular-nums">
-                峰值 {history.peak.success} · {history.peak.full_label}
-              </Badge>
-            ) : null}
+
+            <div className="mt-4 flex-1">
+              {isHistoryLoading && !history ? (
+                <div className="flex h-[288px] items-center justify-center text-sm text-neutral-400">
+                  <LoaderCircle className="mr-2 size-4 animate-spin" />
+                  加载中
+                </div>
+              ) : history && history.totals.requests > 0 ? (
+                <WaveChart
+                  series={history.series}
+                  granularity={granularity}
+                  primary="success"
+                  form={history.series.length > MAX_BAR_POINTS ? "line" : "bar"}
+                  labels={{
+                    primary: "成功数",
+                    secondary: "失败数",
+                    ariaLabel: "注册结果波形图，按{axis}展示成功数与失败数",
+                  }}
+                />
+              ) : (
+                <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-neutral-400">
+                  <span>该时间段没有注册记录</span>
+                  <span className="text-xs text-neutral-400/80">换一个日期范围试试</span>
+                </div>
+              )}
+            </div>
           </div>
 
-          {isHistoryLoading && !history ? (
-            <div className="flex h-[288px] items-center justify-center text-sm text-neutral-400">
-              <LoaderCircle className="mr-2 size-4 animate-spin" />
-              加载中
-            </div>
-          ) : history && history.totals.requests > 0 ? (
-            <WaveChart
-              series={history.series}
-              granularity={granularity}
-              primary="success"
-              form={history.series.length > MAX_BAR_POINTS ? "line" : "bar"}
-              labels={{
-                primary: "成功数",
-                secondary: "失败数",
-                ariaLabel: "注册结果波形图，按{axis}展示成功数与失败数",
-              }}
+          <div className="border-t border-border xl:border-t-0 xl:border-l">
+            <MetricGrid
+              className="h-full auto-rows-fr"
+              items={[
+                {
+                  label: "成功",
+                  value: cardsLoading ? "—" : String(totals.success),
+                  caption: `${presetLabel} · Cloudflare 临时邮箱`,
+                  tone: SUCCESS_DOT,
+                },
+                {
+                  label: "失败",
+                  value: cardsLoading ? "—" : String(totals.failed),
+                  caption: `${presetLabel} · 含超时与上游异常`,
+                  tone: FAILED_DOT,
+                },
+                {
+                  label: "总数",
+                  value: cardsLoading ? "—" : String(totals.requests),
+                  caption: `${presetLabel} · 成功 + 失败`,
+                  tone: TOTAL_DOT,
+                },
+                {
+                  label: "成功率",
+                  value: cardsLoading
+                    ? "—"
+                    : totals.requests
+                      ? `${(totals.success_rate * 100).toFixed(1)}%`
+                      : "-",
+                  caption: `${presetLabel} · 按总数加权`,
+                  tone: RATE_DOT,
+                },
+              ]}
             />
-          ) : (
-            <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-neutral-400">
-              <span>该时间段没有注册记录</span>
-              <span className="text-xs text-neutral-400/80">换一个日期范围试试</span>
-            </div>
-          )}
-        </CardContent>
+          </div>
+        </div>
       </Card>
 
       <Card>
-        <CardContent className="space-y-4 p-5">
+        <CardContent className="space-y-4 p-5 lg:p-6">
           <div>
-            <div className="font-semibold text-neutral-900 dark:text-neutral-50">按域名</div>
-            <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
+            <div className="text-[15px] font-semibold tracking-tight">按域名</div>
+            <div className="mt-1 text-xs text-muted-foreground">
               每个域名的累计注册结果，「重置」不会清空这里的数据。
             </div>
           </div>

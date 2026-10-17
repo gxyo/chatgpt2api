@@ -45,7 +45,7 @@ export default function RootLayout({
           {/* 外层 min-h-screen + flex-1 传递高度：main 与内容列都铺满剩余视口，
               页面里需要整屏的区块（生图 / 注册机）直接 flex-1 即可，无需各自算 dvh。
               gap 保留页面内多段内容（标题区 + 卡片区）之间的原有间距。 */}
-          <main className="flex min-w-0 flex-1 flex-col lg:pl-60">
+          <main className="flex min-w-0 flex-1 flex-col lg:pl-[272px]">
             <PageTransition>{children}</PageTransition>
           </main>
         </div>

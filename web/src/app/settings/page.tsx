@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { LoaderCircle } from "lucide-react";
+import { BookOpen, KeyRound, LoaderCircle, SlidersHorizontal, Tags } from "lucide-react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -14,10 +14,10 @@ import { UserKeysCard } from "./components/user-keys-card";
 import { useSettingsStore } from "./store";
 
 const settingsTabs = [
-  { value: "basic", title: "基础配置" },
-  { value: "model-pricing", title: "模型与定价设置" },
-  { value: "keys", title: "用户密钥" },
-  { value: "api-docs", title: "接口接入" },
+  { value: "basic", title: "基础配置", icon: SlidersHorizontal },
+  { value: "model-pricing", title: "模型与定价", icon: Tags },
+  { value: "keys", title: "用户密钥", icon: KeyRound },
+  { value: "api-docs", title: "接口接入", icon: BookOpen },
 ];
 
 function SettingsDataController() {
@@ -41,13 +41,17 @@ function SettingsPageContent() {
       <SettingsDataController />
       <SettingsHeader />
       <Tabs defaultValue="basic" className="space-y-4">
-        <div className="sticky top-[4.5rem] z-20 -mx-1 overflow-x-auto px-1 py-1 backdrop-blur lg:top-3">
-          <TabsList className="min-w-max justify-start">
-            {settingsTabs.map((tab) => (
-              <TabsTrigger key={tab.value} value={tab.value} className="px-4">
-                {tab.title}
-              </TabsTrigger>
-            ))}
+        <div className="sticky top-[4.5rem] z-20 -mx-1 overflow-x-auto px-1 py-1 lg:top-3">
+          <TabsList className="min-w-max justify-start rounded-full border-border bg-card/95 p-1 shadow-[0_1px_2px_rgba(15,23,42,0.04)] backdrop-blur">
+            {settingsTabs.map((tab) => {
+              const Icon = tab.icon;
+              return (
+                <TabsTrigger key={tab.value} value={tab.value} className="gap-2 rounded-full px-4">
+                  <Icon className="size-4" />
+                  {tab.title}
+                </TabsTrigger>
+              );
+            })}
           </TabsList>
         </div>
         <TabsContent value="basic">

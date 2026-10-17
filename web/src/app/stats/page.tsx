@@ -6,7 +6,10 @@ import { LoaderCircle, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
+import { FilterCard, FilterField } from "@/components/filter-card";
 import { ImageModeChart } from "@/components/image-mode-chart";
+import { MetricGrid } from "@/components/metric-grid";
+import { PageHeader } from "@/components/page-header";
 import { StatTile } from "@/components/stat-tile";
 import { WaveChart } from "@/components/wave-chart";
 import { Badge } from "@/components/ui/badge";
@@ -128,14 +131,13 @@ function StatsContent() {
   const hasLegacyRevenue = (totals?.legacy_success ?? 0) > 0 || (totals?.legacy_revenue ?? 0) > 0;
   return (
     <section className="space-y-5">
-      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-        <div className="space-y-1.5">
-          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">图片统计</h1>
-          <p className="text-[13px] leading-5 text-muted-foreground">
-            按北京时间统计成功生成与失败的图片数，默认展示今天（{today}）。
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+      <PageHeader
+        title="图片统计"
+        description={<>按北京时间统计成功生成与失败的图片数，默认展示今天（{today}）。</>}
+      />
+
+      <FilterCard>
+        <FilterField label="统计区间">
           <SegmentedControl
             value={preset}
             ariaLabel="统计区间"
@@ -147,6 +149,8 @@ function StatsContent() {
               }
             }}
           />
+        </FilterField>
+        <FilterField label="自定义日期">
           <DateRangeFilter
             startDate={preset === "all" ? "" : startDate}
             endDate={preset === "all" ? "" : endDate}
@@ -157,9 +161,11 @@ function StatsContent() {
               setPreset(null);
             }}
           />
+        </FilterField>
+        <div className="flex items-center gap-2 sm:ml-auto">
           <Button
-            variant="outline"
-            className="h-10 px-4"
+            variant="ghost"
+            className="h-10 px-3 text-muted-foreground"
             onClick={() => {
               setStartDate(today);
               setEndDate(today);
@@ -169,7 +175,7 @@ function StatsContent() {
             重置
           </Button>
           <Button
-            className="h-10 px-4"
+            className="h-10 px-5"
             onClick={() => {
               // 「查询」= 把这一页的数据都重拉一遍，当前请求数也顺带刷掉。
               void loadStats();
@@ -181,36 +187,86 @@ function StatsContent() {
             查询
           </Button>
         </div>
-      </div>
+      </FilterCard>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatTile
-          label="成功图片"
-          value={String(totals?.images ?? 0)}
-          caption={rangeLabel || " "}
-          tone={SUCCESS_DOT}
-        />
-        <StatTile
-          label="生成失败"
-          value={String(totals?.failed ?? 0)}
-          caption="上游异常等，不含安全拦截"
-          tone={FAILED_DOT}
-        />
-        <StatTile
-          label="违反安全策略"
-          value={String(totals?.policy_violation ?? 0)}
-          caption="被安全策略拦截 · 不计费"
-          tone={POLICY_DOT}
-        />
-        <StatTile
-          label="成功率"
-          value={totals ? formatRate(totals.success_rate) : "-"}
-          caption={`平均耗时 ${formatDuration(totals?.avg_duration_ms ?? 0)}`}
-          tone={NEUTRAL_DOT}
-        />
-      </div>
+      {/* 参考稿的核心版式：图表和 2×2 指标共享同一张大卡，中间只隔一条发丝线。 */}
+      <Card className="overflow-hidden">
+        <div className="grid xl:grid-cols-[minmax(0,1.65fr)_minmax(340px,1fr)]">
+          <div className="flex min-w-0 flex-col p-5 lg:p-6">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-[15px] font-semibold tracking-tight">成功图片波形</div>
+                <div className="mt-1 text-xs text-muted-foreground">{rangeLabel}</div>
+              </div>
+              {data?.peak ? (
+                <Badge variant="info" className="rounded-full px-2.5 py-1 tabular-nums">
+                  峰值 {(data.peak.images ?? 0) > 0 ? data.peak.images : data.peak.requests} ·{" "}
+                  {data.peak.full_label}
+                </Badge>
+              ) : null}
+            </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="mt-4 flex-1">
+              {isLoading && !data ? (
+                <div className="flex h-[288px] items-center justify-center text-sm text-neutral-400">
+                  <LoaderCircle className="mr-2 size-4 animate-spin" />
+                  加载中
+                </div>
+              ) : data && data.totals.requests > 0 ? (
+                <WaveChart
+                  series={data.series}
+                  granularity={granularity}
+                  primary="images"
+                  labels={{
+                    primary: "成功图片",
+                    secondary: "失败数",
+                    ariaLabel: "成功图片与失败数波形图，按{axis}展示",
+                  }}
+                />
+              ) : (
+                <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-neutral-400">
+                  <span>该时间段没有生图记录</span>
+                  <span className="text-xs text-neutral-400/80">换一个日期范围试试</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="border-t border-border xl:border-t-0 xl:border-l">
+            <MetricGrid
+              className="h-full auto-rows-fr"
+              items={[
+                {
+                  label: "成功图片",
+                  value: String(totals?.images ?? 0),
+                  caption: rangeLabel || " ",
+                  tone: SUCCESS_DOT,
+                },
+                {
+                  label: "生成失败",
+                  value: String(totals?.failed ?? 0),
+                  caption: "上游异常等，不含安全拦截",
+                  tone: FAILED_DOT,
+                },
+                {
+                  label: "违反安全策略",
+                  value: String(totals?.policy_violation ?? 0),
+                  caption: "被安全策略拦截 · 不计费",
+                  tone: POLICY_DOT,
+                },
+                {
+                  label: "成功率",
+                  value: totals ? formatRate(totals.success_rate) : "-",
+                  caption: `平均耗时 ${formatDuration(totals?.avg_duration_ms ?? 0)}`,
+                  tone: NEUTRAL_DOT,
+                },
+              ]}
+            />
+          </div>
+        </div>
+      </Card>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <StatTile
           label="收入"
           value={formatCurrency(totals?.revenue ?? 0)}
@@ -243,56 +299,17 @@ function StatsContent() {
         />
       </div>
 
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
       <Card>
-        <CardContent className="space-y-4 p-5">
+        <CardContent className="space-y-4 p-5 lg:p-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="font-semibold text-neutral-900 dark:text-neutral-50">成功图片波形</div>
-              <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">{rangeLabel}</div>
-            </div>
-            {data?.peak ? (
-              <Badge variant="info" className="rounded-md px-2.5 py-1 tabular-nums">
-                峰值 {(data.peak.images ?? 0) > 0 ? data.peak.images : data.peak.requests} ·{" "}
-                {data.peak.full_label}
-              </Badge>
-            ) : null}
-          </div>
-
-          {isLoading && !data ? (
-            <div className="flex h-[288px] items-center justify-center text-sm text-neutral-400">
-              <LoaderCircle className="mr-2 size-4 animate-spin" />
-              加载中
-            </div>
-          ) : data && data.totals.requests > 0 ? (
-            <WaveChart
-              series={data.series}
-              granularity={granularity}
-              primary="images"
-              labels={{
-                primary: "成功图片",
-                secondary: "失败数",
-                ariaLabel: "成功图片与失败数波形图，按{axis}展示",
-              }}
-            />
-          ) : (
-            <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-neutral-400">
-              <span>该时间段没有生图记录</span>
-              <span className="text-xs text-neutral-400/80">换一个日期范围试试</span>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="space-y-4 p-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className="font-semibold text-neutral-900 dark:text-neutral-50">模型收入明细</div>
-              <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
+              <div className="text-[15px] font-semibold tracking-tight">模型收入明细</div>
+              <div className="mt-1 text-xs text-muted-foreground">
                 收入按计费时的单价累计，调价只影响之后的请求 · {rangeLabel || "全部时间"}
               </div>
             </div>
-            <Badge variant="info" className="rounded-md px-2.5 py-1 tabular-nums">
+            <Badge variant="info" className="rounded-full px-2.5 py-1 tabular-nums">
               合计 {formatCurrency(totals?.revenue ?? 0)}
             </Badge>
           </div>
@@ -360,30 +377,16 @@ function StatsContent() {
       </Card>
 
       <Card>
-        <CardContent className="space-y-4 p-5">
+        <CardContent className="space-y-4 p-5 lg:p-6">
           <div>
-            <div className="font-semibold text-neutral-900 dark:text-neutral-50">按调用方式</div>
-            <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
+            <div className="text-[15px] font-semibold tracking-tight">按调用方式</div>
+            <div className="mt-1 text-xs text-muted-foreground">
               条形长度 = 各方式占成功图片的比重；成功率条满格为 100%
             </div>
           </div>
           <ImageModeChart modes={data?.by_mode ?? []} />
         </CardContent>
       </Card>
-
-      <div className="flex justify-end">
-        <Button
-          variant="ghost"
-          className="h-8 rounded-lg px-3 text-neutral-500"
-          onClick={() => {
-            void loadStats();
-            void loadInflight();
-          }}
-          disabled={isLoading}
-        >
-          <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
-          刷新
-        </Button>
       </div>
     </section>
   );
