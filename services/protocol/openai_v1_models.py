@@ -31,6 +31,8 @@ def list_models() -> dict[str, Any]:
     if web_image_accounts:
         dynamic_models.add("gpt-image-2")
         dynamic_models.add("gpt-image-2.5")
+        dynamic_models.add("gpt-image-2.5-sunburst")
+        dynamic_models.add("gpt-image-2.5-flare")
     if codex_types & {"Plus", "Team", "Pro"}:
         dynamic_models.add(CODEX_IMAGE_MODEL)
     if "Plus" in codex_types:

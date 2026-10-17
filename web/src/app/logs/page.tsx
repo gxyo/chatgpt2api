@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { ArrowRight, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
+import { ArrowRight, Check, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
@@ -200,17 +200,17 @@ function isAccountRetry(item: SystemLog) {
   );
 }
 
-/** 重试列的小卡片：是=琥珀色，否=中性灰，避免纯文字在表格里不好扫。 */
+/** 重试列的小卡片：是=琥珀色，否=绿色，避免灰卡片在表格里显得脏。 */
 function RetryCard({ retried }: { retried: boolean }) {
   return (
     <span
       className={`inline-flex w-14 items-center justify-center gap-1.5 rounded-lg border px-2 py-1 text-xs font-medium shadow-sm ${
         retried
           ? "border-amber-200 bg-amber-50 text-amber-700"
-          : "border-neutral-200 bg-neutral-50 text-neutral-500"
+          : "border-emerald-200 bg-emerald-50 text-emerald-700"
       }`}
     >
-      {retried ? <RotateCcw className="size-3.5" /> : <span className="size-1.5 rounded-full bg-neutral-400" />}
+      {retried ? <RotateCcw className="size-3.5" /> : <Check className="size-3.5" />}
       {retried ? "是" : "否"}
     </span>
   );
@@ -219,8 +219,8 @@ function RetryCard({ retried }: { retried: boolean }) {
 /** 数量列的小卡片：本次生图实际返回的图片张数。 */
 function ImageCountCard({ count }: { count: number }) {
   return (
-    <span className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-neutral-200 bg-neutral-50 px-2 py-1 text-xs font-medium text-neutral-600 tabular-nums shadow-sm">
-      <ImageIcon className="size-3.5 text-neutral-400" />
+    <span className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-xs font-medium text-sky-700 tabular-nums shadow-sm">
+      <ImageIcon className="size-3.5" />
       {count} 张
     </span>
   );

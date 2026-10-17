@@ -795,7 +795,7 @@ class OpenAIBackendAPI:
         _, base_model = split_image_model(model)
         if not base_model:
             return "auto", ""
-        if base_model in {"gpt-image-2", "gpt-image-2.5"}:
+        if base_model in {"gpt-image-2", "gpt-image-2.5", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"}:
             upstream_model = config.default_upstream_model_name
         elif base_model == CODEX_IMAGE_MODEL:
             upstream_model = base_model
