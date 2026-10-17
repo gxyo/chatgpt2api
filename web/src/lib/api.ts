@@ -107,6 +107,7 @@ export type SettingsConfig = {
   image_cleanup_interval_days?: number | string;
   image_cleanup_time?: string;
   image_poll_timeout_secs?: number | string;
+  image_generation_retry_count?: number | string;
   image_account_concurrency?: number | string;
   image_quota_error_message?: string;
   image_parallel_generation?: boolean;

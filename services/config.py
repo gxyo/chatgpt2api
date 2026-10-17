@@ -15,6 +15,8 @@ CONFIG_FILE = BASE_DIR / "config.json"
 VERSION_FILE = BASE_DIR / "VERSION"
 
 DEFAULT_IMAGE_POLL_TIMEOUT_SECS = 75
+# 生图失败后换号重新生成的次数。留空/0 = 不重试，保持原有行为。
+DEFAULT_IMAGE_GENERATION_RETRY_COUNT = 0
 DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS = 1
 DEFAULT_IMAGE_CLEANUP_TIME = "03:00"
 IMAGE_CLEANUP_INTERVAL_CHOICES = {1, 3, 5, 7}
@@ -109,6 +111,13 @@ def _normalize_image_cleanup_time(value: object) -> str:
 def _normalize_image_quota_error_message(value: object) -> str:
     # 留空 = 不改写，继续把上游原文 no available image quota 返回给用户。
     return str(value or "").strip()[:MAX_IMAGE_QUOTA_ERROR_MESSAGE_LENGTH]
+
+
+def _normalize_image_generation_retry_count(value: object) -> int:
+    """留空/非法值按 0 处理（不重试）；负数同样收口到 0。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return DEFAULT_IMAGE_GENERATION_RETRY_COUNT
+    return _normalize_positive_int(value, DEFAULT_IMAGE_GENERATION_RETRY_COUNT, 0)
 
 
 def _normalize_log_cleanup_time(value: object) -> str:
@@ -312,6 +321,11 @@ class ConfigStore:
             return 10.0
 
     @property
+    def image_generation_retry_count(self) -> int:
+        """生图失败后换号重新生成的次数；0 表示不重试。"""
+        return _normalize_image_generation_retry_count(self.data.get("image_generation_retry_count"))
+
+    @property
     def image_account_concurrency(self) -> int:
         try:
             return max(1, int(self.data.get("image_account_concurrency", 3)))
@@ -431,6 +445,7 @@ class ConfigStore:
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
+        data["image_generation_retry_count"] = self.image_generation_retry_count
         data["image_account_concurrency"] = self.image_account_concurrency
         data["image_parallel_generation"] = self.image_parallel_generation
         data["image_upscale_enabled"] = self.image_upscale_enabled
@@ -480,6 +495,10 @@ class ConfigStore:
             )
         if "image_upscale_enabled" in next_data:
             next_data["image_upscale_enabled"] = _normalize_bool(next_data.get("image_upscale_enabled"))
+        if "image_generation_retry_count" in next_data:
+            next_data["image_generation_retry_count"] = _normalize_image_generation_retry_count(
+                next_data.get("image_generation_retry_count")
+            )
         self.data = next_data
         self._save()
         return self.get()

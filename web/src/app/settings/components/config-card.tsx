@@ -26,6 +26,7 @@ export function ConfigCard() {
   const setImageCleanupIntervalDays = useSettingsStore((state) => state.setImageCleanupIntervalDays);
   const setImageCleanupTime = useSettingsStore((state) => state.setImageCleanupTime);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
+  const setImageGenerationRetryCount = useSettingsStore((state) => state.setImageGenerationRetryCount);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
   const setImageUpscaleEnabled = useSettingsStore((state) => state.setImageUpscaleEnabled);
   const setImageQuotaErrorMessage = useSettingsStore((state) => state.setImageQuotaErrorMessage);
@@ -190,6 +191,18 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-neutral-200 bg-white"
             />
             <p className="text-xs text-neutral-500">单位秒，等待上游图片结果的最长时间。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-neutral-700">生成失败重试次数</label>
+            <Input
+              value={config?.image_generation_retry_count ? String(config.image_generation_retry_count) : ""}
+              onChange={(event) => setImageGenerationRetryCount(event.target.value)}
+              placeholder="留空不重试"
+              className="h-10 rounded-xl border-neutral-200 bg-white"
+            />
+            <p className="text-xs leading-5 text-neutral-500">
+              生图失败时切换账号重新生成的次数；留空表示不重试。仅对「本次生图失败，请重试」「upstream authentication token is invalid」「当前生图任务处理超时」生效，内容违规不重试。
+            </p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-neutral-700">单账号图片并发</label>

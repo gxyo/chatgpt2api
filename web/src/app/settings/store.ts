@@ -43,6 +43,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       ? String(config.image_cleanup_time)
       : "03:00",
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 75),
+    image_generation_retry_count: Math.max(0, Math.floor(Number(config.image_generation_retry_count) || 0)),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     image_upscale_enabled: Boolean(config.image_upscale_enabled),
     image_quota_error_message: String(config.image_quota_error_message || ""),
@@ -80,6 +81,7 @@ type SettingsStore = {
   setImageCleanupIntervalDays: (value: string) => void;
   setImageCleanupTime: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
+  setImageGenerationRetryCount: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
   setImageUpscaleEnabled: (value: boolean) => void;
   setImageQuotaErrorMessage: (value: string) => void;
@@ -161,6 +163,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           ? String(config.image_cleanup_time)
           : "03:00",
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 75),
+        image_generation_retry_count: Math.max(0, Math.floor(Number(config.image_generation_retry_count) || 0)),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         image_upscale_enabled: Boolean(config.image_upscale_enabled),
         image_quota_error_message: String(config.image_quota_error_message || "").trim(),
@@ -229,6 +232,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImagePollTimeoutSecs: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_poll_timeout_secs: value } } : {});
+  },
+
+  setImageGenerationRetryCount: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_generation_retry_count: value } } : {});
   },
 
   setImageAccountConcurrency: (value) => {

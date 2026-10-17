@@ -25,6 +25,7 @@ from services.openai_backend_api import (
 from utils.helper import (
     CHANNEL_BUSY_MESSAGE,
     IMAGE_MODELS,
+    IMAGE_RETRY_MESSAGE,
     anonymize_token,
     extract_image_from_message_content,
     is_codex_image_model,
@@ -74,10 +75,24 @@ class ImageGenerationError(Exception):
 
 MAX_INITIAL_TRANSIENT_TEXT_ACCOUNT_ATTEMPTS = 2
 MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS = 3
+# 轮询超时后自动换号重试的次数。设置页的 image_generation_retry_count 是在这之后
+# 再追加的「生成失败重试」，两者独立。
+MAX_POLL_TIMEOUT_RETRIES = 4
 TRANSIENT_TEXT_RESCUE_WINDOW_SECS = 12.0
 TRANSIENT_IMAGE_RESCUE_WINDOW_SECS = 20.0
 TRANSIENT_RESCUE_SLEEP_SECS = 2.0
 IMAGE_POLL_TIMEOUT_MESSAGE = "当前生图任务处理超时，请稍后重试"
+# 「生成失败重试」只认这几类最终报错：上游普通失败、token 失效、轮询超时。
+# 内容违规（裸露/色情等）重试也不会过，换号只会白白消耗账号，必须排除在外。
+RETRYABLE_IMAGE_FAILURE_MESSAGES = frozenset({
+    IMAGE_RETRY_MESSAGE,
+    "upstream authentication token is invalid",
+    IMAGE_POLL_TIMEOUT_MESSAGE,
+})
+
+
+def is_retryable_image_failure(message: object) -> bool:
+    return str(message or "").strip() in RETRYABLE_IMAGE_FAILURE_MESSAGES
 
 
 def public_image_error_message(message: str) -> str:
@@ -1525,13 +1540,15 @@ def _generate_single_image_attempts(
     MAX_TLS_RETRIES = 3
     # 连接超时错误最大重试次数（同账号短等待重试）
     MAX_CONN_TIMEOUT_RETRIES = 3
-    # 轮询超时错误最大重试次数（换账号重试）
-    MAX_POLL_TIMEOUT_RETRIES = 4
 
     text_reply_retry_count = 0
     tls_retry_count = 0
     conn_timeout_retry_count = 0
     poll_timeout_retry_count = 0
+    # 设置页的「生成失败重试次数」：只对普通生图失败/token 失效/轮询超时生效，
+    # 每次重试都会排除已经失败过的账号（attempted_tokens），也就是换号重来。
+    generation_retry_limit = config.image_generation_retry_count
+    generation_retry_count = 0
     account_email = ""
     attempted_tokens: set[str] = set()
     last_transient_error = False
@@ -1583,6 +1600,8 @@ def _generate_single_image_attempts(
             "image_peers": max(0, inflight - 1),
             "rescue": rescue_deadline > 0,
             "poll_timeout_retries": poll_timeout_retry_count,
+            "generation_retry_count": generation_retry_count,
+            "generation_retry_limit": generation_retry_limit,
             "attempts": list(diagnostics.get("attempts") or []),
             "attempts_summary": _attempts_summary(diagnostics.get("attempts") or []),
             **conduit,
@@ -1594,6 +1613,32 @@ def _generate_single_image_attempts(
             diagnostics["request_deadline_secs"] = round(request_budget_secs, 1)
             diagnostics["request_remaining_secs"] = round(remaining, 1) if remaining is not None else None
             diagnostics["request_deadline_expired"] = remaining == 0.0
+
+    def schedule_generation_retry(failure: ImageGenerationError) -> bool:
+        """按设置里的重试次数决定是否换号重来。返回 True 时调用方应 `continue`。
+
+        只认 RETRYABLE_IMAGE_FAILURE_MESSAGES 里的三类报错；内容违规、额度不足、
+        渠道拥堵等都不在这里重试。请求预算已经耗尽时也不再重试（重试也来不及）。
+        """
+        nonlocal generation_retry_count
+        if generation_retry_limit <= 0 or generation_retry_count >= generation_retry_limit:
+            return False
+        if image_deadline_expired(request.deadline):
+            return False
+        if not is_retryable_image_failure(str(failure)):
+            return False
+        generation_retry_count += 1
+        logger.warning({
+            "event": "image_generation_failure_retry",
+            "trace_id": trace_id,
+            "request_token": anonymize_token(token) if token else "",
+            "account_email": account_email,
+            "retry_count": generation_retry_count,
+            "retry_limit": generation_retry_limit,
+            "index": index,
+            "error": str(failure)[:200],
+        })
+        return True
 
     while True:
         in_rescue = rescue_deadline > 0
@@ -1654,11 +1699,14 @@ def _generate_single_image_attempts(
                     continue
                 raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email) from exc
             if poll_timeout_retry_count > 0:
-                raise ImageGenerationError(
+                failure = ImageGenerationError(
                     IMAGE_POLL_TIMEOUT_MESSAGE,
                     code="upstream_timeout",
                     account_email=account_email,
-                ) from exc
+                )
+                if schedule_generation_retry(failure):
+                    continue
+                raise failure from exc
             raise ImageGenerationError(
                 str(exc) or "upstream completed without returning an image result",
                 account_email=account_email,
@@ -1686,12 +1734,15 @@ def _generate_single_image_attempts(
                 backend.progress_callback = request.progress_callback
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
             outputs: list[ImageOutput] = []
+            retry_after_output = False
             for output in stream_fn(backend, request, index, total):
                 ensure_image_deadline(request.deadline)
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:
-                    raise ImageGenerationError(
+                    # message 输出既可能是内容违规，也可能是上游普通失败（已 sanitize 成
+                    # 「本次生图失败，请重试。」）。后者按设置换号重试，前者直接返回。
+                    failure = ImageGenerationError(
                         output.text or "Image generation was rejected by upstream policy.",
                         status_code=400,
                         error_type="invalid_request_error",
@@ -1699,10 +1750,18 @@ def _generate_single_image_attempts(
                         account_email=account_email,
                         conversation_id=output.conversation_id,
                     )
+                    if schedule_generation_retry(failure):
+                        account_service.mark_image_result(token, False)
+                        attempt_outcome, attempt_error = "message_retry", str(failure)
+                        retry_after_output = True
+                        break
+                    raise failure
                 emitted_for_token = True
                 returned_message = output.kind == "message"
                 returned_result = returned_result or output.kind == "result"
                 outputs.append(output)
+            if retry_after_output:
+                continue
             if returned_message:
                 account_service.mark_image_result(token, False)
                 attempt_outcome = "message"
@@ -1760,12 +1819,15 @@ def _generate_single_image_attempts(
                     "retry_count": poll_timeout_retry_count,
                     "index": index,
                 })
-            raise ImageGenerationError(
+            failure = ImageGenerationError(
                 IMAGE_POLL_TIMEOUT_MESSAGE,
                 code="upstream_timeout",
                 account_email=account_email,
                 conversation_id=getattr(exc, "conversation_id", ""),
-            ) from exc
+            )
+            if schedule_generation_retry(failure):
+                continue
+            raise failure from exc
         except ImageContentPolicyError as exc:
             attempt_outcome, attempt_error = "content_policy", str(exc)
             account_service.mark_image_result(token, False)
@@ -1868,6 +1930,8 @@ def _generate_single_image_attempts(
                 "error": error_text,
                 "index": index,
             })
+            if schedule_generation_retry(exc):
+                continue
             raise
         except Exception as exc:
             account_service.mark_image_result(token, False)
@@ -1979,8 +2043,14 @@ def _generate_single_image_attempts(
                     sleep_with_image_deadline(wait_secs, request.deadline)
                     continue
             if transient:
-                raise ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email, conversation_id="") from exc
-            raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
+                failure = ImageGenerationError(CHANNEL_BUSY_MESSAGE, account_email=account_email, conversation_id="")
+            else:
+                failure = ImageGenerationError(
+                    image_stream_error_message(last_error), account_email=account_email, conversation_id=""
+                )
+            if schedule_generation_retry(failure):
+                continue
+            raise failure from exc
         finally:
             # 无论这次尝试是成功、重试还是抛错，都在这里把现场落到 diagnostics。
             # 之前只在大异常分支里刷新，所以导出的 image_diagnostics 经常停留在
