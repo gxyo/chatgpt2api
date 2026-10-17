@@ -89,9 +89,11 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
     <div className="space-y-5">
       <div className="flex flex-col items-center gap-6 sm:flex-row sm:gap-7">
         <div className="relative size-[156px] shrink-0">
+          {/* overflow-visible：悬停扇区加粗外凸会超出 viewBox，
+              默认会被 svg 视口裁掉，圆环看起来就像被削平的方块。 */}
           <svg
             viewBox={`0 0 ${DONUT_SIZE} ${DONUT_SIZE}`}
-            className="size-full -rotate-90"
+            className="size-full -rotate-90 overflow-visible"
             role="img"
             aria-label={`成功图片按调用方式分布，共 ${formatCount(total)} 张`}
           >
