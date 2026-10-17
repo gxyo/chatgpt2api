@@ -53,7 +53,9 @@ _STATUSES = (_STATUS_SUCCESS, _STATUS_FAILED, _STATUS_POLICY_VIOLATION)
 # 会按迁移这一刻的定价补一次收入。计费单位是成功返回的图片数（detail.urls 长度）。
 # v4 起调用方式的桶增加 images：统计页按「成功图片数」而不是请求数展示，v1~v3 快照
 # 升级时按成功请求占比把桶里的图片数分摊到各调用方式。
-SNAPSHOT_VERSION = 4
+# v5 起对「有成功请求但没有图片数」的历史桶按 1 次成功 = 1 张图估算（日志已清理、
+# 锚点丢失导致无法回填时的兜底），否则统计页会把整段历史显示成 0 张成功图片。
+SNAPSHOT_VERSION = 5
 CURRENCY = "CNY"
 # 两次落盘之间的最小间隔：统计每次查询都会刷新，不能每次都写盘。
 # 因为游标和聚合是一起写入的，崩溃时两者一起回退到上一个一致点，重放日志即可，不会重复计数。
@@ -361,6 +363,7 @@ class ImageStatsService:
         self._last_save = 0.0
         self._needs_model_backfill = False
         self._needs_revenue_bootstrap = False
+        self._needs_image_estimate = False
         self._needs_mode_backfill = False
         self._migration_dirty = False
 
@@ -375,8 +378,9 @@ class ImageStatsService:
         version = snapshot.get("version")
         # v1 缺 images/models，加载后先从现存日志回填模型数据；
         # v1/v2 都缺收入字段，按迁移这一刻的定价补一次（之后调价不再回改）。
-        # v1~v3 的调用方式桶缺 images，升级时按成功请求占比分摊一次。
-        if version not in (1, 2, 3, SNAPSHOT_VERSION):
+        # v1~v4 的调用方式桶可能缺 images，升级时按成功请求占比分摊一次；
+        # 有成功请求却没有图片数的历史桶按成功次数估算图片数。
+        if version not in (1, 2, 3, 4, SNAPSHOT_VERSION):
             return
         hours = snapshot.get("hours")
         if not isinstance(hours, dict):
@@ -399,7 +403,8 @@ class ImageStatsService:
         self._last_save = time.monotonic()
         self._needs_model_backfill = version == 1
         self._needs_revenue_bootstrap = version in (1, 2)
-        self._needs_mode_backfill = version in (1, 2, 3)
+        self._needs_image_estimate = version in (1, 2, 3, 4)
+        self._needs_mode_backfill = version in (1, 2, 3, 4)
 
     def _save_snapshot(self, *, force: bool = False) -> None:
         """把聚合和游标一起原子落盘。写失败只影响下次重启，不该让查询出错。"""
@@ -535,7 +540,7 @@ class ImageStatsService:
         """给 v1/v2 快照补一次收入，口径是迁移这一刻的单价。
 
         已有 images/models 的桶按模型单价折算；没有模型信息的旧记录用
-        `_fallback_price` 的单价乘成功请求数。迁移落盘后版本升到 v4，之后的
+        `_fallback_price` 的单价乘成功请求数。迁移落盘后版本升到 v5，之后的
         调价只影响新消费的日志，这些金额保持冻结。
         """
         if not self._needs_revenue_bootstrap:
@@ -568,8 +573,23 @@ class ImageStatsService:
         self._needs_revenue_bootstrap = False
         self._migration_dirty = True
 
+    def _bootstrap_legacy_images(self) -> None:
+        """给「有成功请求但没有图片数」的历史桶补一个下限：1 次成功至少 1 张图。
+
+        旧快照的请求/成功计数是可靠的，但日志被清理或锚点丢失时无法从日志回填
+        `images`，这些桶就会显示成 0 张成功图片。用 success 作为图片数下限把成功
+        历史还原出来；真实多图请求会略少算，但不会虚增。收入已经单独冻结，这里不动。
+        """
+        if not self._needs_image_estimate:
+            return
+        for bucket in self._hours.values():
+            if bucket["images"] == 0 and bucket["success"] > 0:
+                bucket["images"] = bucket["success"]
+                self._migration_dirty = True
+        self._needs_image_estimate = False
+
     def _bootstrap_mode_images(self) -> None:
-        """给 v1~v3 快照的调用方式桶补上成功图片数。
+        """给 v1~v4 快照的调用方式桶补上成功图片数。
 
         旧快照只按调用方式记了请求数，没有图片数；用同一小时桶里的成功请求占比
         把 `images` 分摊到各方式，总量与桶里的图片数严格一致。新快照已经有这个
@@ -621,6 +641,7 @@ class ImageStatsService:
             # 模型回填没完成（读日志失败），收入也等下一轮，避免按错误的模型数据计费。
             return
         self._bootstrap_revenue(prices)
+        self._bootstrap_legacy_images()
         self._bootstrap_mode_images()
         if self._migration_dirty:
             self._migration_dirty = False

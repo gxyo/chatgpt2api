@@ -749,7 +749,7 @@ class SnapshotModelMigrationTests(unittest.TestCase):
         self.assertEqual(result["totals"]["images"], 2)
         self.assertEqual(result["totals"]["revenue"], 2.0)
 
-    def test_v1_snapshot_with_lost_anchor_skips_backfill(self):
+    def test_v1_snapshot_with_lost_anchor_estimates_images_from_successes(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service, path, snapshot_path = self.make_service(tmp_dir, [
                 log_line("2026-09-28 10:00:00", "/v1/images/generations",
@@ -767,7 +767,8 @@ class SnapshotModelMigrationTests(unittest.TestCase):
             result = restarted.summary("2026-09-28", "2026-09-28")
 
             self.assertEqual(result["totals"]["requests"], 1)
-            self.assertEqual(result["totals"]["images"], 0)
+            # 日志回填失败，但成功计数还在：按 1 次成功 = 1 张图估算，不能显示成 0。
+            self.assertEqual(result["totals"]["images"], 1)
             self.assertEqual(result["by_model"], [])
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
             self.assertEqual(snapshot["version"], stats_service.SNAPSHOT_VERSION)
@@ -786,7 +787,7 @@ class SnapshotModelMigrationTests(unittest.TestCase):
             result = restarted.summary("2026-09-28", "2026-09-28")
 
             self.assertEqual(result["totals"]["requests"], 1)
-            self.assertEqual(result["totals"]["images"], 0)
+            self.assertEqual(result["totals"]["images"], 1)
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
             self.assertEqual(snapshot["version"], stats_service.SNAPSHOT_VERSION)
 
@@ -854,7 +855,9 @@ class SnapshotRevenueBootstrapTests(unittest.TestCase):
         self.assertEqual(result["totals"]["legacy_revenue"], 1.5)
         self.assertEqual(result["totals"]["legacy_success"], 3)
         self.assertEqual(result["by_model"], [])
-        self.assertEqual(result["lifetime"], {"images": 0, "revenue": 1.5})
+        # 没有图片明细的旧记录用成功次数估算图片数，展示不再全是 0。
+        self.assertEqual(result["totals"]["images"], 3)
+        self.assertEqual(result["lifetime"], {"images": 3, "revenue": 1.5})
         self.assertEqual(after_restart["totals"]["revenue"], 1.5)
 
     def test_v1_snapshot_bills_backfilled_images_at_migration_prices(self):
@@ -875,6 +878,51 @@ class SnapshotRevenueBootstrapTests(unittest.TestCase):
         self.assertEqual(result["totals"]["images"], 1)
         self.assertEqual(result["totals"]["revenue"], 2)
         self.assertEqual(result["by_model"][0]["revenue"], 2)
+
+    def test_v4_snapshot_estimates_missing_images_without_touching_revenue(self):
+        """线上旧数据可能只有成功计数、没有图片数：升级后成功历史要能显示出来。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text("", encoding="utf-8")
+            snapshot_path = Path(tmp_dir) / "image_stats.json"
+            snapshot_path.write_text(json.dumps({
+                "version": 4,
+                "hours": {
+                    "2026-09-20T10": {
+                        "requests": 5, "success": 3, "failed": 2, "policy_violation": 0,
+                        "duration_ms": 500, "images": 0, "models": {},
+                        "modes": {
+                            "generate": {
+                                "requests": 4, "success": 2, "failed": 2,
+                                "policy_violation": 0, "images": 0,
+                            },
+                            "edit": {
+                                "requests": 1, "success": 1, "failed": 0,
+                                "policy_violation": 0, "images": 0,
+                            },
+                        },
+                        "revenue": 0.6, "models_revenue": {}, "legacy_success": 3,
+                    },
+                },
+                "offset": 0,
+                "anchor": "",
+            }), encoding="utf-8")
+
+            # 调价也不该动已冻结的收入，只补图片数。
+            result = ImageStatsService(path).summary(
+                "2026-09-20", "2026-09-20", pricing={"auto": 9},
+            )
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            modes = {row["mode"]: row for row in result["by_mode"]}
+
+        self.assertEqual(result["totals"]["images"], 3)
+        self.assertEqual(result["totals"]["revenue"], 0.6)
+        self.assertEqual(result["lifetime"], {"images": 3, "revenue": 0.6})
+        self.assertEqual(modes["generate"]["images"], 2)
+        self.assertEqual(modes["edit"]["images"], 1)
+        self.assertEqual(sum(row["images"] for row in modes.values()), 3)
+        self.assertEqual(result["by_model"], [])
+        self.assertEqual(snapshot["version"], stats_service.SNAPSHOT_VERSION)
 
     def test_v3_snapshot_backfills_mode_images_without_rebilling(self):
         """v3 快照只有分桶图片数：升级时按成功请求占比分摊到各调用方式，收入保持冻结。"""

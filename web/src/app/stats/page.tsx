@@ -227,7 +227,6 @@ function StatsContent() {
         <StatTile
           label="总收入"
           value={formatCurrency(data?.lifetime.revenue ?? 0)}
-          caption={`全部记录 ${data?.lifetime.images ?? 0} 张成功图片 · 含历史请求，不随筛选变化`}
           tone={LIFETIME_DOT}
         />
         <StatTile
