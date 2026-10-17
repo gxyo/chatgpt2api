@@ -194,6 +194,34 @@ class LoggedCallDetailTests(unittest.TestCase):
             self.assertIn("image_diagnostics", text)
             self.assertIn("handshake_wait_ms", text)
 
+    def test_upscale_diagnostics_land_in_detail(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = LogService(Path(tmp_dir) / "logs.jsonl")
+            result = {
+                "created": 1,
+                "data": [{"url": "http://example.test/1.png"}],
+                "_postprocess": {
+                    "upscale_target": 4096,
+                    "upscale_from_size": "1024x1024",
+                    "upscale_to_size": "4096x4096",
+                    "upscale_queue_wait_ms": 30,
+                    "upscale_ms": 1200,
+                    "upscale_images": 1,
+                },
+            }
+            call = LoggedCall({"id": "k1", "name": "管理员", "role": "admin"},
+                              "/v1/images/edits", "gpt-image-2", "图生图")
+            with mock.patch.object(log_service_module, "log_service", service):
+                call.log("调用完成", result)
+
+            detail = service.list()[0]["detail"]
+            self.assertEqual(detail["upscale_target"], 4096)
+            self.assertEqual((detail["upscale_from_size"], detail["upscale_to_size"]), ("1024x1024", "4096x4096"))
+            self.assertEqual(detail["upscale_queue_wait_ms"], 30)
+            self.assertEqual(detail["upscale_ms"], 1200)
+            self.assertEqual(detail["upscale_images"], 1)
+            self.assertNotIn("_postprocess", detail)
+
     def test_failure_without_diagnostics_keeps_the_old_shape(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = LogService(Path(tmp_dir) / "logs.jsonl")

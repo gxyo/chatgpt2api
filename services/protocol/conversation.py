@@ -350,6 +350,20 @@ def count_text_tokens(text: str, model: str) -> int:
     return len(encoding_for_model(model).encode(text))
 
 
+def _merge_postprocess(target: dict[str, Any], source: dict[str, Any]) -> None:
+    """合并多张图的本地后处理数据：耗时累加，尺寸/错误保留第一次有值的。"""
+    for key in ("upscale_ms", "upscale_queue_wait_ms"):
+        value = source.get(key)
+        if value:
+            target[key] = int(target.get(key) or 0) + int(value)
+    for key in ("upscale_target", "upscale_from_size", "upscale_to_size", "upscale_error"):
+        value = source.get(key)
+        if value and not target.get(key):
+            target[key] = value
+    if source.get("upscale_to_size") or source.get("upscale_error"):
+        target["upscale_images"] = int(target.get("upscale_images") or 0) + 1
+
+
 def format_image_result(
     items: list[dict[str, Any]],
     prompt: str,
@@ -360,6 +374,9 @@ def format_image_result(
     size: str | None = None,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
+    # 超分是本地 CPU 耗时，不进上游轮询预算，但要记下来：4K 失败时得能看出
+    # 时间花在 1K 出图还是本地放大上。
+    postprocess: dict[str, Any] = {}
     for item in items:
         b64_json = str(item.get("b64_json") or "").strip()
         if not b64_json:
@@ -367,7 +384,9 @@ def format_image_result(
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
         # 免费号只出 1K 图，落盘前放大：客户端 size 要了 2K/4K 就照办，
         # 不传或 "auto" 则维持 1K。b64_json 和 url 用同一份字节，免得两个出口不一致。
-        image_bytes = upscale_png(base64.b64decode(b64_json), parse_size_long_edge(size))
+        upscale_diagnostics: dict[str, Any] = {}
+        image_bytes = upscale_png(base64.b64decode(b64_json), parse_size_long_edge(size), upscale_diagnostics)
+        _merge_postprocess(postprocess, upscale_diagnostics)
         url = save_image_bytes(image_bytes, base_url)
         if response_format == "b64_json":
             data.append({
@@ -383,6 +402,8 @@ def format_image_result(
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
     if message and not data:
         result["message"] = message
+    if postprocess:
+        result["_postprocess"] = postprocess
     return result
 
 
@@ -433,6 +454,8 @@ class ImageOutput:
     # 调用日志据此把「第 1 个号 → 第 2 个号」写进同一条记录，而不是一次尝试一条。
     account_trail: list[str] = field(default_factory=list)
     attempts_summary: str = ""
+    # 本地后处理（4K 超分）的耗时与失败原因，只进调用日志，不返回给客户端。
+    postprocess: dict[str, Any] = field(default_factory=dict)
 
     def to_chunk(self) -> dict[str, Any]:
         chunk: dict[str, Any] = {
@@ -453,6 +476,8 @@ class ImageOutput:
             chunk["_account_trail"] = list(self.account_trail)
         if self.attempts_summary:
             chunk["_attempts_summary"] = self.attempts_summary
+        if self.postprocess:
+            chunk["_postprocess"] = dict(self.postprocess)
         if self.kind == "message":
             chunk.update({
                 "object": "image.generation.message",
@@ -1089,16 +1114,18 @@ def stream_image_outputs(
             for image_data in backend.download_image_bytes(image_urls)
         ]
         _mark_phase(backend, "download_done")
-        data = format_image_result(
+        formatted = format_image_result(
             image_items,
             request.prompt,
             request.response_format,
             request.base_url,
             int(time.time()),
             size=request.size,
-        )["data"]
+        )
+        data = formatted["data"]
         if data:
-            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data,
+                              conversation_id=conversation_id, postprocess=formatted.get("_postprocess") or {})
         return
 
     if message:
@@ -1186,16 +1213,19 @@ def stream_image_outputs(
                         {"b64_json": base64.b64encode(image_data).decode("ascii")}
                         for image_data in backend.download_image_bytes(image_urls)
                     ]
-                    data = format_image_result(
+                    formatted = format_image_result(
                         image_items,
                         request.prompt,
                         request.response_format,
                         request.base_url,
                         int(time.time()),
                         size=request.size,
-                    )["data"]
+                    )
+                    data = formatted["data"]
                     if data:
-                        yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
+                        yield ImageOutput(kind="result", model=request.model, index=index, total=total,
+                                          data=data, conversation_id=conversation_id,
+                                          postprocess=formatted.get("_postprocess") or {})
                         return
         elif is_text_reply:
             logger.warning({
@@ -1301,16 +1331,19 @@ def stream_image_outputs(
                     {"b64_json": base64.b64encode(image_data).decode("ascii")}
                     for image_data in backend.download_image_bytes(image_urls)
                 ]
-                data = format_image_result(
+                formatted = format_image_result(
                     image_items,
                     request.prompt,
                     request.response_format,
                     request.base_url,
                     int(time.time()),
                     size=request.size,
-                )["data"]
+                )
+                data = formatted["data"]
                 if data:
-                    yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
+                    yield ImageOutput(kind="result", model=request.model, index=index, total=total,
+                                      data=data, conversation_id=conversation_id,
+                                      postprocess=formatted.get("_postprocess") or {})
                     return
 
         # 重试后仍然失败，yield 错误消息
@@ -1362,16 +1395,18 @@ def stream_codex_image_outputs(
     )))
     if not images:
         raise ImageGenerationError("No image result found in response")
-    data = format_image_result(
+    formatted = format_image_result(
         [{"b64_json": item, "revised_prompt": request.prompt} for item in images],
         request.prompt,
         request.response_format,
         request.base_url,
         int(time.time()),
         size=request.size,
-    )["data"]
+    )
+    data = formatted["data"]
     if data:
-        yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
+        yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data,
+                          postprocess=formatted.get("_postprocess") or {})
         return
     raise ImageGenerationError("No image result found in response")
 
@@ -1768,7 +1803,11 @@ def _generate_single_image_attempts(
             outputs: list[ImageOutput] = []
             retry_after_output = False
             for output in stream_fn(backend, request, index, total):
-                ensure_image_deadline(request.deadline)
+                # result 已经产出说明上游生图完成，后面的耗时是本地后处理（4K 超分、
+                # 落盘）。把这段时间算进上游轮询预算的话，超分慢几秒就会被误判成
+                # 「当前生图任务处理超时」，还会因为 deadline 已过而不触发换号重试。
+                if output.kind != "result":
+                    ensure_image_deadline(request.deadline)
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:
@@ -2195,6 +2234,7 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     account_email = ""
     account_trail: list[str] = []
     attempts_summaries: list[str] = []
+    postprocess: dict[str, Any] = {}
     for output in outputs:
         created = created or output.created
         if output.account_email and not account_email:
@@ -2204,6 +2244,8 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
                 account_trail.append(email)
         if output.attempts_summary and output.attempts_summary not in attempts_summaries:
             attempts_summaries.append(output.attempts_summary)
+        if output.postprocess:
+            _merge_postprocess(postprocess, output.postprocess)
         if output.kind == "progress" and output.text:
             progress_parts.append(output.text)
         elif output.kind == "message":
@@ -2222,4 +2264,6 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         result["_account_trail"] = account_trail
     if attempts_summaries:
         result["_attempts_summary"] = " | ".join(attempts_summaries)
+    if postprocess:
+        result["_postprocess"] = postprocess
     return result

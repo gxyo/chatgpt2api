@@ -35,17 +35,25 @@ def parse_size_long_edge(size: object) -> int | None:
     return max(int(match.group(1)), int(match.group(2)))
 
 
-def upscale_png(image_data: bytes, target: int | None) -> bytes:
+def upscale_png(image_data: bytes, target: int | None, diagnostics: dict | None = None) -> bytes:
     """把图片长边放大到 target，返回 PNG 字节。target 为 None 表示不放大。
 
     未开启、已经够大、或任何一步失败时都原样返回 image_data：超分是锦上添花，
     不能因为它让生图请求失败。
+
+    diagnostics 可选，用来把这次超分的耗时/排队/失败原因带回去给调用日志——
+    以前异常被静默吞掉，日志里只剩「生图超时」，看不出是上游慢还是本地超分卡住。
     """
     if target is None or target <= 0:
         return image_data
     if not config.image_upscale_enabled:
         return image_data
+    if diagnostics is not None:
+        diagnostics["upscale_target"] = target
 
+    # 排队等锁的时间单独记：全部超分是串行的，等锁久说明同时在超分的请求多，
+    # 这段等待也是用户实打实等掉的时间（按任务端点调用时尤其明显）。
+    queued_at = time.monotonic()
     try:
         with Image.open(io.BytesIO(image_data)) as source:
             width, height = source.size
@@ -54,9 +62,9 @@ def upscale_png(image_data: bytes, target: int | None) -> bytes:
                 return image_data
             scale = target / longest
             size = (max(1, round(width * scale)), max(1, round(height * scale)))
-            # 排队等锁的时间单独记：全部超分是串行的，等锁久说明同时在超分的请求多，
-            # 这段等待也是用户实打实等掉的时间（按任务端点调用时尤其明显）。
-            queued_at = time.monotonic()
+            if diagnostics is not None:
+                diagnostics["upscale_from_size"] = f"{width}x{height}"
+                diagnostics["upscale_to_size"] = f"{size[0]}x{size[1]}"
             with _UPSCALE_LOCK:
                 lock_wait_ms = int((time.monotonic() - queued_at) * 1000)
                 started = time.monotonic()
@@ -73,16 +81,30 @@ def upscale_png(image_data: bytes, target: int | None) -> bytes:
                 buffer = io.BytesIO()
                 image.save(buffer, format="PNG")
                 result = buffer.getvalue()
+                upscale_ms = int((time.monotonic() - started) * 1000)
+                if diagnostics is not None:
+                    diagnostics["upscale_queue_wait_ms"] = lock_wait_ms
+                    diagnostics["upscale_ms"] = upscale_ms
                 logger.info({
                     "event": "image_upscale_done",
                     "from_size": f"{width}x{height}",
                     "to_size": f"{size[0]}x{size[1]}",
                     "target": target,
                     "queue_wait_ms": lock_wait_ms,
-                    "upscale_ms": int((time.monotonic() - started) * 1000),
+                    "upscale_ms": upscale_ms,
                     "source_bytes": len(image_data),
                     "result_bytes": len(result),
                 })
                 return result
-    except Exception:
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"[:200]
+        if diagnostics is not None:
+            diagnostics["upscale_error"] = message
+        logger.warning({
+            "event": "image_upscale_failed",
+            "target": target,
+            "source_bytes": len(image_data),
+            "queue_wait_ms": int((time.monotonic() - queued_at) * 1000),
+            "error": message,
+        })
         return image_data

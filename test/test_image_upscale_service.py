@@ -67,6 +67,27 @@ class UpscalePngTests(unittest.TestCase):
         with _patch_config(enabled=True):
             self.assertEqual(image_upscale_service.upscale_png(source, 256), source)
 
+    def test_diagnostics_record_sizes_and_timing(self):
+        diagnostics: dict = {}
+        with _patch_config(enabled=True):
+            image_upscale_service.upscale_png(_png(64, 64), 256, diagnostics)
+
+        self.assertEqual(diagnostics["upscale_target"], 256)
+        self.assertEqual(diagnostics["upscale_from_size"], "64x64")
+        self.assertEqual(diagnostics["upscale_to_size"], "256x256")
+        self.assertIn("upscale_ms", diagnostics)
+        self.assertIn("upscale_queue_wait_ms", diagnostics)
+        self.assertNotIn("upscale_error", diagnostics)
+
+    def test_diagnostics_capture_failure_reason(self):
+        diagnostics: dict = {}
+        source = b"not a png"
+        with _patch_config(enabled=True):
+            result = image_upscale_service.upscale_png(source, 256, diagnostics)
+
+        self.assertEqual(result, source)
+        self.assertTrue(diagnostics["upscale_error"])
+
 
 class ParseSizeLongEdgeTests(unittest.TestCase):
     def test_client_requested_size_is_the_target(self):

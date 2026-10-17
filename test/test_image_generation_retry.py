@@ -177,6 +177,18 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertIn("#1 token-a@example.test message_retry", result["_attempts_summary"])
         self.assertIn("#2 token-b@example.test success", result["_attempts_summary"])
 
+    def test_collect_image_outputs_keeps_upscale_postprocess(self):
+        outputs = [conversation.ImageOutput(
+            kind="result", model="gpt-image-2", index=1, total=1, data=[{"url": "ok"}],
+            postprocess={"upscale_target": 4096, "upscale_to_size": "4096x4096",
+                         "upscale_ms": 800, "upscale_images": 1},
+        )]
+
+        result = conversation.collect_image_outputs(outputs)
+
+        self.assertEqual(result["_postprocess"]["upscale_ms"], 800)
+        self.assertEqual(result["_postprocess"]["upscale_to_size"], "4096x4096")
+
     def test_no_retry_result_keeps_the_old_shape(self):
         outputs, _ = self._run(["token-a"], self._message_then_result(IMAGE_RETRY_MESSAGE), 0,
                                message_as_error=False)
@@ -216,6 +228,27 @@ class GenerationRetryTests(unittest.TestCase):
 
         self.assertEqual(outputs[0].kind, "result")
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+
+    def test_result_is_accepted_after_deadline_expires_during_postprocess(self):
+        # 4K 超分在本地 CPU 上跑，可能一直跑到上游轮询预算用完。图片已经拿到手了，
+        # 不能因为本地后处理超时就报「生图任务处理超时」、还把结果丢掉。
+        import time as _time
+
+        def stream_fn(backend, request, index=1, total=1):
+            _time.sleep(0.2)
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        patcher, _ = self._patches(["token-a"], stream_fn, 0)
+        deadline = _time.monotonic() + 0.05
+        with patcher:
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="draw a cat",
+                message_as_error=True,
+                deadline=deadline,
+            )))
+
+        self.assertEqual(outputs[0].kind, "result")
 
     def test_retry_is_bounded_by_configured_count(self):
         def stream_fn(backend, request, index=1, total=1):

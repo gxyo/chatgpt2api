@@ -11,9 +11,11 @@ from typing import Any
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
+from services.image_upscale_service import parse_size_long_edge
 from services.log_service import (
     LOG_TYPE_CALL,
     add_attempt_trail_detail,
+    add_postprocess_detail,
     image_request_detail,
     log_service,
     merge_extra_detail,
@@ -29,6 +31,9 @@ TASK_STATUS_ERROR = "error"
 TERMINAL_STATUSES = {TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}
 UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
 TASK_TIMEOUT_MESSAGE = "图片任务处理超时，请稍后重试"
+# 4K 超分是纯本地 CPU 后处理，不受上游轮询预算约束；任务线程的等待时间要留出这一段，
+# 否则图已经生成好、正在超分时任务先判定超时，结果被白白丢掉。
+UPSCALE_TIMEOUT_ALLOWANCE_SECS = 60
 
 
 def _now_iso() -> str:
@@ -281,6 +286,10 @@ class ImageTaskService:
         try:
             handler = self.edit_handler if mode == "edit" else self.generation_handler
             timeout_secs = _positive_float(payload.get("timeout_secs"), self._timeout_secs())
+            # 请求了 2K/4K 且开了超分时，本地放大要额外时间（还要排队等串行锁）。
+            upscale_target = parse_size_long_edge(payload.get("size"))
+            if config.image_upscale_enabled and upscale_target and upscale_target > 1024:
+                timeout_secs += UPSCALE_TIMEOUT_ALLOWANCE_SECS
             result = self._run_handler_with_timeout(handler, payload_with_progress, timeout_secs)
             if not isinstance(result, dict):
                 raise RuntimeError("image task returned streaming result unexpectedly")
@@ -412,6 +421,8 @@ class ImageTaskService:
             detail["urls"] = list(dict.fromkeys(urls))
         # 成功/失败都在同一条记录里带上换号轨迹（只有真的重试过才有内容）。
         add_attempt_trail_detail(detail, result=result, exc=exc)
+        # 4K 超分的耗时/失败原因也平铺进这条记录。
+        add_postprocess_detail(detail, result=result)
         try:
             log_service.add(LOG_TYPE_CALL, f"{summary_prefix}{suffix}", detail)
         except Exception:

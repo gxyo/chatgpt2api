@@ -40,6 +40,13 @@ const typeLabels: Record<string, string> = {
 const detailLabels: Record<string, string> = {
   account_trail: "账号轨迹",
   attempts_summary: "尝试轨迹",
+  upscale_target: "超分目标(px)",
+  upscale_from_size: "超分前尺寸",
+  upscale_to_size: "超分后尺寸",
+  upscale_images: "超分张数",
+  upscale_ms: "超分耗时(ms)",
+  upscale_queue_wait_ms: "超分排队(ms)",
+  upscale_error: "超分失败原因",
 };
 
 function formatBytes(value: number) {

@@ -23,7 +23,9 @@ LOG_TYPE_ACCOUNT = "account"
 # 注册机失败日志：只记失败（成功的注册没有排查价值），单独一个日志页看，
 # 走的是同一份 logs.jsonl 与同一套筛选/导出/清理，新增一种类型即可。
 LOG_TYPE_REGISTER = "register"
-INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_account_trail", "_attempts_summary"}
+INTERNAL_RESPONSE_KEYS = {
+    "_account_email", "_conversation_id", "_account_trail", "_attempts_summary", "_postprocess",
+}
 # 一键导出：默认最近 10 条，条数上界防止一次导出把浏览器拖死。
 LOG_EXPORT_DEFAULT_LIMIT = 10
 LOG_EXPORT_MAX_LIMIT = 500
@@ -296,6 +298,49 @@ def _collect_attempts_summaries(value: object) -> list[str]:
     return summaries
 
 
+def _collect_postprocess(value: object) -> list[dict[str, Any]]:
+    """收集结果里的本地后处理数据（4K 超分耗时、排队、失败原因）。"""
+    items: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        raw = value.get("_postprocess")
+        if isinstance(raw, dict) and raw:
+            items.append(raw)
+        for key, item in value.items():
+            if key != "_postprocess":
+                items.extend(_collect_postprocess(item))
+    elif isinstance(value, list):
+        for item in value:
+            items.extend(_collect_postprocess(item))
+    return items
+
+
+def add_postprocess_detail(
+    detail: dict[str, Any],
+    *,
+    result: object = None,
+    postprocess: list[dict[str, Any]] | None = None,
+) -> None:
+    """把超分耗时和失败原因平铺进调用日志，页面上直接能看到卡在哪。
+
+    超分失败不影响请求结果（会回退成原图），所以这里不是 error，只是一组
+    诊断字段：upscale_ms 很大说明 4K 放大吃掉了请求时间，upscale_error 有值
+    说明是本地放大失败、返回的是 1K 原图。
+    """
+    merged: dict[str, Any] = {}
+    for item in [*(postprocess or []), *_collect_postprocess(result)]:
+        for key in ("upscale_ms", "upscale_queue_wait_ms"):
+            value = item.get(key)
+            if value:
+                merged[key] = int(merged.get(key) or 0) + int(value)
+        for key in ("upscale_target", "upscale_from_size", "upscale_to_size", "upscale_error"):
+            value = item.get(key)
+            if value and not merged.get(key):
+                merged[key] = value
+        if item.get("upscale_to_size") or item.get("upscale_error"):
+            merged["upscale_images"] = int(merged.get("upscale_images") or 0) + 1
+    detail.update(merged)
+
+
 def _flatten_account_trail(trails: list[list[str]]) -> list[str]:
     """把多份轨迹拼成一条账号顺序，去掉流式 chunk 造成的连续重复。"""
     flat: list[str] = []
@@ -560,6 +605,7 @@ class LoggedCall:
         conversation_ids: list[str] = []
         account_trails: list[list[str]] = []
         attempts_summaries: list[str] = []
+        postprocess: list[dict[str, Any]] = []
         failed = False
         try:
             for item in items:
@@ -568,6 +614,7 @@ class LoggedCall:
                 conversation_ids.extend(_collect_conversation_ids(item))
                 account_trails.extend(_collect_account_trails(item))
                 attempts_summaries.extend(_collect_attempts_summaries(item))
+                postprocess.extend(_collect_postprocess(item))
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
             failed = True
@@ -581,6 +628,7 @@ class LoggedCall:
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
                 account_trails=account_trails,
                 attempts_summaries=attempts_summaries,
+                postprocess=postprocess,
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
                 from services.protocol.conversation import ImageGenerationError, public_image_error_message
@@ -591,12 +639,14 @@ class LoggedCall:
             if not failed:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
                          conversation_id=conversation_ids[0] if conversation_ids else "",
-                         account_trails=account_trails, attempts_summaries=attempts_summaries)
+                         account_trails=account_trails, attempts_summaries=attempts_summaries,
+                         postprocess=postprocess)
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
             exc: BaseException | None = None, account_trails: list[list[str]] | None = None,
-            attempts_summaries: list[str] | None = None) -> None:
+            attempts_summaries: list[str] | None = None,
+            postprocess: list[dict[str, Any]] | None = None) -> None:
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -652,4 +702,5 @@ class LoggedCall:
             detail, result=result, exc=exc,
             account_trails=account_trails, attempts_summaries=attempts_summaries,
         )
+        add_postprocess_detail(detail, result=result, postprocess=postprocess)
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)
