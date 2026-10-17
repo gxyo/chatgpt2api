@@ -7,7 +7,8 @@ function Table({ className, ...props }: React.ComponentProps<"table">) {
 }
 
 function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
-  return <thead className={cn("border-b border-neutral-100 text-[11px] tracking-[0.18em] text-neutral-400 uppercase", className)} {...props} />;
+  // 参考稿的表头：小号灰字、正常大小写，靠留白而不是字距撑开
+  return <thead className={cn("border-b border-border bg-muted/40 text-xs font-medium text-muted-foreground", className)} {...props} />;
 }
 
 function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
@@ -15,15 +16,15 @@ function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
 }
 
 function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
-  return <tr className={cn("border-b border-neutral-100 transition-colors hover:bg-neutral-50/70", className)} {...props} />;
+  return <tr className={cn("border-b border-border/70 transition-colors hover:bg-muted/40", className)} {...props} />;
 }
 
 function TableHead({ className, ...props }: React.ComponentProps<"th">) {
-  return <th className={cn("h-11 px-4 text-left align-middle font-medium", className)} {...props} />;
+  return <th className={cn("h-10 px-4 text-left align-middle font-medium whitespace-nowrap", className)} {...props} />;
 }
 
 function TableCell({ className, ...props }: React.ComponentProps<"td">) {
-  return <td className={cn("px-4 py-3 align-middle", className)} {...props} />;
+  return <td className={cn("px-4 py-3.5 align-middle", className)} {...props} />;
 }
 
 export { Table, TableBody, TableCell, TableHead, TableHeader, TableRow };

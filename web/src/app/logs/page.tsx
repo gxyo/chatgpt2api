@@ -640,11 +640,13 @@ function LogsContent() {
   return (
     <section className="space-y-5">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-neutral-500 uppercase">Logs</div>
-          <h1 className="text-2xl font-semibold tracking-tight">日志管理</h1>
+        <div className="space-y-1.5">
+          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">日志管理</h1>
+          <p className="text-[13px] leading-5 text-muted-foreground">
+            查看调用与账号管理日志，支持筛选、导出和按保留策略自动清理。
+          </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <Select value={type} onValueChange={changeType}>
             <SelectTrigger className="h-10 w-[150px] rounded-xl border-neutral-200 bg-white"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -667,7 +669,7 @@ function LogsContent() {
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700">
             清除筛选条件
           </Button>
-          <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800">
+          <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 rounded-xl bg-brand px-4 text-white hover:bg-brand/90">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
@@ -697,7 +699,7 @@ function LogsContent() {
         </div>
       </div>
 
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card>
         <CardContent className="flex flex-col gap-4 p-5 xl:flex-row xl:items-center xl:justify-between">
           <div className="space-y-1">
             <div className="flex items-center gap-2 text-sm font-medium text-neutral-700">
@@ -765,7 +767,7 @@ function LogsContent() {
         </CardContent>
       </Card>
 
-      <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card className="overflow-hidden">
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-neutral-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-neutral-600">

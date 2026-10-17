@@ -700,11 +700,11 @@ function AccountsPageContent() {
   return (
     <>
       <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-neutral-500 uppercase">
-            Account Pool
-          </div>
-          <h1 className="text-2xl font-semibold tracking-tight">号池管理</h1>
+        <div className="space-y-1.5">
+          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">号池管理</h1>
+          <p className="text-[13px] leading-5 text-muted-foreground">
+            管理账号状态、额度与专属代理，异常账号可以批量刷新或移除。
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -817,7 +817,7 @@ function AccountsPageContent() {
               取消
             </Button>
             <Button
-              className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
+              className="h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90"
               onClick={() => void handleUpdateAccount()}
               disabled={isUpdating}
             >
@@ -850,7 +850,7 @@ function AccountsPageContent() {
             );
           })}
         </div>
-        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+        <Card>
           <CardContent className="p-4">
             <div className="mb-3 text-sm font-medium text-neutral-700">
               系统可用模型
@@ -950,7 +950,7 @@ function AccountsPageContent() {
         </div>
 
         {isLoading && accounts.length === 0 ? (
-          <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+          <Card>
             <CardContent className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
               <div className="rounded-xl bg-neutral-100 p-3 text-neutral-500">
                 <LoaderCircle className="size-5 animate-spin" />
@@ -965,7 +965,7 @@ function AccountsPageContent() {
 
         <Card
           className={cn(
-            "overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm",
+            "overflow-hidden",
             isLoading && accounts.length === 0 ? "hidden" : "",
           )}
         >
@@ -1019,7 +1019,7 @@ function AccountsPageContent() {
 
             <div className="overflow-x-auto">
               <table className="w-full min-w-[1000px] text-left">
-                <thead className="border-b border-neutral-100 text-[11px] text-neutral-400 uppercase tracking-[0.18em]">
+                <thead className="border-b border-border bg-muted/40 text-xs font-medium whitespace-nowrap text-muted-foreground">
                   <tr>
                     <th className="w-12 px-4 py-3">
                       <Checkbox
@@ -1249,7 +1249,7 @@ function AccountsPageContent() {
                       className={cn(
                         "h-10 min-w-10 shrink-0 rounded-lg px-3",
                         item === safePage
-                          ? "bg-neutral-950 text-white hover:bg-neutral-800"
+                          ? "bg-brand text-white hover:bg-brand/90"
                           : "border-neutral-200 bg-white text-neutral-700",
                       )}
                       onClick={() => setPage(item)}

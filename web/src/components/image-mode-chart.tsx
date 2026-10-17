@@ -22,8 +22,8 @@ const MODE_FALLBACK_BAR = "bg-neutral-400 dark:bg-neutral-500";
 
 // 成功率是「一个比值对一个上限」，画成 meter：填充是蓝，轨道是同一色阶更浅的一档，
 // 这样整条都在讲同一件事，不是两个独立序列。
-const RATE_FILL = "bg-[#2a78d6] dark:bg-[#3987e5]";
-const RATE_TRACK = "bg-[#cde2fb] dark:bg-[#184f95]/40";
+const RATE_FILL = "bg-brand";
+const RATE_TRACK = "bg-brand/15";
 
 // 页面是静态导出，格式化必须与运行环境无关，否则水合时数字会对不上。
 const NUMBER_FORMAT = new Intl.NumberFormat("en-US");

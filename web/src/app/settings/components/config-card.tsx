@@ -65,7 +65,7 @@ export function ConfigCard() {
 
   if (isLoadingConfig) {
     return (
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card>
         <CardContent className="flex items-center justify-center p-10">
           <LoaderCircle className="size-5 animate-spin text-neutral-400" />
         </CardContent>
@@ -74,7 +74,7 @@ export function ConfigCard() {
   }
 
   return (
-    <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+    <Card>
       <CardContent className="space-y-4 p-6 pb-24 md:pr-28 md:pb-6">
         <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-sm leading-6 text-neutral-600">
           管理员登录密钥继续从部署配置读取，不再在此页面展示；如需分发给其他人，请在下方创建普通用户密钥。
@@ -316,7 +316,7 @@ export function ConfigCard() {
       </CardContent>
       <div className="fixed right-4 bottom-4 z-40 md:top-1/2 md:bottom-auto md:-translate-y-1/2">
         <Button
-          className="h-12 rounded-2xl bg-neutral-950 px-4 text-white shadow-xl shadow-neutral-950/20 hover:bg-neutral-800 focus-visible:ring-2 focus-visible:ring-neutral-900/30 sm:px-5 dark:bg-neutral-100 dark:text-neutral-900 dark:shadow-black/30 dark:hover:bg-white"
+          className="h-12 rounded-2xl bg-brand px-4 text-white shadow-xl shadow-neutral-950/20 hover:bg-brand/90 focus-visible:ring-2 focus-visible:ring-neutral-900/30 sm:px-5 dark:bg-neutral-100 dark:text-neutral-900 dark:shadow-black/30 dark:hover:bg-white"
           onClick={() => void saveConfig()}
           disabled={isSavingConfig}
           aria-label="保存基础配置"

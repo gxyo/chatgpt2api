@@ -168,7 +168,7 @@ export function UserKeysCard() {
 
   return (
     <>
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card>
         <CardContent className="space-y-6 p-6">
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -180,7 +180,7 @@ export function UserKeysCard() {
                 <p className="text-sm text-neutral-500">为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置和号池。</p>
               </div>
             </div>
-            <Button className="h-9 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800" onClick={() => setIsDialogOpen(true)}>
+            <Button className="h-9 rounded-xl bg-brand px-4 text-white hover:bg-brand/90" onClick={() => setIsDialogOpen(true)}>
               <Plus className="size-4" />
               创建用户密钥
             </Button>
@@ -306,7 +306,7 @@ export function UserKeysCard() {
             </Button>
             <Button
               type="button"
-              className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
+              className="h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90"
               onClick={() => void handleCreate()}
               disabled={isCreating}
             >
@@ -402,7 +402,7 @@ export function UserKeysCard() {
             </Button>
             <Button
               type="button"
-              className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
+              className="h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90"
               onClick={() => void handleEdit()}
               disabled={editingItem ? pendingIds.has(editingItem.id) : false}
             >

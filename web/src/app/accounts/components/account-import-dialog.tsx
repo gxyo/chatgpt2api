@@ -548,7 +548,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           {!oauthSession ? (
             <Button
               type="button"
-              className="h-10 rounded-xl bg-neutral-950 text-white hover:bg-neutral-800"
+              className="h-10 rounded-xl bg-brand text-white hover:bg-brand/90"
               onClick={() => void handleStartOAuth()}
               disabled={oauthStarting}
             >
@@ -633,7 +633,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             </div>
             <Button
               type="button"
-              className="mt-4 rounded-xl bg-neutral-950 text-white hover:bg-neutral-800"
+              className="mt-4 rounded-xl bg-brand text-white hover:bg-brand/90"
               onClick={() => cpaInputRef.current?.click()}
               disabled={isSubmitting}
             >
@@ -725,7 +725,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     <>
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <Button
-          className="h-10 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800"
+          className="h-10 rounded-xl bg-brand px-4 text-white hover:bg-brand/90"
           onClick={() => setOpen(true)}
           disabled={disabled}
         >
@@ -775,7 +775,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             </Button>
             {method === "token" ? (
               <Button
-                className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
+                className="h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90"
                 onClick={() => void handleImportTokenText()}
                 disabled={footerDisabled}
               >
@@ -785,7 +785,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             ) : null}
             {method === "session" ? (
               <Button
-                className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
+                className="h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90"
                 onClick={() => void handleImportSessionJson()}
                 disabled={footerDisabled}
               >
@@ -795,7 +795,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             ) : null}
             {method === "codex-auth" ? (
               <Button
-                className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
+                className="h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90"
                 onClick={() => void handleImportCodexAuthJson()}
                 disabled={footerDisabled}
               >
@@ -806,7 +806,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             {method === "oauth" ? (
               <Button
                 className={cn(
-                  "h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800",
+                  "h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90",
                   !oauthSession ? "hidden" : "",
                 )}
                 onClick={() => void handleFinishOAuth()}
@@ -819,7 +819,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             {method === "cpa" ? (
               <Button
                 className={cn(
-                  "h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800",
+                  "h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90",
                   !pendingCpaImport ? "hidden" : "",
                 )}
                 onClick={() => setConfirmOpen(true)}
@@ -855,7 +855,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
               返回
             </Button>
             <Button
-              className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
+              className="h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90"
               onClick={() =>
                 void submitTokens(
                   pendingCpaImport?.tokens ?? [],

@@ -1546,7 +1546,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
               历史记录 ({conversations.length})
             </Button>
             <Button
-              className="h-10 rounded-2xl bg-neutral-950 text-white shadow-sm"
+              className="h-10 rounded-xl"
               onClick={handleCreateDraft}
             >
               <Plus className="size-4" />

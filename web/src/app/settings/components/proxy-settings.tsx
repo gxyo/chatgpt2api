@@ -102,7 +102,7 @@ export function ProxySettingsCard() {
   };
 
   return (
-    <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+    <Card>
       <CardContent className="space-y-6 p-6">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-3">
@@ -175,7 +175,7 @@ export function ProxySettingsCard() {
 
             <div className="flex items-center gap-2">
               <Button
-                className="h-10 rounded-xl bg-neutral-950 px-5 text-white hover:bg-neutral-800"
+                className="h-10 rounded-xl bg-brand px-5 text-white hover:bg-brand/90"
                 onClick={() => void handleSave()}
                 disabled={isSaving || !dirty}
               >

@@ -31,7 +31,7 @@ import { DomainListField } from "./domain-list-field";
 const FIELD_CLASS = "h-10 rounded-xl border-neutral-200 bg-white";
 
 /** 两栏里的每一块都是独立卡片，靠留白分隔，不再共用一个大边框。 */
-const PANEL_CARD_CLASS = "rounded-2xl border-white/80 bg-white/90 shadow-sm";
+const PANEL_CARD_CLASS = "";
 
 /** 单个邮箱服务：自带一圈浅底，和相邻服务区分开。
     底色固定写 /70 —— globals.css 的暗色覆盖只认这一档，换别的透明度在暗色下会漏成近白。 */
@@ -186,7 +186,7 @@ export function RegisterCard() {
               description="运行中无法修改，需要先停止任务。"
               action={
                 <Button
-                  className="h-9 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800"
+                  className="h-9 rounded-xl bg-brand px-4 text-white hover:bg-brand/90"
                   onClick={() => void save()}
                   disabled={isSaving || locked}
                 >
@@ -752,7 +752,7 @@ export function RegisterCard() {
             </div>
 
             <div className="grid grid-cols-3 gap-2">
-              <Button className="h-9 rounded-xl bg-neutral-950 px-3 text-white hover:bg-neutral-800" onClick={() => void toggle()} disabled={isSaving}>
+              <Button className="h-9 rounded-xl bg-brand px-3 text-white hover:bg-brand/90" onClick={() => void toggle()} disabled={isSaving}>
                 {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : config.enabled ? <Square className="size-4" /> : <Play className="size-4" />}
                 {config.enabled ? "停止" : "启动"}
               </Button>

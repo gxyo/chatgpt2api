@@ -259,7 +259,7 @@ export function ApiDocsCard() {
   }, []);
 
   return (
-    <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+    <Card>
       <CardContent className="space-y-5 p-6">
         <div>
           <div className="flex items-center gap-2 text-base font-semibold text-neutral-900">

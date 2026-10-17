@@ -151,14 +151,13 @@ function RegisterLogsContent() {
   return (
     <section className="space-y-5">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-neutral-500 uppercase">Register Logs</div>
-          <h1 className="text-2xl font-semibold tracking-tight">注册日志</h1>
-          <p className="text-sm text-neutral-500">
+        <div className="space-y-1.5">
+          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">注册日志</h1>
+          <p className="text-[13px] leading-5 text-muted-foreground">
             只记录注册失败的记录（成功的注册不写日志），每条都带邮箱域名、停在的步骤和完整过程。
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <DateRangeFilter
             startDate={startDate}
             endDate={endDate}
@@ -180,7 +179,7 @@ function RegisterLogsContent() {
           <Button
             onClick={() => void loadLogs()}
             disabled={isLoading}
-            className="h-10 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800"
+            className="h-10 rounded-xl bg-brand px-4 text-white hover:bg-brand/90"
           >
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
@@ -209,7 +208,7 @@ function RegisterLogsContent() {
         </div>
       </div>
 
-      <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card className="overflow-hidden">
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-neutral-100 px-5 py-4 text-sm text-neutral-600">
             <span>共 {isLoading && items.length === 0 ? "—" : items.length} 条</span>

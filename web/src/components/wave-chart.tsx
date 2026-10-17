@@ -55,8 +55,8 @@ const BAR_RADIUS = 4;
 
 // 校验过的成对配色（蓝/红，protan/deutan ΔE ≈ 21.6 亮色、19.2 暗色），
 // 红绿组合在色觉障碍下不可分辨，因此失败数不用绿色系。
-const REQUESTS_STROKE = "stroke-[#2a78d6] dark:stroke-[#3987e5]";
-const REQUESTS_FILL = "fill-[#2a78d6] dark:fill-[#3987e5]";
+const REQUESTS_STROKE = "stroke-brand";
+const REQUESTS_FILL = "fill-brand";
 const FAILED_STROKE = "stroke-[#e34948] dark:stroke-[#e66767]";
 const FAILED_FILL = "fill-[#e34948] dark:fill-[#e66767]";
 // 违反安全策略单独一条虚线：和红色失败线同处稀疏区段时，靠线型也能分开。
@@ -65,7 +65,7 @@ const POLICY_FILL = "fill-[#d97706] dark:fill-[#f0a13a]";
 
 // 图例/提示框里的色点是 HTML <span>，不是 SVG 节点 —— fill-* 是 SVG 专用属性，
 // 套在 span 上不产生任何可见效果（色点会变成空白），必须用 bg-*。
-const REQUESTS_DOT = "bg-[#2a78d6] dark:bg-[#3987e5]";
+const REQUESTS_DOT = "bg-brand";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
 const POLICY_DOT = "bg-[#d97706] dark:bg-[#f0a13a]";
 

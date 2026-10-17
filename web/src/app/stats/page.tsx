@@ -12,12 +12,13 @@ import { WaveChart } from "@/components/wave-chart";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { SegmentedControl } from "@/components/ui/segmented";
 import { fetchImageStats, fetchInflightStats, type ImageStatsResponse } from "@/lib/api";
 import { getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
-const SUCCESS_DOT = "bg-[#2a78d6]/50 dark:bg-[#3987e5]/50";
+const SUCCESS_DOT = "bg-brand/50";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
 const POLICY_DOT = "bg-[#d97706] dark:bg-[#f0a13a]";
 const NEUTRAL_DOT = "bg-neutral-300 dark:bg-neutral-600";
@@ -128,32 +129,24 @@ function StatsContent() {
   return (
     <section className="space-y-5">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-neutral-500 uppercase">Statistics</div>
-          <h1 className="text-2xl font-semibold tracking-tight">图片统计</h1>
-          <p className="text-sm text-neutral-500 dark:text-neutral-400">
+        <div className="space-y-1.5">
+          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">图片统计</h1>
+          <p className="text-[13px] leading-5 text-muted-foreground">
             按北京时间统计成功生成与失败的图片数，默认展示今天（{today}）。
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <div className="flex items-center gap-1 rounded-xl border border-neutral-200 bg-white p-1 dark:border-white/10 dark:bg-white/5">
-            {PRESETS.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                aria-pressed={preset === item.key}
-                className={cn(
-                  "rounded-lg px-3 py-1.5 text-[13px] font-medium transition",
-                  preset === item.key
-                    ? "bg-neutral-900 text-white shadow-sm dark:bg-white dark:text-neutral-900"
-                    : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-300 dark:hover:bg-white/10 dark:hover:text-white",
-                )}
-                onClick={() => applyPreset(item.key, item.days)}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <SegmentedControl
+            value={preset}
+            ariaLabel="统计区间"
+            options={PRESETS.map((item) => ({ value: item.key, label: item.label }))}
+            onChange={(key) => {
+              const item = PRESETS.find((preset) => preset.key === key);
+              if (item) {
+                applyPreset(item.key, item.days);
+              }
+            }}
+          />
           <DateRangeFilter
             startDate={preset === "all" ? "" : startDate}
             endDate={preset === "all" ? "" : endDate}
@@ -166,7 +159,7 @@ function StatsContent() {
           />
           <Button
             variant="outline"
-            className="h-10 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700"
+            className="h-10 px-4"
             onClick={() => {
               setStartDate(today);
               setEndDate(today);
@@ -176,7 +169,7 @@ function StatsContent() {
             重置
           </Button>
           <Button
-            className="h-10 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800"
+            className="h-10 px-4"
             onClick={() => {
               // 「查询」= 把这一页的数据都重拉一遍，当前请求数也顺带刷掉。
               void loadStats();
@@ -217,7 +210,7 @@ function StatsContent() {
         />
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           label="收入"
           value={formatCurrency(totals?.revenue ?? 0)}
@@ -250,7 +243,7 @@ function StatsContent() {
         />
       </div>
 
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card>
         <CardContent className="space-y-4 p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -290,7 +283,7 @@ function StatsContent() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card>
         <CardContent className="space-y-4 p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -366,7 +359,7 @@ function StatsContent() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card>
         <CardContent className="space-y-4 p-5">
           <div>
             <div className="font-semibold text-neutral-900 dark:text-neutral-50">按调用方式</div>

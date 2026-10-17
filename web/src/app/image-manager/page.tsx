@@ -19,7 +19,7 @@ import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImag
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
-const IMAGE_MANAGER_CHECKBOX_CLASS = "border-neutral-300 bg-white/80 dark:border-white/35 dark:bg-white/5 data-[state=checked]:border-neutral-950 dark:data-[state=checked]:border-white";
+const IMAGE_MANAGER_CHECKBOX_CLASS = "border-neutral-300 bg-white/80 dark:border-white/35 dark:bg-white/5 data-[state=checked]:border-brand dark:data-[state=checked]:border-brand";
 
 function formatSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
@@ -275,16 +275,18 @@ function ImageManagerContent() {
   return (
     <section className="space-y-5">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div className="space-y-1">
-          <div className="text-xs font-semibold tracking-[0.18em] text-neutral-500 uppercase">Images</div>
-          <h1 className="text-2xl font-semibold tracking-tight">图片管理</h1>
+        <div className="space-y-1.5">
+          <h1 className="text-[26px] leading-tight font-semibold tracking-tight">图片管理</h1>
+          <p className="text-[13px] leading-5 text-muted-foreground">
+            按日期与标签浏览、下载或清理已生成的图片。
+          </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-neutral-200 bg-white px-4 text-neutral-700">
             清除筛选条件
           </Button>
-          <Button onClick={() => void loadImages()} disabled={isLoading} className="h-10 rounded-xl bg-neutral-950 px-4 text-white hover:bg-neutral-800">
+          <Button onClick={() => void loadImages()} disabled={isLoading} className="h-10 rounded-xl bg-brand px-4 text-white hover:bg-brand/90">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
@@ -347,35 +349,36 @@ function ImageManagerContent() {
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 mb-4">
         {storage ? (
           <>
-            <div className="rounded-xl border border-neutral-200 bg-white/80 p-3">
-              <div className="text-xs text-neutral-500">磁盘总量</div>
-              <div className="text-lg font-bold text-neutral-800">{storage.disk_total_mb >= 1024 ? `${(storage.disk_total_mb / 1024).toFixed(1)} GB` : `${storage.disk_total_mb} MB`}</div>
+            <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+              <div className="text-xs font-medium text-muted-foreground">磁盘总量</div>
+              <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{storage.disk_total_mb >= 1024 ? `${(storage.disk_total_mb / 1024).toFixed(1)} GB` : `${storage.disk_total_mb} MB`}</div>
             </div>
-            <div className="rounded-xl border border-neutral-200 bg-white/80 p-3">
-              <div className="text-xs text-neutral-500">剩余空间</div>
-              <div className={`text-lg font-bold ${storage.disk_free_mb < 200 ? "text-red-500" : storage.disk_free_mb < 500 ? "text-yellow-500" : "text-green-600"}`}>{storage.disk_free_mb >= 1024 ? `${(storage.disk_free_mb / 1024).toFixed(1)} GB` : `${storage.disk_free_mb} MB`}</div>
+            <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+              <div className="text-xs font-medium text-muted-foreground">剩余空间</div>
+              <div className={`mt-2 text-xl font-semibold tracking-tight tabular-nums ${storage.disk_free_mb < 200 ? "text-rose-500" : storage.disk_free_mb < 500 ? "text-amber-500" : "text-emerald-600"}`}>{storage.disk_free_mb >= 1024 ? `${(storage.disk_free_mb / 1024).toFixed(1)} GB` : `${storage.disk_free_mb} MB`}</div>
             </div>
-            <div className="rounded-xl border border-neutral-200 bg-white/80 p-3">
-              <div className="text-xs text-neutral-500">图片数量</div>
-              <div className="text-lg font-bold text-neutral-800">{storage.image_count}</div>
+            <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+              <div className="text-xs font-medium text-muted-foreground">图片数量</div>
+              <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{storage.image_count}</div>
             </div>
-            <div className="rounded-xl border border-neutral-200 bg-white/80 p-3">
-              <div className="text-xs text-neutral-500">图片占用</div>
-              <div className="text-lg font-bold text-neutral-800">{storage.image_size_mb >= 1024 ? `${(storage.image_size_mb / 1024).toFixed(1)} GB` : `${storage.image_size_mb} MB`}</div>
+            <div className="rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+              <div className="text-xs font-medium text-muted-foreground">图片占用</div>
+              <div className="mt-2 text-xl font-semibold tracking-tight tabular-nums">{storage.image_size_mb >= 1024 ? `${(storage.image_size_mb / 1024).toFixed(1)} GB` : `${storage.image_size_mb} MB`}</div>
             </div>
-            <div className="rounded-xl border border-neutral-200 bg-white/80 p-3 col-span-2 flex items-center gap-2 flex-wrap">
-              <span className="text-xs text-neutral-500 w-full">快捷操作</span>
-              <Button size="sm" variant="outline" className="h-7 text-xs" disabled={storageLoading} onClick={() => { void loadStorage(); }}>
-                <RefreshCw className={`size-3 mr-1 ${storageLoading ? "animate-spin" : ""}`} />刷新
+            <div className="col-span-2 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+              <span className="w-full text-xs font-medium text-muted-foreground">快捷操作</span>
+              <Button size="sm" variant="outline" className="h-8 text-xs" disabled={storageLoading} onClick={() => { void loadStorage(); }}>
+                <RefreshCw className={`mr-1 size-3.5 ${storageLoading ? "animate-spin" : ""}`} />刷新
               </Button>
-              <Button size="sm" variant="outline" className="h-7 text-xs border-rose-200 text-rose-600"
+              <Button size="sm" variant="outline" className="h-8 border-rose-200 text-xs text-rose-600 hover:bg-rose-50 hover:text-rose-700"
                 onClick={() => setDeleteMode("byDate")}>
-                🗑️ 按日期删除
+                <Trash2 className="mr-1 size-3.5" />
+                按日期删除
               </Button>
             </div>
           </>
         ) : (
-          <div className="rounded-xl border border-neutral-200 bg-white/80 p-3 col-span-full text-center text-sm text-neutral-400">
+          <div className="col-span-full rounded-xl border border-border bg-card p-3 text-center text-sm text-muted-foreground">
             {storageLoading ? "加载存储信息..." : "存储信息加载失败"}
           </div>
         )}
@@ -415,7 +418,7 @@ function ImageManagerContent() {
         </DialogContent>
       </Dialog>
 
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+      <Card>
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-neutral-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-neutral-600">

@@ -67,7 +67,7 @@ export function ImageSidebar({
       <div className="flex h-full min-h-0 flex-col gap-2 py-1 sm:gap-3 sm:py-2">
         {!hideActionButtons && (
           <div className="flex items-center gap-2">
-            <Button className="h-10 flex-1 rounded-xl bg-neutral-950 text-white hover:bg-neutral-800" onClick={onCreateDraft}>
+            <Button className="h-10 flex-1 rounded-xl bg-brand text-white hover:bg-brand/90" onClick={onCreateDraft}>
               <MessageSquarePlus className="size-4" />
               新建对话
             </Button>
