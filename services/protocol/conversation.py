@@ -1915,6 +1915,10 @@ def _generate_single_image_attempts(
     # 新的完整预算——轮询超时通常正好把原始预算吃干，不续的话重试还没开始就被
     # deadline 拦下，设置页的「生成失败重试次数」对这类失败永远不生效。
     attempt_deadline = request.deadline
+    # 续预算之前这次尝试真正剩下的预算。日志里的「预算剩余」必须写这个数：
+    # 在 finally 里现算读到的是续过之后的 deadline，永远显示「剩余一整个预算」，
+    # 看起来就像这次尝试空等了 50s 什么都没干。
+    attempt_remaining_secs: float | None = None
     # 下面这几个在循环里被反复重绑，失败快照（finally 里那个闭包）读的是当前值。
     backend: OpenAIBackendAPI | None = None
     select_kwargs: dict[str, Any] = {}
@@ -1981,7 +1985,12 @@ def _generate_single_image_attempts(
         conduit = _conduit_state(backend)
         # 握手/主链路现场同时挂到这一条尝试记录上，尝试轨迹那一行才有东西可写。
         _finish_image_attempt(attempt, attempt_outcome, attempt_error, **conduit, **attempt_extra)
-        remaining = remaining_image_deadline_secs(attempt_deadline)
+        # 换号重试在异常分支里就已经续了预算，这里读 attempt_deadline 会永远显示
+        # 「剩余一整个预算」；优先用续期前记下的真实剩余。
+        remaining = (
+            attempt_remaining_secs if attempt_remaining_secs is not None
+            else remaining_image_deadline_secs(attempt_deadline)
+        )
         inflight = account_service.image_inflight_count(token) if token else 0
         handshake = account_service.image_handshake_diagnostics(token) if token else {}
         pool = _pool_diagnostics(attempted_tokens, select_kwargs)
@@ -2035,9 +2044,12 @@ def _generate_single_image_attempts(
         轮询超时、文本回复这类失败通常正好把预算吃干；不续的话重试在循环顶部
         就被 deadline 拦下，等于没重试。
         """
-        nonlocal attempt_deadline
+        nonlocal attempt_deadline, attempt_remaining_secs
         if attempt_deadline is None or request_budget_secs is None:
             return
+        if attempt_remaining_secs is None:
+            # 先记下这次尝试真正剩了多少，再续预算；日志里的「预算剩余」用这份。
+            attempt_remaining_secs = remaining_image_deadline_secs(attempt_deadline)
         renewed = time.monotonic() + request_budget_secs
         if renewed > attempt_deadline:
             attempt_deadline = renewed
@@ -2084,6 +2096,7 @@ def _generate_single_image_attempts(
         return True
 
     while True:
+        attempt_remaining_secs = None
         in_rescue = rescue_deadline > 0
         try:
             ensure_image_deadline(attempt_deadline)
@@ -2855,9 +2868,12 @@ def _generate_single_image_attempts(
                     )
             if attempt is not None:
                 end_bits = [f"结局 {attempt_outcome or 'unknown'}"]
-                remaining_secs = remaining_image_deadline_secs(attempt_deadline)
+                remaining_secs = (
+                    attempt_remaining_secs if attempt_remaining_secs is not None
+                    else remaining_image_deadline_secs(attempt_deadline)
+                )
                 if remaining_secs is not None:
-                    end_bits.append(f"预算剩余 {remaining_secs:.1f}s")
+                    end_bits.append("预算已耗尽" if remaining_secs <= 0 else f"预算剩余 {remaining_secs:.1f}s")
                 if attempt_error:
                     end_bits.append(f"原因 {str(attempt_error)[:160]}")
                 mark_timeline(
@@ -3010,8 +3026,11 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         image_timelines.extend(output.failed_image_timelines)
         if output.account_email and not account_email:
             account_email = output.account_email
+        # 每个 chunk 都带一份完整的换号轨迹（progress 也算），多图并行时还是
+        # A→B、B→A 交替出现。只留第一次出现的账号，否则日志里会拼出
+        # A→B→A→B… 几十个「账号」，看着像换了几十个号。
         for email in output.account_trail:
-            if not account_trail or account_trail[-1] != email:
+            if email and email not in account_trail:
                 account_trail.append(email)
         if output.attempts_summary and output.attempts_summary not in attempts_summaries:
             attempts_summaries.append(output.attempts_summary)

@@ -454,26 +454,18 @@ def _flatten_account_trail(trails: list[list[str]]) -> list[str]:
     （A→B、B→A、A→B…）就会拼成 A→B→A→B…——日志上看着像换了二十个号，
     实际只有两个。
 
-    现在只合并「带来新账号」的轨迹：一份轨迹里的账号如果都已经在这条轨迹上，
-    说明它只是同一段换号过程的重复/轮转副本，整份跳过。
+    现在只保留每个账号第一次出现的位置：重复/轮转的副本（A→B、B→A、A→B…）
+    和同一份轨迹内部绕回来的（A→B→A，多图 chunk 拼出来的）都只留第一圈，
+    免得日志里冒出几十个假账号。
     """
     flat: list[str] = []
     seen: set[str] = set()
     for trail in trails:
-        if not trail:
-            continue
-        # 先吃掉轨迹内部的相邻重复：同一个号被连续尝试两次只留一次。
-        normalized = [
-            email for index, email in enumerate(trail)
-            if index == 0 or email != trail[index - 1]
-        ]
-        if all(email in seen for email in normalized):
-            continue
-        for email in normalized:
-            if flat and flat[-1] == email:
+        for email in trail:
+            if not email or email in seen:
                 continue
-            flat.append(email)
             seen.add(email)
+            flat.append(email)
     return flat
 
 

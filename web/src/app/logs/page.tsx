@@ -86,28 +86,19 @@ function splitAccountTrail(value: unknown): string[] {
 }
 
 /**
- * 旧日志里同一段换号可能被每个流式 chunk 各拼了一遍（A→B→A→B…），
- * 显示前把周期性重复压成一轮，别让两个账号看起来像换了二十次。
+ * 旧日志里同一段换号可能被每个流式 chunk 各拼了一遍（A→B→A→B…，多图时后面
+ * 还会接上 C→D→C→D…），任何单个周期都匹配不全。按「第一次出现」保留账号：
+ * 后端现在也按这条规则合并，每次尝试的完整顺序在「尝试轨迹」里另有记录。
  */
 function collapseAccountTrail(accounts: string[]): string[] {
-  const deduped = accounts.filter((email, index) => index === 0 || email !== accounts[index - 1]);
-  const length = deduped.length;
-  for (let period = 1; period <= Math.floor(length / 2); period += 1) {
-    let periodic = true;
-    for (let index = period; index < length; index += 1) {
-      if (deduped[index] !== deduped[index % period]) {
-        periodic = false;
-        break;
-      }
+  const seen = new Set<string>();
+  return accounts.filter((email) => {
+    if (seen.has(email)) {
+      return false;
     }
-    if (periodic) {
-      const remainder = length % period;
-      return remainder
-        ? [...deduped.slice(0, period), ...deduped.slice(length - remainder)]
-        : deduped.slice(0, period);
-    }
-  }
-  return deduped;
+    seen.add(email);
+    return true;
+  });
 }
 
 type AttemptStep = {

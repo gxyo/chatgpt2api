@@ -200,6 +200,32 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertIn("#1 token-a@example.test message_retry", result["_attempts_summary"])
         self.assertIn("#2 token-b@example.test success", result["_attempts_summary"])
 
+    def test_collect_does_not_repeat_chunk_trails(self):
+        # 每张图的每个 chunk（progress / result）都带一份完整轨迹。以前按 chunk
+        # 逐个拼接，同一张图 A→B 的轨迹会被拼成 A→B→A→B…，日志里一次请求能
+        # 冒出几十个「账号」。这里模拟两张图各有若干 chunk，只应留下 4 个账号。
+        outputs = []
+        for index, trail in (
+            (1, ["a1@example.test", "b1@example.test"]),
+            (2, ["a2@example.test", "b2@example.test"]),
+        ):
+            for _ in range(5):
+                outputs.append(ImageOutput(
+                    kind="progress", model="gpt-image-2", index=index, total=2,
+                    account_trail=list(trail),
+                ))
+            outputs.append(ImageOutput(
+                kind="result", model="gpt-image-2", index=index, total=2,
+                data=[{"url": f"u{index}"}], account_trail=list(trail),
+            ))
+
+        result = conversation.collect_image_outputs(outputs)
+
+        self.assertEqual(
+            result["_account_trail"],
+            ["a1@example.test", "b1@example.test", "a2@example.test", "b2@example.test"],
+        )
+
     def test_collect_image_outputs_keeps_upscale_postprocess(self):
         outputs = [conversation.ImageOutput(
             kind="result", model="gpt-image-2", index=1, total=1, data=[{"url": "ok"}],
@@ -423,6 +449,37 @@ class GenerationRetryTests(unittest.TestCase):
 
         diagnostics = raised.exception.image_diagnostics
         self.assertIn("retry_deadline_extended_secs", diagnostics)
+
+    def test_attempt_end_reports_budget_before_renewal(self):
+        # 最终失败的那次尝试在 finally 里记录现场时，换号重试已经把 deadline 续成
+        # 「现在 + 一整个预算」了。日志必须写续期前的真实剩余，否则刷完预算的失败
+        # 尝试会显示「预算剩余 50.0s」，看起来像空等了 50 秒却什么都没干。
+        import time as _time
+
+        def stream_fn(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                _time.sleep(0.2)
+                raise ImagePollTimeoutError("poll timed out")
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        patcher, _ = self._patches(["token-a", "token-b"], stream_fn, 1)
+        with mock.patch.object(conversation, "MAX_POLL_TIMEOUT_RETRIES", 0), patcher:
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="draw a cat",
+                message_as_error=True,
+                deadline=_time.monotonic() + 0.05,
+            )))
+
+        groups = conversation.collect_image_outputs(outputs)["_image_timeline"]
+        attempt_ends = [
+            step for step in groups[0]["steps"]
+            if step.get("step") == "attempt_end"
+        ]
+
+        self.assertEqual(len(attempt_ends), 2)
+        self.assertIn("预算已耗尽", attempt_ends[0]["detail"])
+        self.assertNotIn("预算剩余", attempt_ends[0]["detail"])
 
     def test_result_is_accepted_after_deadline_expires_during_postprocess(self):
         # 4K 超分在本地 CPU 上跑，可能一直跑到上游轮询预算用完。图片已经拿到手了，
@@ -811,6 +868,25 @@ class AttemptTrailLogTests(unittest.TestCase):
         self.assertEqual(
             self.service.list()[0]["detail"]["account_trail"],
             "token-a@example.test → token-b@example.test",
+        )
+
+    def test_single_cyclic_trail_collapses_to_first_round(self):
+        """旧版本会把 chunk 轨迹拼成 A→B→A→B… 一整条；单份轨迹也要能收敛。"""
+        call = LoggedCall(
+            {"id": "k1", "name": "管理员", "role": "admin"},
+            "/v1/images/edits", "gpt-image-2", "图生图",
+        )
+        chunks = [{
+            "_account_trail": ["token-a@example.test", "token-b@example.test"] * 13
+            + ["token-c@example.test", "token-d@example.test"] * 12,
+            "data": [{"url": "a"}],
+        }]
+
+        list(call.stream(iter(chunks)))
+
+        self.assertEqual(
+            self.service.list()[0]["detail"]["account_trail"],
+            "token-a@example.test → token-b@example.test → token-c@example.test → token-d@example.test",
         )
 
     def test_trails_with_new_accounts_are_still_merged(self):
