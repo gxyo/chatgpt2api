@@ -1371,6 +1371,10 @@ class AccountService:
         return removed
 
     def force_remove_invalid_token(self, access_token: str, event: str, error: str = "") -> bool:
+        if not config.auto_remove_invalid_accounts:
+            if access_token:
+                self.update_account(access_token, {"status": "异常", "quota": 0}, quiet=True)
+            return False
         removed = self._delete_account_quietly(
             access_token,
             "一键刷新移除无效账号",
@@ -1591,9 +1595,13 @@ class AccountService:
     def _force_refresh_should_remove_account(self, account: dict | None) -> tuple[bool, str]:
         if not isinstance(account, dict):
             return False, ""
+        if not config.auto_remove_rate_limited_accounts:
+            return False, ""
         status = str(account.get("status") or "").strip()
         if status == "限流":
             return True, "一键刷新移除限流账号"
+        if status in {"异常", "禁用"}:
+            return False, ""
         if self._nonnegative_int(account.get("quota")) <= 0:
             return True, "一键刷新移除额度为 0 的账号"
         return False, ""
@@ -1922,11 +1930,14 @@ class AccountService:
                     if not defer_invalid_removal:
                         status_code = self._refresh_error_status_code(exc)
                         if status_code in FORCE_REFRESH_REMOVE_STATUS_CODES:
-                            self._delete_account_quietly(
-                                token,
-                                f"一键刷新移除 HTTP {status_code} 错误账号",
-                                {"status_code": status_code, "error": error_str},
-                            )
+                            if config.auto_remove_invalid_accounts:
+                                self._delete_account_quietly(
+                                    token,
+                                    f"一键刷新移除 HTTP {status_code} 错误账号",
+                                    {"status_code": status_code, "error": error_str},
+                                )
+                            else:
+                                self.update_account(token, {"status": "异常", "quota": 0}, quiet=True)
                 else:
                     if account is not None:
                         refreshed += 1

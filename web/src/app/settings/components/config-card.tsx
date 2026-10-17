@@ -200,7 +200,7 @@ export function ConfigCard() {
               号池里没有可用的生图额度时，把 no available image quota 换成这里填写的文字，例如「请联系管理员补号」；留空则原样返回 no available image quota。
             </p>
           </div>
-          <div className="space-y-2 md:col-span-2">
+          <div className="space-y-2">
             <label className="flex items-center gap-3 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-700">
               <Checkbox
                 checked={Boolean(config?.auto_remove_invalid_accounts)}
@@ -209,10 +209,10 @@ export function ConfigCard() {
               自动移除异常账号
             </label>
             <p className="text-xs leading-5 text-neutral-500">
-              定时巡检、导入账号或实际请求中检测到 token 失效时：勾选则直接从号池删除；不勾选则保留账号并标记为「异常」、额度清零，方便排查或重新登录。注意：号池页的「一键刷新」不受此开关控制，会直接清掉失效账号。
+              定时巡检、导入账号、实际请求和「一键刷新」中发现 token 失效时：勾选则直接从号池删除；不勾选则保留账号并标记为「异常」、额度清零，方便排查或重新登录。
             </p>
           </div>
-          <div className="space-y-2 md:col-span-2">
+          <div className="space-y-2">
             <label className="flex items-center gap-3 rounded-xl border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-700">
               <Checkbox
                 checked={Boolean(config?.auto_remove_rate_limited_accounts)}
@@ -221,7 +221,7 @@ export function ConfigCard() {
               自动移除限流账号
             </label>
             <p className="text-xs leading-5 text-neutral-500">
-              账号生图额度用完（状态变为「限流」）时：勾选则直接从号池删除；不勾选则保留并显示「限流」，等上游额度恢复后可自动转回「正常」。注意：号池页的「一键刷新」会无条件删除限流和额度为 0 的账号。
+              定时巡检、实际请求和「一键刷新」中发现生图额度用完（状态变为「限流」）时：勾选则直接从号池删除；不勾选则保留并显示「限流」，等上游额度恢复后可自动转回「正常」。
             </p>
           </div>
           <div className="space-y-3 rounded-xl border border-neutral-200 bg-white px-4 py-3">
