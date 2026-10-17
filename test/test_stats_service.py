@@ -547,6 +547,38 @@ class ModelRevenueTests(unittest.TestCase):
         self.assertEqual(result["by_model"][0]["price"], 0)
         self.assertEqual(result["by_model"][0]["revenue"], 0.0)
 
+    def test_lifetime_totals_ignore_the_selected_range(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1", "https://img/2"]),
+                log_line("2026-09-29 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/3"]),
+            ])
+
+            today_only = service.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 1})
+            everything = service.summary(scope="all", pricing={"gpt-image-2": 1})
+
+        # 区间内只算当天的 2 张，累计口径始终是全部 3 张。
+        self.assertEqual(today_only["totals"]["images"], 2)
+        self.assertEqual(today_only["totals"]["revenue"], 2)
+        self.assertEqual(today_only["lifetime"], {"images": 3, "revenue": 3})
+        self.assertEqual(everything["totals"]["revenue"], everything["lifetime"]["revenue"])
+        self.assertEqual(everything["lifetime"], {"images": 3, "revenue": 3})
+
+    def test_lifetime_revenue_follows_the_current_pricing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=["https://img/1"]),
+            ])
+
+            unpriced = service.summary("2026-09-28", "2026-09-28")
+            priced = service.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 2.5})
+
+        self.assertEqual(unpriced["lifetime"], {"images": 1, "revenue": 0})
+        self.assertEqual(priced["lifetime"], {"images": 1, "revenue": 2.5})
+
     def test_invalid_prices_are_treated_as_unpriced(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(tmp_dir, [

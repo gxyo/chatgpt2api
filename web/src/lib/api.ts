@@ -619,6 +619,11 @@ export type ImageStatsResponse = {
     /** 按当前定价估算的收入（人民币）。 */
     revenue: number;
   };
+  /** 全部记录的累计值，不随日期筛选变化（收入按当前定价估算）。 */
+  lifetime: {
+    images: number;
+    revenue: number;
+  };
   /** 收入币种，目前固定为 CNY。 */
   currency: string;
   by_mode: ImageStatsBreakdown[];

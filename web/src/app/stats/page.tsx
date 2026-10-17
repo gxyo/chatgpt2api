@@ -24,6 +24,7 @@ const POLICY_DOT = "bg-[#d97706] dark:bg-[#f0a13a]";
 const NEUTRAL_DOT = "bg-neutral-300 dark:bg-neutral-600";
 const LIVE_DOT = "bg-[#2fa96b] dark:bg-[#3fc07f]";
 const REVENUE_DOT = "bg-[#c08a2e] dark:bg-[#e0ab4c]";
+const LIFETIME_DOT = "bg-[#7c5c24] dark:bg-[#c9a45a]";
 
 // days=0 表示不按天数取区间，交给后端按已有记录算「全部」。
 const PRESETS = [
@@ -216,7 +217,7 @@ function StatsContent() {
         />
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile
           label="成功率"
           value={totals ? formatRate(totals.success_rate) : "-"}
@@ -228,6 +229,12 @@ function StatsContent() {
           value={formatCurrency(totals?.revenue ?? 0)}
           caption={`成功生成 ${totals?.images ?? 0} 张 · 按当前定价估算`}
           tone={REVENUE_DOT}
+        />
+        <StatTile
+          label="累计计费"
+          value={formatCurrency(data?.lifetime.revenue ?? 0)}
+          caption={`全部记录 ${data?.lifetime.images ?? 0} 张 · 不随筛选变化`}
+          tone={LIFETIME_DOT}
         />
         <StatTile
           label="当前请求数"

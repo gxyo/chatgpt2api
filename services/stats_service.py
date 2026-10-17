@@ -141,6 +141,26 @@ def _parse_price(value: object) -> float | None:
     return price
 
 
+def _build_model_breakdown(
+    models: dict[str, int], prices: dict[str, float]
+) -> tuple[list[dict[str, Any]], float]:
+    """把「模型 -> 图片数」按当前定价折算成明细与总收入。"""
+    by_model: list[dict[str, Any]] = []
+    for model, images in models.items():
+        if images <= 0:
+            continue
+        price = _parse_price(prices.get(model))
+        revenue = round(images * price, 2) if price is not None else 0.0
+        by_model.append({
+            "model": model,
+            "images": images,
+            "price": price,
+            "revenue": revenue,
+        })
+    by_model.sort(key=lambda item: (-item["revenue"], -item["images"], item["model"]))
+    return by_model, round(sum(item["revenue"] for item in by_model), 2)
+
+
 def _parse_duration(detail: dict[str, Any]) -> int:
     try:
         return max(0, int(detail.get("duration_ms") or 0))
@@ -504,6 +524,14 @@ class ImageStatsService:
                     series.append(_point(day, day[5:], day, bucket))
                     _merge_totals(totals, bucket)
 
+            # 累计口径：不受查询区间影响，始终是聚合里全部小时桶的和。
+            lifetime_images = 0
+            lifetime_models: dict[str, int] = {}
+            for bucket in hours.values():
+                lifetime_images += bucket["images"]
+                for model, count in bucket["models"].items():
+                    lifetime_models[model] = lifetime_models.get(model, 0) + count
+
         peak = max(series, key=lambda item: item["requests"], default=None)
         if peak is not None and peak["requests"] <= 0:
             peak = None
@@ -524,20 +552,8 @@ class ImageStatsService:
             for mode, label in MODE_LABELS.items()
         ]
         prices = pricing or {}
-        by_model: list[dict[str, Any]] = []
-        for model, images in totals["models"].items():
-            if images <= 0:
-                continue
-            price = _parse_price(prices.get(model))
-            revenue = round(images * price, 2) if price is not None else 0.0
-            by_model.append({
-                "model": model,
-                "images": images,
-                "price": price,
-                "revenue": revenue,
-            })
-        by_model.sort(key=lambda item: (-item["revenue"], -item["images"], item["model"]))
-        revenue = round(sum(item["revenue"] for item in by_model), 2)
+        by_model, revenue = _build_model_breakdown(totals["models"], prices)
+        _lifetime_by_model, lifetime_revenue = _build_model_breakdown(lifetime_models, prices)
 
         return {
             "range": {
@@ -556,6 +572,11 @@ class ImageStatsService:
                 "avg_duration_ms": int(totals["duration_ms"] / requests) if requests else 0,
                 "images": totals["images"],
                 "revenue": revenue,
+            },
+            # 累计计费：全部记录的和，不随日期 / 区间筛选变化。
+            "lifetime": {
+                "images": lifetime_images,
+                "revenue": lifetime_revenue,
             },
             "currency": CURRENCY,
             "by_mode": by_mode,
