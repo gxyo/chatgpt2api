@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
@@ -432,6 +432,8 @@ function LogsContent() {
   const [isSavingRetention, setIsSavingRetention] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
+  // 日志清理设置默认收起成一行摘要，把首屏高度留给日志列表。
+  const [retentionCardOpen, setRetentionCardOpen] = useState(false);
   const [exportLimit, setExportLimit] = useState("10");
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingSelected, setIsExportingSelected] = useState(false);
@@ -640,7 +642,7 @@ function LogsContent() {
   }, []);
 
   return (
-    <section className="space-y-5">
+    <section className="space-y-4">
       <PageHeader
         title="日志管理"
         description="查看调用与账号管理日志，支持筛选、导出和按保留策略自动清理。"
@@ -708,76 +710,105 @@ function LogsContent() {
       </FilterCard>
 
       <Card>
-        <CardContent className="flex flex-col gap-4 p-5 xl:flex-row xl:items-center xl:justify-between">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-sm font-medium text-neutral-700">
+        {retentionCardOpen ? (
+          <CardContent className="flex flex-col gap-4 p-5 xl:flex-row xl:items-center xl:justify-between">
+            <div className="space-y-1">
+              <button
+                type="button"
+                aria-expanded
+                onClick={() => setRetentionCardOpen(false)}
+                title="收起日志清理设置"
+                className="flex items-center gap-2 rounded-lg text-sm font-medium text-neutral-700 transition-colors hover:text-neutral-900"
+              >
+                <HardDrive className="size-4 text-neutral-400" />
+                日志清理
+                <ChevronDown className="size-4 rotate-180 text-neutral-400" />
+              </button>
+              <p className="text-sm text-neutral-500">
+                当前占用 {formatBytes(retention?.size_bytes ?? 0)}
+                {retention?.updated_at ? `，最后写入 ${formatBeijingClock(new Date(retention.updated_at * 1000).toISOString())}` : ""}
+                。清理只删日志文件，统计页的数据会保留。
+              </p>
+            </div>
+            {/* shrink-0：这一组控件不参与收缩，宽度不够时让左边的说明文字多换一行，
+                而不是把控件折到第二行去。 */}
+            <div className="flex shrink-0 flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2 text-sm text-neutral-600">
+                保留最近
+                <Input
+                  value={retentionDays}
+                  onChange={(event) => setRetentionDays(event.target.value)}
+                  inputMode="numeric"
+                  className="h-10 w-20 rounded-xl border-neutral-200 bg-white text-center"
+                />
+                天
+              </label>
+              <label className="flex items-center gap-2 text-sm text-neutral-600">
+                <Checkbox checked={autoCleanup} onCheckedChange={(checked) => setAutoCleanup(Boolean(checked))} />
+                每天自动清理
+              </label>
+              <label
+                className="flex items-center gap-2 text-sm text-neutral-600"
+                title="按北京时间（UTC+8）执行"
+              >
+                <Input
+                  type="time"
+                  step={60}
+                  value={cleanupTime}
+                  onChange={(event) => setCleanupTime(event.target.value)}
+                  disabled={!autoCleanup}
+                  className="h-10 w-32 rounded-xl border-neutral-200 bg-white text-center disabled:cursor-not-allowed disabled:opacity-50"
+                />
+                <span className={autoCleanup ? "" : "text-neutral-400"}>北京时间</span>
+              </label>
+              {/* 两个按钮绑成一组：真到了换行的时候也一起走，
+                  「立即清理」永远紧跟在「保存设置」后面，不会单独占一行。 */}
+              <div className="flex items-center gap-3">
+                <Button variant="outline" className="h-10 rounded-xl border-neutral-200 bg-white px-4" onClick={() => void saveRetention()} disabled={isSavingRetention || !retentionValid || !cleanupTimeValid}>
+                  {/* 图标常驻再原地换成转圈：只在加载时插入图标会让按钮变宽（图标 + gap-2，
+                      外加基础样式的 has-[>svg]:px-3 收窄内边距），把「立即清理」挤到下一行。
+                      同页的「查询」按钮也是这么换的。 */}
+                  {isSavingRetention ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
+                  保存设置
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50"
+                  onClick={() => setCleanupOpen(true)}
+                  disabled={isCleaning || !retentionValid}
+                >
+                  <Trash2 className="size-4" />
+                  立即清理
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        ) : (
+          <button
+            type="button"
+            aria-expanded={false}
+            onClick={() => setRetentionCardOpen(true)}
+            className="group flex w-full flex-wrap items-center gap-x-4 gap-y-1 px-5 py-3 text-left transition-colors hover:bg-muted/40"
+          >
+            <span className="flex items-center gap-2 text-sm font-medium text-neutral-700">
               <HardDrive className="size-4 text-neutral-400" />
               日志清理
-            </div>
-            <p className="text-sm text-neutral-500">
-              当前占用 {formatBytes(retention?.size_bytes ?? 0)}
-              {retention?.updated_at ? `，最后写入 ${formatBeijingClock(new Date(retention.updated_at * 1000).toISOString())}` : ""}
-              。清理只删日志文件，统计页的数据会保留。
-            </p>
-          </div>
-          {/* shrink-0：这一组控件不参与收缩，宽度不够时让左边的说明文字多换一行，
-              而不是把控件折到第二行去。 */}
-          <div className="flex shrink-0 flex-wrap items-center gap-3">
-            <label className="flex items-center gap-2 text-sm text-neutral-600">
-              保留最近
-              <Input
-                value={retentionDays}
-                onChange={(event) => setRetentionDays(event.target.value)}
-                inputMode="numeric"
-                className="h-10 w-20 rounded-xl border-neutral-200 bg-white text-center"
-              />
-              天
-            </label>
-            <label className="flex items-center gap-2 text-sm text-neutral-600">
-              <Checkbox checked={autoCleanup} onCheckedChange={(checked) => setAutoCleanup(Boolean(checked))} />
-              每天自动清理
-            </label>
-            <label
-              className="flex items-center gap-2 text-sm text-neutral-600"
-              title="按北京时间（UTC+8）执行"
-            >
-              <Input
-                type="time"
-                step={60}
-                value={cleanupTime}
-                onChange={(event) => setCleanupTime(event.target.value)}
-                disabled={!autoCleanup}
-                className="h-10 w-32 rounded-xl border-neutral-200 bg-white text-center disabled:cursor-not-allowed disabled:opacity-50"
-              />
-              <span className={autoCleanup ? "" : "text-neutral-400"}>北京时间</span>
-            </label>
-            {/* 两个按钮绑成一组：真到了换行的时候也一起走，
-                「立即清理」永远紧跟在「保存设置」后面，不会单独占一行。 */}
-            <div className="flex items-center gap-3">
-              <Button variant="outline" className="h-10 rounded-xl border-neutral-200 bg-white px-4" onClick={() => void saveRetention()} disabled={isSavingRetention || !retentionValid || !cleanupTimeValid}>
-                {/* 图标常驻再原地换成转圈：只在加载时插入图标会让按钮变宽（图标 + gap-2，
-                    外加基础样式的 has-[>svg]:px-3 收窄内边距），把「立即清理」挤到下一行。
-                    同页的「查询」按钮也是这么换的。 */}
-                {isSavingRetention ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
-                保存设置
-              </Button>
-              <Button
-                variant="outline"
-                className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50"
-                onClick={() => setCleanupOpen(true)}
-                disabled={isCleaning || !retentionValid}
-              >
-                <Trash2 className="size-4" />
-                立即清理
-              </Button>
-            </div>
-          </div>
-        </CardContent>
+              <ChevronDown className="size-4 text-neutral-400 transition-transform group-hover:translate-y-0.5" />
+            </span>
+            <span className="text-xs text-neutral-500">
+              占用 {formatBytes(retention?.size_bytes ?? 0)}
+              {retention ? ` · 保留最近 ${retentionDays} 天 · ${autoCleanup ? `每天 ${cleanupTime} 自动清理` : "未开启自动清理"}` : ""}
+            </span>
+            <span className="ml-auto inline-flex items-center rounded-lg border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors group-hover:border-brand/30 group-hover:text-foreground">
+              设置
+            </span>
+          </button>
+        )}
       </Card>
 
       <Card className="overflow-hidden">
         <CardContent className="p-0">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3">
             <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
               <span className="text-[15px] font-semibold tracking-tight text-foreground">日志列表</span>
               <span className="rounded-full bg-brand-soft px-2 py-0.5 text-[11px] font-semibold text-brand tabular-nums">
@@ -818,7 +849,8 @@ function LogsContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[980px]">
+            {/* 行距压紧一点：同样一屏能多放一条日志，按钮仍保留 32px 点击高度。 */}
+            <Table className="min-w-[980px] [&_td]:py-2.5">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
