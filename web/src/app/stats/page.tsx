@@ -381,7 +381,7 @@ function StatsContent() {
           <div>
             <div className="text-[15px] font-semibold tracking-tight">按调用方式</div>
             <div className="mt-1 text-xs text-muted-foreground">
-              条形长度 = 各方式占成功图片的比重；成功率条满格为 100%
+              环形图 = 各方式占成功图片的比重；成功率条满格为 100%
             </div>
           </div>
           <ImageModeChart modes={data?.by_mode ?? []} />

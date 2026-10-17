@@ -13,6 +13,9 @@ export type StoredAuthSession = {
 
 export const AUTH_KEY_STORAGE_KEY = "chatgpt2api_auth_key";
 export const AUTH_SESSION_STORAGE_KEY = "chatgpt2api_auth_session";
+/** localStorage 里的同步镜像：localforage 是异步的，整页加载时首帧读不到会话，
+    侧栏和页面守卫会先渲染一屏空白再等校验结果。镜像让首帧就能同步拿到身份。 */
+const AUTH_SESSION_MIRROR_KEY = "chatgpt2api_auth_session_mirror";
 
 const authStorage = localforage.createInstance({
   name: "chatgpt2api",
@@ -37,7 +40,14 @@ export type CachedAuthSession = {
 /** 同步读缓存。返回 null 表示"还没校验过"，调用方需要等一次网络。 */
 export function getCachedAuthSession(): CachedAuthSession | null {
   if (cachedSession === undefined) {
-    return null;
+    // 内存缓存为空（刚刷新或整页跳转）：先用 localStorage 镜像同步渲染外壳，
+    // checkedAt 记 0，调用方拿到会话的同时会顺带触发一次后台复检。
+    const mirrored = readMirroredSession();
+    if (!mirrored) {
+      return null;
+    }
+    cachedSession = mirrored;
+    cachedAt = 0;
   }
   return { session: cachedSession, checkedAt: cachedAt };
 }
@@ -45,6 +55,18 @@ export function getCachedAuthSession(): CachedAuthSession | null {
 export function setCachedAuthSession(session: StoredAuthSession | null) {
   cachedSession = session;
   cachedAt = Date.now();
+}
+
+function readMirroredSession(): StoredAuthSession | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(AUTH_SESSION_MIRROR_KEY);
+    return raw ? normalizeSession(JSON.parse(raw)) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 只清内存缓存，不动持久化存储。 */
@@ -118,6 +140,7 @@ export async function setStoredAuthSession(session: StoredAuthSession) {
 
   // 调用方都是刚拿 /auth/login 验过的结果（登录页、会话复检），顺手写进内存缓存。
   setCachedAuthSession(normalizedSession);
+  writeMirroredSession(normalizedSession);
 
   await Promise.all([
     authStorage.setItem(AUTH_KEY_STORAGE_KEY, normalizedSession.key),
@@ -134,10 +157,26 @@ export async function setStoredAuthKey(authKey: string) {
   await authStorage.setItem(AUTH_KEY_STORAGE_KEY, normalizedAuthKey);
 }
 
+function writeMirroredSession(session: StoredAuthSession) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(AUTH_SESSION_MIRROR_KEY, JSON.stringify(session));
+  } catch {
+    // 隐私模式或存储被禁用：镜像写不进去就算了，退回原来的异步校验。
+  }
+}
+
 export async function clearStoredAuthSession() {
   clearCachedAuthSession();
   if (typeof window === "undefined") {
     return;
+  }
+  try {
+    window.localStorage.removeItem(AUTH_SESSION_MIRROR_KEY);
+  } catch {
+    // 同上，忽略存储异常。
   }
   await Promise.all([
     authStorage.removeItem(AUTH_KEY_STORAGE_KEY),

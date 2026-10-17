@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import {
   BarChart3,
   FileWarning,
@@ -77,6 +77,22 @@ function BrandMark() {
   );
 }
 
+/** 侧栏顶部品牌行：真实侧栏与首屏占位壳共用。 */
+function SidebarBrandRow() {
+  return (
+    <div className="flex h-16 shrink-0 items-center px-5">
+      <Link href={BRAND_HREF} className={brandLinkClass}>
+        <BrandMark />
+        chatgpt2api
+      </Link>
+    </div>
+  );
+}
+
+/** 深色侧栏的外观，抽出来给占位壳复用。 */
+const SIDEBAR_SURFACE_CLASS =
+  "app-sidebar fixed inset-y-3 left-3 z-40 hidden w-[248px] flex-col overflow-hidden rounded-[26px] border border-white/[0.06] bg-[#0d1526] text-white shadow-[0_30px_80px_-30px_rgba(2,6,23,0.75)] lg:flex dark:bg-[#0a1120]";
+
 /** 导航项是否处于选中态：子路由（如 /image/xxx）也算命中。 */
 function isActiveRoute(pathname: string, href: string) {
   return pathname === href || pathname.startsWith(`${href}/`);
@@ -84,9 +100,15 @@ function isActiveRoute(pathname: string, href: string) {
 
 function useNavSession(pathname: string) {
   const router = useRouter();
-  const [session, setSession] = useState<StoredAuthSession | null | undefined>(
-    () => peekAuthSession()?.session,
-  );
+  // 水合前后都先渲染空态；绘制前用同步缓存补上身份，整页刷新时侧栏不会迟到。
+  const [session, setSession] = useState<StoredAuthSession | null | undefined>(undefined);
+
+  useLayoutEffect(() => {
+    const cached = peekAuthSession();
+    if (cached) {
+      setSession(cached.session);
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -220,20 +242,29 @@ export function AppSidebar() {
   const pathname = usePathname();
   const { session, handleLogout } = useNavSession(pathname);
 
-  if (pathname === "/login" || session === undefined || !session) {
+  if (pathname === "/login") {
+    return null;
+  }
+
+  // 身份还没就绪时先渲染深色空壳：静态导出的 HTML 里就有这块面板，
+  // 硬刷新时首帧不会是「一片空白」，水合后再把导航项补进去。
+  if (session === undefined) {
+    return (
+      <aside className={SIDEBAR_SURFACE_CLASS}>
+        <SidebarBrandRow />
+      </aside>
+    );
+  }
+
+  if (!session) {
     return null;
   }
 
   const navGroups = session.role === "admin" ? adminNavGroups : userNavGroups;
 
   return (
-    <aside className="app-sidebar fixed inset-y-3 left-3 z-40 hidden w-[248px] flex-col overflow-hidden rounded-[26px] border border-white/[0.06] bg-[#0d1526] text-white shadow-[0_30px_80px_-30px_rgba(2,6,23,0.75)] lg:flex dark:bg-[#0a1120]">
-      <div className="flex h-16 shrink-0 items-center px-5">
-        <Link href={BRAND_HREF} className={brandLinkClass}>
-          <BrandMark />
-          chatgpt2api
-        </Link>
-      </div>
+    <aside className={SIDEBAR_SURFACE_CLASS}>
+      <SidebarBrandRow />
       <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-1">
         <NavList groups={navGroups} pathname={pathname} />
       </div>
