@@ -275,15 +275,24 @@ def run_scheduled_image_cleanup_if_due(now: datetime | None = None) -> dict[str,
         return None
 
     current = now or _beijing_now()
-    interval_days = config.image_cleanup_interval_days
-    scheduled_time = config.image_cleanup_time
-    schedule_key = f"{interval_days}:{scheduled_time}@{IMAGE_CLEANUP_TIMEZONE_KEY}"
+    if config.image_cleanup_interval_unit == "minutes":
+        # 按分钟：保存配置后的第一次检查起算，N 分钟后清第一次，之后每 N 分钟一次。
+        interval_minutes = max(1, int(config.image_cleanup_interval_minutes))
+        schedule_key = f"minutes:{interval_minutes}@{IMAGE_CLEANUP_TIMEZONE_KEY}"
+        first_run_at = current + timedelta(minutes=interval_minutes)
+        step = timedelta(minutes=interval_minutes)
+    else:
+        interval_days = config.image_cleanup_interval_days
+        scheduled_time = config.image_cleanup_time
+        schedule_key = f"{interval_days}:{scheduled_time}@{IMAGE_CLEANUP_TIMEZONE_KEY}"
+        first_run_at = _next_image_cleanup_at(current, interval_days, scheduled_time)
+        step = timedelta(days=interval_days)
     state_path = _image_cleanup_state_path()
 
     with _image_cleanup_state_lock:
         state = _load_image_cleanup_state(state_path)
         if state.get("schedule") != schedule_key:
-            next_run_at = _next_image_cleanup_at(current, interval_days, scheduled_time)
+            next_run_at = first_run_at
             _save_image_cleanup_state(state_path, {
                 "schedule": schedule_key,
                 "next_run_at": next_run_at.isoformat(timespec="seconds"),
@@ -293,7 +302,7 @@ def run_scheduled_image_cleanup_if_due(now: datetime | None = None) -> dict[str,
         try:
             next_run_at = datetime.fromisoformat(str(state.get("next_run_at") or ""))
         except ValueError:
-            next_run_at = _next_image_cleanup_at(current, interval_days, scheduled_time)
+            next_run_at = first_run_at
             _save_image_cleanup_state(state_path, {
                 "schedule": schedule_key,
                 "next_run_at": next_run_at.isoformat(timespec="seconds"),
@@ -305,7 +314,7 @@ def run_scheduled_image_cleanup_if_due(now: datetime | None = None) -> dict[str,
 
         result = delete_images(end_date=current.date().isoformat(), all_matching=True)
         while next_run_at <= current:
-            next_run_at += timedelta(days=interval_days)
+            next_run_at += step
         _save_image_cleanup_state(state_path, {
             "schedule": schedule_key,
             "last_run_at": current.isoformat(timespec="seconds"),

@@ -25,6 +25,10 @@ DEFAULT_IMAGE_GENERATION_RETRY_COUNT = 0
 DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS = 1
 DEFAULT_IMAGE_CLEANUP_TIME = "03:00"
 IMAGE_CLEANUP_INTERVAL_CHOICES = {1, 3, 5, 7}
+# 定时清理除了「每 N 天 + 固定时刻」，还支持「每 N 分钟」：
+# 保存后从当前时间起算，之后每隔 N 分钟清一次。
+DEFAULT_IMAGE_CLEANUP_INTERVAL_MINUTES = 60
+MAX_IMAGE_CLEANUP_INTERVAL_MINUTES = 10080  # 一周；再长就没必要按分钟算了
 DEFAULT_LOG_RETENTION_DAYS = 30
 # 每日自动清理的默认时刻（北京时间）。图片清理默认也是 03:00，两个任务各自独立。
 DEFAULT_LOG_CLEANUP_TIME = "03:00"
@@ -90,6 +94,18 @@ def _normalize_image_cleanup_interval_days(value: object) -> int:
     except (OverflowError, TypeError, ValueError):
         return DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS
     return normalized if normalized in IMAGE_CLEANUP_INTERVAL_CHOICES else DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS
+
+
+def _normalize_image_cleanup_interval_unit(value: object) -> str:
+    return "minutes" if str(value or "").strip().lower() == "minutes" else "days"
+
+
+def _normalize_image_cleanup_interval_minutes(value: object) -> int:
+    try:
+        normalized = int(value)
+    except (OverflowError, TypeError, ValueError):
+        return DEFAULT_IMAGE_CLEANUP_INTERVAL_MINUTES
+    return min(max(normalized, 1), MAX_IMAGE_CLEANUP_INTERVAL_MINUTES)
 
 
 def _normalize_log_retention_days(value: object) -> int:
@@ -340,7 +356,18 @@ class ConfigStore:
         return _normalize_image_cleanup_time(self.data.get("image_cleanup_time"))
 
     @property
+    def image_cleanup_interval_unit(self) -> str:
+        """定时清理周期单位：days（每 N 天固定时刻）/ minutes（每 N 分钟）。"""
+        return _normalize_image_cleanup_interval_unit(self.data.get("image_cleanup_interval_unit"))
+
+    @property
+    def image_cleanup_interval_minutes(self) -> int:
+        return _normalize_image_cleanup_interval_minutes(self.data.get("image_cleanup_interval_minutes"))
+
+    @property
     def image_cleanup_schedule_configured(self) -> bool:
+        if self.image_cleanup_interval_unit == "minutes":
+            return "image_cleanup_interval_minutes" in self.data
         return "image_cleanup_interval_days" in self.data and "image_cleanup_time" in self.data
 
     @property
@@ -495,6 +522,8 @@ class ConfigStore:
         data["log_auto_cleanup"] = self.log_auto_cleanup
         data["log_cleanup_time"] = self.log_cleanup_time
         data["image_cleanup_interval_days"] = self.image_cleanup_interval_days
+        data["image_cleanup_interval_unit"] = self.image_cleanup_interval_unit
+        data["image_cleanup_interval_minutes"] = self.image_cleanup_interval_minutes
         data["image_cleanup_time"] = self.image_cleanup_time
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
@@ -537,6 +566,14 @@ class ConfigStore:
             )
         if "image_cleanup_time" in next_data:
             next_data["image_cleanup_time"] = _normalize_image_cleanup_time(next_data.get("image_cleanup_time"))
+        if "image_cleanup_interval_unit" in next_data:
+            next_data["image_cleanup_interval_unit"] = _normalize_image_cleanup_interval_unit(
+                next_data.get("image_cleanup_interval_unit")
+            )
+        if "image_cleanup_interval_minutes" in next_data:
+            next_data["image_cleanup_interval_minutes"] = _normalize_image_cleanup_interval_minutes(
+                next_data.get("image_cleanup_interval_minutes")
+            )
         if "image_quota_error_message" in next_data:
             next_data["image_quota_error_message"] = _normalize_image_quota_error_message(
                 next_data.get("image_quota_error_message")

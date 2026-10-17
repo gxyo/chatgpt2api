@@ -110,6 +110,8 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_cleanup_interval_days: [1, 3, 5, 7].includes(Number(config.image_cleanup_interval_days))
       ? Number(config.image_cleanup_interval_days)
       : 1,
+    image_cleanup_interval_unit: config.image_cleanup_interval_unit === "minutes" ? "minutes" : "days",
+    image_cleanup_interval_minutes: Math.min(10080, Math.max(1, Math.floor(Number(config.image_cleanup_interval_minutes) || 60))),
     image_cleanup_time: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(config.image_cleanup_time || ""))
       ? String(config.image_cleanup_time)
       : "03:00",
@@ -150,6 +152,8 @@ type SettingsStore = {
   setRefreshAccountIntervalMinute: (value: string) => void;
   setRefreshAllAccountsIntervalMinute: (value: string) => void;
   setImageCleanupIntervalDays: (value: string) => void;
+  setImageCleanupIntervalUnit: (value: string) => void;
+  setImageCleanupIntervalMinutes: (value: string) => void;
   setImageCleanupTime: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageGenerationRetryCount: (value: string) => void;
@@ -236,6 +240,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_cleanup_interval_days: [1, 3, 5, 7].includes(Number(config.image_cleanup_interval_days))
           ? Number(config.image_cleanup_interval_days)
           : 1,
+        image_cleanup_interval_unit: config.image_cleanup_interval_unit === "minutes" ? "minutes" : "days",
+        image_cleanup_interval_minutes: Math.min(10080, Math.max(1, Math.floor(Number(config.image_cleanup_interval_minutes) || 60))),
         image_cleanup_time: /^([01]\d|2[0-3]):[0-5]\d$/.test(String(config.image_cleanup_time || ""))
           ? String(config.image_cleanup_time)
           : "03:00",
@@ -305,6 +311,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageCleanupIntervalDays: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_cleanup_interval_days: Number(value) } } : {});
+  },
+
+  setImageCleanupIntervalUnit: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_cleanup_interval_unit: value === "minutes" ? "minutes" : "days" } } : {});
+  },
+
+  setImageCleanupIntervalMinutes: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_cleanup_interval_minutes: value } } : {});
   },
 
   setImageCleanupTime: (value) => {

@@ -105,6 +105,9 @@ export type SettingsConfig = {
   refresh_all_accounts_interval_minute?: number | string | null;
   image_retention_days?: number | string;
   image_cleanup_interval_days?: number | string;
+  /** 定时清理周期单位：days（每 N 天固定时刻）/ minutes（每 N 分钟）。 */
+  image_cleanup_interval_unit?: "days" | "minutes" | string;
+  image_cleanup_interval_minutes?: number | string;
   image_cleanup_time?: string;
   image_poll_timeout_secs?: number | string;
   image_generation_retry_count?: number | string;

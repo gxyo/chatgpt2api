@@ -24,7 +24,11 @@ export function ConfigCard() {
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setRefreshAllAccountsIntervalMinute = useSettingsStore((state) => state.setRefreshAllAccountsIntervalMinute);
   const setImageCleanupIntervalDays = useSettingsStore((state) => state.setImageCleanupIntervalDays);
+  const setImageCleanupIntervalUnit = useSettingsStore((state) => state.setImageCleanupIntervalUnit);
+  const setImageCleanupIntervalMinutes = useSettingsStore((state) => state.setImageCleanupIntervalMinutes);
   const setImageCleanupTime = useSettingsStore((state) => state.setImageCleanupTime);
+  const cleanupUnit = config?.image_cleanup_interval_unit === "minutes" ? "minutes" : "days";
+  const cleanupByMinutes = cleanupUnit === "minutes";
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageGenerationRetryCount = useSettingsStore((state) => state.setImageGenerationRetryCount);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
@@ -156,8 +160,15 @@ export function ConfigCard() {
               定时清理周期
             </label>
             <Select
-              value={String(config?.image_cleanup_interval_days || 1)}
-              onValueChange={setImageCleanupIntervalDays}
+              value={cleanupByMinutes ? "minutes" : String(config?.image_cleanup_interval_days || 1)}
+              onValueChange={(value) => {
+                if (value === "minutes") {
+                  setImageCleanupIntervalUnit("minutes");
+                  return;
+                }
+                setImageCleanupIntervalUnit("days");
+                setImageCleanupIntervalDays(value);
+              }}
             >
               <SelectTrigger className="h-10 w-full rounded-xl border-neutral-200 bg-white">
                 <SelectValue placeholder="选择清理周期" />
@@ -167,9 +178,26 @@ export function ConfigCard() {
                 <SelectItem value="3">每三天</SelectItem>
                 <SelectItem value="5">每五天</SelectItem>
                 <SelectItem value="7">每七天</SelectItem>
+                <SelectItem value="minutes">按分钟</SelectItem>
               </SelectContent>
             </Select>
-            <p className="text-xs leading-5 text-neutral-500">按所选周期执行一次全部图片清理。</p>
+            <p className="text-xs leading-5 text-neutral-500">
+              按「每 N 天」时在下面的固定时刻清理；选「按分钟」时按分钟间隔清理，定时清理时间不生效。
+            </p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-neutral-700">定时清理间隔（分钟）</label>
+            <Input
+              value={String(config?.image_cleanup_interval_minutes ?? "60")}
+              onChange={(event) => setImageCleanupIntervalMinutes(event.target.value)}
+              disabled={!cleanupByMinutes}
+              inputMode="numeric"
+              placeholder="60"
+              className="h-10 rounded-xl border-neutral-200 bg-white disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
+            />
+            <p className="text-xs leading-5 text-neutral-500">
+              仅在清理周期选「按分钟」时可填，范围 1 - 10080。保存后从当前时间起，每隔该分钟数清理一次。
+            </p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-neutral-700">定时清理时间</label>
@@ -178,9 +206,14 @@ export function ConfigCard() {
               step={60}
               value={String(config?.image_cleanup_time || "03:00")}
               onChange={(event) => setImageCleanupTime(event.target.value)}
-              className="h-10 rounded-xl border-neutral-200 bg-white"
+              disabled={cleanupByMinutes}
+              className="h-10 rounded-xl border-neutral-200 bg-white disabled:cursor-not-allowed disabled:bg-neutral-50 disabled:text-neutral-400"
             />
-            <p className="text-xs leading-5 text-neutral-500">按北京时间（UTC+8）执行，删除执行日期及之前的全部图片。</p>
+            <p className="text-xs leading-5 text-neutral-500">
+              {cleanupByMinutes
+                ? "按分钟间隔清理时此项不生效。"
+                : "按北京时间（UTC+8）执行，删除执行日期及之前的全部图片。"}
+            </p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-neutral-700">图片轮询超时</label>

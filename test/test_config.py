@@ -147,6 +147,32 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(config["image_cleanup_interval_days"], 1)
             self.assertEqual(config["image_cleanup_time"], "03:00")
 
+    def test_image_cleanup_minutes_schedule_is_normalized_when_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "config.json"
+            config_file.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = self.config_module.ConfigStore(config_file)
+
+            config = store.update({
+                "image_cleanup_interval_unit": "minutes",
+                "image_cleanup_interval_minutes": "15",
+            })
+
+            # 按分钟模式不依赖「每 N 天 + 固定时刻」，只认分钟数字。
+            self.assertTrue(store.image_cleanup_schedule_configured)
+            self.assertEqual(config["image_cleanup_interval_unit"], "minutes")
+            self.assertEqual(config["image_cleanup_interval_minutes"], 15)
+
+            self.assertEqual(store.update({"image_cleanup_interval_minutes": 0})["image_cleanup_interval_minutes"], 1)
+            self.assertEqual(
+                store.update({"image_cleanup_interval_minutes": 10 ** 9})["image_cleanup_interval_minutes"],
+                10080,
+            )
+            self.assertEqual(
+                store.update({"image_cleanup_interval_unit": "hourly"})["image_cleanup_interval_unit"],
+                "days",
+            )
+
     def test_upstream_model_settings_have_current_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "config.json"

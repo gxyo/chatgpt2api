@@ -75,6 +75,49 @@ class ImageCleanupTests(unittest.TestCase):
         self.assertEqual(state["schedule"], "3:09:30@+08:00")
         self.assertEqual(state["next_run_at"], "2026-09-28T09:30:00")
 
+    def test_scheduled_cleanup_in_minutes_mode_starts_n_minutes_after_saving(self):
+        cleanup_config = mock.Mock()
+        cleanup_config.images_dir = self.images_dir
+        cleanup_config.image_cleanup_schedule_configured = True
+        cleanup_config.image_cleanup_interval_unit = "minutes"
+        cleanup_config.image_cleanup_interval_minutes = 15
+        now = datetime(2026, 9, 28, 8, 15)
+
+        with mock.patch.object(image_service, "config", cleanup_config), mock.patch.object(image_service, "delete_images") as delete_mock:
+            result = image_service.run_scheduled_image_cleanup_if_due(now)
+
+        state = json.loads((self.root / "image_cleanup_state.json").read_text(encoding="utf-8"))
+        self.assertIsNone(result)
+        delete_mock.assert_not_called()
+        self.assertEqual(state["schedule"], "minutes:15@+08:00")
+        self.assertEqual(state["next_run_at"], "2026-09-28T08:30:00")
+
+    def test_scheduled_cleanup_in_minutes_mode_repeats_every_n_minutes(self):
+        cleanup_config = mock.Mock()
+        cleanup_config.images_dir = self.images_dir
+        cleanup_config.image_cleanup_schedule_configured = True
+        cleanup_config.image_cleanup_interval_unit = "minutes"
+        cleanup_config.image_cleanup_interval_minutes = 15
+        state_file = self.root / "image_cleanup_state.json"
+        state_file.write_text(json.dumps({
+            "schedule": "minutes:15@+08:00",
+            "next_run_at": "2026-09-28T08:30:00",
+        }), encoding="utf-8")
+
+        with mock.patch.object(image_service, "config", cleanup_config), mock.patch.object(
+            image_service,
+            "delete_images",
+            return_value={"removed": 2},
+        ) as delete_mock:
+            result = image_service.run_scheduled_image_cleanup_if_due(datetime(2026, 9, 28, 9, 10))
+
+        delete_mock.assert_called_once_with(end_date="2026-09-28", all_matching=True)
+        self.assertEqual(result, {"removed": 2})
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        # 错过的那几次不补跑，直接排到下一个未来的整点间隔。
+        self.assertEqual(state["last_run_at"], "2026-09-28T09:10:00")
+        self.assertEqual(state["next_run_at"], "2026-09-28T09:15:00")
+
     def test_scheduled_cleanup_deletes_all_images_through_the_run_date(self):
         cleanup_config = mock.Mock()
         cleanup_config.images_dir = self.images_dir
