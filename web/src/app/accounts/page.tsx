@@ -711,15 +711,6 @@ function AccountsPageContent() {
           <Button
             variant="outline"
             className="h-10 rounded-xl border-neutral-200 bg-white/80 px-4 text-neutral-700 hover:bg-white"
-            onClick={() => void loadAccounts()}
-            disabled={isLoading || isRefreshing || isDeleting}
-          >
-            <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
-            重新加载列表
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-neutral-200 bg-white/80 px-4 text-neutral-700 hover:bg-white"
             onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
             disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
           >
