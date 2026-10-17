@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import type { ImageStatsBreakdown } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -60,9 +62,13 @@ function toneOf(mode: string) {
  * 下面一张表给准确数字。表本身就是环形图的 table view，颜色不是唯一信息通道。
  */
 export function ImageModeChart({ modes }: ImageModeChartProps) {
+  // 鼠标悬停的扇区：圈出来的那一段往外凸一点，圆心文字换成它的名称、张数和占比。
+  const [hovered, setHovered] = useState<string | null>(null);
   const total = modes.reduce((sum, item) => sum + item.images, 0);
   // 圆环只画有成功图片的方式：0 张的方式在图例和表里保留，但不占一个零宽扇区。
   const segments = modes.filter((item) => item.images > 0);
+  const hoveredSegment = segments.find((item) => item.mode === hovered) ?? null;
+  const activeMode = hoveredSegment?.mode ?? null;
 
   if (total === 0) {
     return <div className="py-10 text-center text-sm text-muted-foreground">该时间段没有成功生成的图片</div>;
@@ -99,6 +105,11 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
             />
             {arcs.map(({ item, length, offset }) => {
               const tone = toneOf(item.mode);
+              const active = activeMode === item.mode;
+              const muted = activeMode !== null && !active;
+              // 扇区中点角度（用户坐标系，0 = 3 点钟方向）；悬停时沿这个方向往外推。
+              const midAngle = ((offset + length / 2) / DONUT_CIRCUMFERENCE) * Math.PI * 2;
+              const pop = active ? 5 : 0;
               return (
                 <circle
                   key={item.mode}
@@ -106,11 +117,23 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
                   cy={DONUT_SIZE / 2}
                   r={DONUT_RADIUS}
                   fill="none"
-                  strokeWidth={DONUT_STROKE}
                   strokeDasharray={`${Math.max(length - arcGap, 0)} ${DONUT_CIRCUMFERENCE}`}
                   strokeDashoffset={-offset}
-                  strokeOpacity={tone.opacity}
-                  className={tone.stroke}
+                  strokeOpacity={muted ? tone.opacity * 0.45 : tone.opacity}
+                  className={cn(tone.stroke, "cursor-pointer focus:outline-none")}
+                  style={{
+                    strokeWidth: active ? DONUT_STROKE + 5 : DONUT_STROKE,
+                    transform: `translate(${Math.cos(midAngle) * pop}px, ${Math.sin(midAngle) * pop}px)`,
+                    transition:
+                      "stroke-width 180ms ease-out, stroke-opacity 180ms ease-out, transform 180ms ease-out",
+                  }}
+                  onMouseEnter={() => setHovered(item.mode)}
+                  onMouseLeave={() => setHovered(null)}
+                  onFocus={() => setHovered(item.mode)}
+                  onBlur={() => setHovered(null)}
+                  tabIndex={0}
+                  role="img"
+                  aria-label={`${item.label}：${formatCount(item.images)} 张，占比 ${formatRate(item.images / total)}`}
                 >
                   <title>
                     {item.label}：{formatCount(item.images)} 张 · 占比 {formatRate(item.images / total)}
@@ -119,13 +142,30 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
               );
             })}
           </svg>
-          {/* 圆心放总数，环形图一眼能读到「一共多少」。 */}
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
-            <span className="text-[11px] text-muted-foreground">成功图片</span>
-            <span className="mt-0.5 text-2xl leading-none font-semibold tracking-tight tabular-nums text-foreground">
-              {formatCount(total)}
-            </span>
-            <span className="mt-1 text-[11px] text-muted-foreground">张</span>
+          {/* 圆心：默认是总数；悬停某段时换成那一段的名称、张数和占比。 */}
+          <div
+            className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-6 text-center"
+            aria-live="polite"
+          >
+            {hoveredSegment ? (
+              <>
+                <span className="text-[11px] text-muted-foreground">{hoveredSegment.label}</span>
+                <span className="mt-0.5 text-2xl leading-none font-semibold tracking-tight tabular-nums text-foreground">
+                  {formatCount(hoveredSegment.images)}
+                </span>
+                <span className="mt-1 text-[11px] text-muted-foreground">
+                  张 · 占比 {formatRate(hoveredSegment.images / total)}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="text-[11px] text-muted-foreground">成功图片</span>
+                <span className="mt-0.5 text-2xl leading-none font-semibold tracking-tight tabular-nums text-foreground">
+                  {formatCount(total)}
+                </span>
+                <span className="mt-1 text-[11px] text-muted-foreground">张</span>
+              </>
+            )}
           </div>
         </div>
 
@@ -136,7 +176,13 @@ export function ImageModeChart({ modes }: ImageModeChartProps) {
             return (
               <div
                 key={item.mode}
-                className="flex items-center justify-between gap-3 rounded-xl border border-border bg-muted/20 px-4 py-2.5"
+                onMouseEnter={() => setHovered(item.mode)}
+                onMouseLeave={() => setHovered(null)}
+                className={cn(
+                  "flex items-center justify-between gap-3 rounded-xl border px-4 py-2.5 transition-colors",
+                  hovered === item.mode ? "border-brand/35 bg-brand-soft/70" : "border-border bg-muted/20",
+                  item.images === 0 && "opacity-60",
+                )}
               >
                 <span className="flex min-w-0 items-center gap-2 text-[13px] font-medium text-foreground">
                   <span className={cn("size-2.5 shrink-0 rounded-full", toneOf(item.mode).bar)} />

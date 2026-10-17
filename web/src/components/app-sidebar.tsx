@@ -237,6 +237,32 @@ function LogoutButton({ onLogout }: { onLogout: () => void }) {
   );
 }
 
+/**
+ * 身份未就绪时的侧栏：静态导出的 HTML 里就把整套导航画出来（先按管理员菜单），
+ * 整页加载 / 硬跳转时菜单不会先空着再「长」出来，视觉上就不再刷一下。
+ * 水合后拿到真实身份，管理员菜单原样保留，用户角色再换成单入口。
+ */
+function SidebarShell({ pathname }: { pathname: string }) {
+  return (
+    <aside className={SIDEBAR_SURFACE_CLASS}>
+      <SidebarBrandRow />
+      <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-1">
+        <NavList groups={adminNavGroups} pathname={pathname} />
+      </div>
+      <div className="shrink-0 border-t border-border p-3">
+        {/* 与 UserBadge 同高，身份到达后底部区域不跳位 */}
+        <div className="h-[50px] rounded-xl border border-border/70 bg-white/[0.04]" />
+        <div className="mt-2 flex items-center justify-between gap-1 px-1">
+          <div className="flex items-center gap-1">
+            <ThemeToggle />
+            <VersionReleaseDialog />
+          </div>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 /** 桌面端左侧导航栏：深色悬浮面板，固定在一角，内容区靠左内边距让位。 */
 export function AppSidebar() {
   const pathname = usePathname();
@@ -246,14 +272,8 @@ export function AppSidebar() {
     return null;
   }
 
-  // 身份还没就绪时先渲染深色空壳：静态导出的 HTML 里就有这块面板，
-  // 硬刷新时首帧不会是「一片空白」，水合后再把导航项补进去。
   if (session === undefined) {
-    return (
-      <aside className={SIDEBAR_SURFACE_CLASS}>
-        <SidebarBrandRow />
-      </aside>
-    );
+    return <SidebarShell pathname={pathname} />;
   }
 
   if (!session) {
@@ -288,11 +308,13 @@ export function MobileNavBar() {
   const { session, handleLogout } = useNavSession(pathname);
   const [open, setOpen] = useState(false);
 
-  if (pathname === "/login" || session === undefined || !session) {
+  if (pathname === "/login" || session === null) {
     return null;
   }
 
-  const navGroups = session.role === "admin" ? adminNavGroups : userNavGroups;
+  // session === undefined（身份未就绪）时也先把顶栏和抽屉画出来，
+  // 整页加载时内容区不会先顶上去了再被顶栏推下来。
+  const navGroups = session && session.role !== "admin" ? userNavGroups : adminNavGroups;
 
   return (
     <div className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-2 border-b border-border bg-card/85 px-3 backdrop-blur lg:hidden">
@@ -312,13 +334,17 @@ export function MobileNavBar() {
             <NavList groups={navGroups} pathname={pathname} onNavigate={() => setOpen(false)} />
           </div>
           <div className="shrink-0 border-t border-border p-3">
-            <UserBadge session={session} />
+            {session ? (
+              <UserBadge session={session} />
+            ) : (
+              <div className="h-[50px] rounded-xl border border-border/70 bg-white/[0.04]" />
+            )}
             <div className="mt-1 flex items-center justify-between gap-1 px-1">
               <div className="flex items-center gap-1">
                 <ThemeToggle />
                 <VersionReleaseDialog />
               </div>
-              <LogoutButton onLogout={() => void handleLogout()} />
+              {session ? <LogoutButton onLogout={() => void handleLogout()} /> : null}
             </div>
           </div>
         </SheetContent>
