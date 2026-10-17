@@ -275,13 +275,18 @@ export async function fetchModels() {
 /** 上游模型列表的原始响应（管理端调试用，未经本项目本地合并）。 */
 export type UpstreamModelListResponse = {
   channel: "anonymous" | "authenticated";
+  account_email?: string;
   endpoint: string;
   status_code: number;
   payload: unknown;
 };
 
-export async function fetchUpstreamModels() {
-  return httpRequest<UpstreamModelListResponse>("/api/accounts/upstream-models");
+/** accessToken 为空走匿名通道；传入号池账号的 token 则走登录通道。 */
+export async function fetchUpstreamModels(accessToken = "") {
+  return httpRequest<UpstreamModelListResponse>("/api/accounts/upstream-models", {
+    method: "POST",
+    body: { access_token: accessToken },
+  });
 }
 
 export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {

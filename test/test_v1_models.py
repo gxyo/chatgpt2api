@@ -36,6 +36,17 @@ class UpstreamModelListTests(unittest.TestCase):
         self.assertEqual(fast_request.call_args.args[0], "get")
         self.assertEqual(fast_request.call_args.args[1], "/backend-anon/models?iim=false&is_gizmo=false")
 
+    def test_list_upstream_models_passes_account_token(self):
+        with mock.patch.object(openai_v1_models, "OpenAIBackendAPI") as backend_cls:
+            backend_cls.return_value.list_models_raw.return_value = {
+                "channel": "authenticated",
+                "account_email": "user@example.test",
+            }
+            result = openai_v1_models.list_upstream_models("token-1")
+
+        backend_cls.assert_called_once_with(access_token="token-1")
+        self.assertEqual(result["channel"], "authenticated")
+
     def test_list_upstream_models_service_does_not_merge_local_models(self):
         raw = {
             "channel": "anonymous",

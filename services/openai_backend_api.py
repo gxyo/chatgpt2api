@@ -3378,6 +3378,7 @@ class OpenAIBackendAPI:
         )
         return {
             "channel": channel,
+            "account_email": str(self.account.get("email") or "") if self.access_token else "",
             "endpoint": self.base_url + path,
             "status_code": response.status_code,
             "payload": response.json(),

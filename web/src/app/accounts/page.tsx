@@ -196,6 +196,9 @@ function AccountsPageContent() {
   const [isFetchingModelList, setIsFetchingModelList] = useState(false);
   const [modelsRaw, setModelsRaw] = useState<string | null>(null);
   const [modelsError, setModelsError] = useState<string | null>(null);
+  // "anonymous" 或号池账号在 accounts 里的下标：决定探测走匿名还是该账号的登录通道。
+  const [probeAccountKey, setProbeAccountKey] = useState("anonymous");
+  const modelProbeSeqRef = useRef(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -260,24 +263,44 @@ function AccountsPageContent() {
     }
   };
 
-  const loadModelListSnapshot = async () => {
+  const loadModelListSnapshot = async (accessToken = "") => {
+    // 快速切换通道时只认最后一次请求，避免旧响应覆盖新选择。
+    const seq = ++modelProbeSeqRef.current;
     setIsFetchingModelList(true);
     setModelsError(null);
     try {
-      const data = await fetchUpstreamModels();
+      const data = await fetchUpstreamModels(accessToken);
+      if (seq !== modelProbeSeqRef.current) {
+        return;
+      }
       // 不裁剪字段：弹窗要展示上游原样返回的内容。
       setModelsRaw(JSON.stringify(data, null, 2));
     } catch (error) {
+      if (seq !== modelProbeSeqRef.current) {
+        return;
+      }
       setModelsRaw(null);
       setModelsError(error instanceof Error ? error.message : "获取模型列表失败");
     } finally {
-      setIsFetchingModelList(false);
+      if (seq === modelProbeSeqRef.current) {
+        setIsFetchingModelList(false);
+      }
     }
   };
 
+  const probeAccessToken = (key: string) =>
+    key === "anonymous" ? "" : (accounts[Number(key)]?.access_token ?? "");
+
   const openModelListDialog = () => {
+    // 号池在弹窗关闭期间可能变化：下标失效时回落到匿名通道。
+    const key = probeAccountKey === "anonymous" || accounts[Number(probeAccountKey)]
+      ? probeAccountKey
+      : "anonymous";
+    if (key !== probeAccountKey) {
+      setProbeAccountKey(key);
+    }
     setIsModelsDialogOpen(true);
-    void loadModelListSnapshot();
+    void loadModelListSnapshot(probeAccessToken(key));
   };
 
   const copyModelsRaw = async () => {
@@ -294,13 +317,19 @@ function AccountsPageContent() {
 
   // 上游 payload.models 才是有效模型清单：slug 去空、去重，title 只作说明。
   const upstreamModelView = useMemo(() => {
-    const empty = { channel: "", endpoint: "", models: [] as Array<{ slug: string; title: string }> };
+    const empty = {
+      channel: "",
+      accountEmail: "",
+      endpoint: "",
+      models: [] as Array<{ slug: string; title: string }>,
+    };
     if (!modelsRaw) {
       return empty;
     }
     try {
       const parsed = JSON.parse(modelsRaw) as {
         channel?: string;
+        account_email?: string;
         endpoint?: string;
         payload?: { models?: unknown; data?: unknown };
       };
@@ -330,6 +359,7 @@ function AccountsPageContent() {
       }
       return {
         channel: parsed.channel === "authenticated" ? "登录通道" : "匿名通道",
+        accountEmail: typeof parsed.account_email === "string" ? parsed.account_email : "",
         endpoint: parsed.endpoint || "",
         models,
       };
@@ -920,9 +950,32 @@ function AccountsPageContent() {
             <DialogDescription className="text-sm leading-6">
               直连 ChatGPT 上游获取模型，返回内容未经过本项目{" "}
               <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">GET /v1/models</code>
-              的本地合并。
+              的本地合并。默认走匿名通道，选择号池账号可查看该账号登录后的模型列表。
             </DialogDescription>
           </DialogHeader>
+          <div className="flex items-center gap-3">
+            <span className="shrink-0 text-xs text-neutral-500">探测通道</span>
+            <Select
+              value={probeAccountKey}
+              onValueChange={(value) => {
+                setProbeAccountKey(value);
+                void loadModelListSnapshot(probeAccessToken(value));
+              }}
+              disabled={isFetchingModelList}
+            >
+              <SelectTrigger className="h-9 min-w-0 flex-1 rounded-xl">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="anonymous">匿名通道（/backend-anon/models）</SelectItem>
+                {accounts.map((account, index) => (
+                  <SelectItem key={account.access_token} value={String(index)}>
+                    {account.email || maskToken(account.access_token)}（{displayAccountType(account)}）
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           {isFetchingModelList ? (
             <div className="flex items-center justify-center gap-2 py-12 text-sm text-neutral-500">
               <LoaderCircle className="size-4 animate-spin" />
@@ -936,7 +989,9 @@ function AccountsPageContent() {
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2 text-xs text-neutral-500">
                 <span className="min-w-0 truncate" title={upstreamModelView.endpoint}>
-                  {upstreamModelView.channel ? `${upstreamModelView.channel} · ` : ""}
+                  {upstreamModelView.channel
+                    ? `${upstreamModelView.channel}${upstreamModelView.accountEmail ? `（${upstreamModelView.accountEmail}）` : ""} · `
+                    : ""}
                   {upstreamModelView.endpoint || "上游"} · 共 {upstreamModelView.models.length} 个模型
                 </span>
                 <Button variant="outline" size="sm" onClick={() => void copyModelsRaw()}>

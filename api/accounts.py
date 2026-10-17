@@ -71,6 +71,11 @@ class OAuthLoginFinishRequest(BaseModel):
     callback: str = ""
 
 
+class UpstreamModelsRequest(BaseModel):
+    """调试用：不传 token 走匿名通道，传号池里的 token 走登录通道。"""
+    access_token: str = ""
+
+
 def _account_payload_token(item: dict[str, Any]) -> str:
     return str(item.get("access_token") or item.get("accessToken") or "").strip()
 
@@ -163,12 +168,16 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         return {"items": account_service.list_accounts()}
 
-    @router.get("/api/accounts/upstream-models")
-    async def get_upstream_models(authorization: str | None = Header(default=None)):
+    @router.post("/api/accounts/upstream-models")
+    async def get_upstream_models(body: UpstreamModelsRequest,
+                                  authorization: str | None = Header(default=None)):
         """调试用：直连 ChatGPT 上游取模型列表，不经过 /v1/models 的本地合并。"""
         require_admin(authorization)
+        access_token = str(body.access_token or "").strip()
+        if access_token and not account_service.get_account(access_token):
+            raise HTTPException(status_code=404, detail={"error": "该账号不在号池中"})
         try:
-            return await run_in_threadpool(openai_v1_models.list_upstream_models)
+            return await run_in_threadpool(openai_v1_models.list_upstream_models, access_token)
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": public_error_message(exc)}) from exc
 
