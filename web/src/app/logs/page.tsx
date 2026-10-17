@@ -1,13 +1,12 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { ArrowRight, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, Route, Save, Search, Trash2 } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
-import { ImageThumbnail, getImageThumbnailUrl } from "@/components/image-thumbnail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -177,11 +176,6 @@ function cleanupCutoffDay(days: number) {
   return shiftDate(getBeijingToday(), -(Math.max(1, days) - 1));
 }
 
-function getDetailText(item: SystemLog, key: string) {
-  const value = item.detail?.[key];
-  return typeof value === "string" || typeof value === "number" ? String(value) : "-";
-}
-
 function formatDuration(item: SystemLog) {
   const value = item.detail?.duration_ms;
   return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
@@ -190,6 +184,45 @@ function formatDuration(item: SystemLog) {
 function getUrls(item: SystemLog | null) {
   const urls = item?.detail?.urls;
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
+}
+
+/**
+ * 本次生图是否走了账号链路重试（换号重来）。
+ * 后端只在真的换过号时才写 account_trail / attempts_summary，两个字段有任意一个即视为重试。
+ */
+function isAccountRetry(item: SystemLog) {
+  const trail = item.detail?.account_trail;
+  const attempts = item.detail?.attempts_summary;
+  return (
+    (typeof trail === "string" && trail.trim() !== "") ||
+    (typeof attempts === "string" && attempts.trim() !== "")
+  );
+}
+
+/** 重试列的小卡片：是=琥珀色，否=中性灰，避免纯文字在表格里不好扫。 */
+function RetryCard({ retried }: { retried: boolean }) {
+  return (
+    <span
+      className={`inline-flex w-14 items-center justify-center gap-1.5 rounded-lg border px-2 py-1 text-xs font-medium shadow-sm ${
+        retried
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-neutral-200 bg-neutral-50 text-neutral-500"
+      }`}
+    >
+      {retried ? <RotateCcw className="size-3.5" /> : <span className="size-1.5 rounded-full bg-neutral-400" />}
+      {retried ? "是" : "否"}
+    </span>
+  );
+}
+
+/** 数量列的小卡片：本次生图实际返回的图片张数。 */
+function ImageCountCard({ count }: { count: number }) {
+  return (
+    <span className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-neutral-200 bg-neutral-50 px-2 py-1 text-xs font-medium text-neutral-600 tabular-nums shadow-sm">
+      <ImageIcon className="size-3.5 text-neutral-400" />
+      {count} 张
+    </span>
+  );
 }
 
 type UpstreamErrorFrame = {
@@ -399,12 +432,6 @@ function LogsContent() {
     setDetailOpen(true);
   };
 
-  const openLogImage = (item: SystemLog, index: number) => {
-    setDetailLog(item);
-    setLightboxIndex(index);
-    setLightboxOpen(true);
-  };
-
   const toggleIds = (ids: string[], checked: boolean) => {
     setSelectedIds((current) => checked ? Array.from(new Set([...current, ...ids])) : current.filter((id) => !ids.includes(id)));
   };
@@ -602,10 +629,10 @@ function LogsContent() {
                   <TableHead className="w-12"></TableHead>
                   <TableHead>时间</TableHead>
                   <TableHead>类型</TableHead>
-                  {isCallLog ? <TableHead>令牌名称</TableHead> : null}
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
-                  {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
+                  {isCallLog ? <TableHead>重试</TableHead> : null}
+                  {isCallLog ? <TableHead>数量</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-40">操作</TableHead>
                 </TableRow>
@@ -627,7 +654,6 @@ function LogsContent() {
                       </TableCell>
                       <TableCell className="whitespace-nowrap">{item.time}</TableCell>
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
-                      {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
                       {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
@@ -638,27 +664,12 @@ function LogsContent() {
                       ) : null}
                       {isCallLog ? (
                         <TableCell>
-                          {urls.length ? (
-                            <div className="flex items-center gap-1.5">
-                              {urls.slice(0, 3).map((url, imageIndex) => (
-                                <button
-                                  key={`${url}-${imageIndex}`}
-                                  type="button"
-                                  className="relative size-9 overflow-hidden rounded-lg border border-neutral-200 bg-neutral-100"
-                                  onClick={() => openLogImage(item, imageIndex)}
-                                  title="预览图片"
-                                >
-                                  <ImageThumbnail src={url} thumbnailSrc={getImageThumbnailUrl(url)} className="h-full w-full" />
-                                </button>
-                              ))}
-                              {urls.length > 3 ? <span className="text-xs text-neutral-400">+{urls.length - 3}</span> : null}
-                            </div>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-xs text-neutral-400">
-                              <ImageIcon className="size-3.5" />
-                              -
-                            </span>
-                          )}
+                          <RetryCard retried={isAccountRetry(item)} />
+                        </TableCell>
+                      ) : null}
+                      {isCallLog ? (
+                        <TableCell>
+                          <ImageCountCard count={urls.length} />
                         </TableCell>
                       ) : null}
                       <TableCell className="max-w-[420px] truncate text-neutral-500">{item.summary || "-"}</TableCell>
