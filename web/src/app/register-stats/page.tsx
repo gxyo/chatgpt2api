@@ -230,7 +230,7 @@ function RegisterStatsContent() {
         />
         <StatTile
           label="成功率"
-          value={cardsLoading ? "—" : totals.requests ? `${totals.success_rate.toFixed(1)}%` : "-"}
+          value={cardsLoading ? "—" : totals.requests ? `${(totals.success_rate * 100).toFixed(1)}%` : "-"}
           caption={`${presetLabel} · 按总数加权`}
           tone={RATE_DOT}
         />

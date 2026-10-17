@@ -687,6 +687,7 @@ export type RegisterStatsResponse = {
     requests: number;
     success: number;
     failed: number;
+    /** 0..1 的比例，不是百分数；展示时要 ×100。 */
     success_rate: number;
   };
   series: RegisterStatsPoint[];
