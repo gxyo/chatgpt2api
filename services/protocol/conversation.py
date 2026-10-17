@@ -82,6 +82,9 @@ MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS = 3
 # 轮询超时后自动换号重试的次数。设置页的 image_generation_retry_count 是在这之后
 # 再追加的「生成失败重试」，两者独立。
 MAX_POLL_TIMEOUT_RETRIES = 4
+# 模型回正文而非出图时自动换号重试的次数。文本回复往往在预算快耗尽时才对上游拿完流，
+# 每次重试都会续一份预算，任务线程的等待上限（image_task_service）也要按它放宽。
+MAX_TEXT_REPLY_RETRIES = 3
 TRANSIENT_TEXT_RESCUE_WINDOW_SECS = 12.0
 TRANSIENT_IMAGE_RESCUE_WINDOW_SECS = 20.0
 TRANSIENT_RESCUE_SLEEP_SECS = 2.0
@@ -1779,8 +1782,6 @@ def _generate_single_image_attempts(
         trace_id: str,
         diagnostics: dict[str, Any],
 ) -> list[ImageOutput]:
-    # 模型返回文本而非图片的最大重试次数
-    MAX_TEXT_REPLY_RETRIES = 3
     # TLS 连接错误最大重试次数
     MAX_TLS_RETRIES = 3
     # 连接超时错误最大重试次数（同账号短等待重试）
@@ -1879,6 +1880,20 @@ def _generate_single_image_attempts(
             diagnostics["request_remaining_secs"] = round(remaining, 1) if remaining is not None else None
             diagnostics["request_deadline_expired"] = remaining == 0.0
 
+    def renew_attempt_deadline() -> None:
+        """给下一次换号尝试续一份与原请求等长的新预算。
+
+        轮询超时、文本回复这类失败通常正好把预算吃干；不续的话重试在循环顶部
+        就被 deadline 拦下，等于没重试。
+        """
+        nonlocal attempt_deadline
+        if attempt_deadline is None or request_budget_secs is None:
+            return
+        renewed = time.monotonic() + request_budget_secs
+        if renewed > attempt_deadline:
+            attempt_deadline = renewed
+            diagnostics["retry_deadline_extended_secs"] = round(request_budget_secs, 1)
+
     def schedule_generation_retry(failure: ImageGenerationError) -> bool:
         """按设置里的重试次数决定是否换号重来。返回 True 时调用方应 `continue`。
 
@@ -1888,17 +1903,13 @@ def _generate_single_image_attempts(
         每次重试都续一份与原请求等长的新预算：轮询超时往往正好把原始预算耗尽，
         如果还按旧 deadline 判断，配置的重试次数对这类失败永远不会生效。
         """
-        nonlocal generation_retry_count, attempt_deadline
+        nonlocal generation_retry_count
         if generation_retry_limit <= 0 or generation_retry_count >= generation_retry_limit:
             return False
         if not is_retryable_image_failure(str(failure)):
             return False
         generation_retry_count += 1
-        if attempt_deadline is not None and request_budget_secs is not None:
-            renewed = time.monotonic() + request_budget_secs
-            if renewed > attempt_deadline:
-                attempt_deadline = renewed
-                diagnostics["retry_deadline_extended_secs"] = round(request_budget_secs, 1)
+        renew_attempt_deadline()
         logger.warning({
             "event": "image_generation_failure_retry",
             "trace_id": trace_id,
@@ -1989,6 +2000,11 @@ def _generate_single_image_attempts(
             ) from exc
 
         emitted_for_token = False
+        # 是否已经产出过最终输出（result / 非错误 message）。progress 只是在
+        # 消费 SSE 时缓冲下来的增量，失败时整段丢弃、从未发给客户端；不能拿它
+        # 拦住换号重试，否则真实环境里几乎每条流都会先来一串 progress，
+        # 文本回复重试永远走不到。
+        final_output_emitted = False
         returned_message = False
         returned_result = False
         account = account_service.get_account(token) or {}
@@ -2109,6 +2125,7 @@ def _generate_single_image_attempts(
                         break
                     raise failure
                 emitted_for_token = True
+                final_output_emitted = final_output_emitted or output.kind in ("message", "result")
                 returned_message = output.kind == "message"
                 returned_result = returned_result or output.kind == "result"
                 outputs.append(output)
@@ -2214,7 +2231,7 @@ def _generate_single_image_attempts(
                 # 被别的并发请求吃掉了。日志里单独标出来，别和其它 400 混在一起。
                 attempt_outcome = "mainline_rejected"
                 account_service.mark_image_mainline_rejected(token)
-            if not emitted_for_token and is_token_auth_error(exc, error_text):
+            if not final_output_emitted and is_token_auth_error(exc, error_text):
                 try:
                     refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 except Exception as refresh_exc:
@@ -2254,7 +2271,7 @@ def _generate_single_image_attempts(
                 getattr(exc, "code", "") == "upstream_text_reply"
                 or is_model_text_reply_instead_of_image(error_text)
             )
-            if is_text_reply_failure and not emitted_for_token:
+            if is_text_reply_failure and not final_output_emitted:
                 upstream_text = ""
                 exc_body = getattr(exc, "body", None)
                 if isinstance(exc_body, dict):
@@ -2268,6 +2285,10 @@ def _generate_single_image_attempts(
                     "conversation_id": getattr(exc, "conversation_id", ""),
                 }
                 if text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES:
+                    # 文本回复通常是上游把图生成完、最后才回正文（甚至只是取图失败，
+                    # 比如下载时 token 已被并发刷新挤掉），此时预算基本耗尽。不续预算
+                    # 的话重试在循环顶部就被 deadline 拦下，等于没重试。
+                    renew_attempt_deadline()
                     logger.warning({
                         "event": "image_model_text_reply_retry",
                         "trace_id": trace_id,
@@ -2349,7 +2370,7 @@ def _generate_single_image_attempts(
                 **account_service.image_handshake_diagnostics(token),
             })
             logger.warning({"event": "image_stream_fail", "error": str(exc), **diagnostics})
-            if not emitted_for_token and is_token_auth_error(exc, last_error):
+            if not final_output_emitted and is_token_auth_error(exc, last_error):
                 try:
                     refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 except Exception as refresh_exc:

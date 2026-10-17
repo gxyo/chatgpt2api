@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -244,6 +245,54 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(failure.status_code, 502)
         self.assertNotIn(prose, str(failure))
         self.assertEqual((failure.body or {}).get("upstream_text"), prose)
+
+    def test_text_reply_retries_after_progress_events(self):
+        prose = "已将圣诞镂空桌布融入美式客厅。"
+
+        def stream_fn(backend, request, index=1, total=1):
+            # 真实上游流在最终正文之前会先吐一串 conversation.delta/event（progress）。
+            # progress 只是缓冲的增量，失败时整段丢弃，不能拿它拦住换号重试。
+            yield ImageOutput(
+                kind="progress", model=request.model, index=index, total=total,
+                text="", upstream_event_type="conversation.delta",
+            )
+            if backend.access_token == "token-a":
+                yield ImageOutput(
+                    kind="message", model=request.model, index=index, total=total,
+                    text=prose, text_reply=True, conversation_id="conv-text",
+                )
+                return
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        outputs, accounts = self._run(["token-a", "token-b"], stream_fn, 0)
+
+        self.assertEqual(outputs[-1].kind, "result")
+        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+
+    def test_text_reply_retry_renews_request_budget(self):
+        seen_deadlines = []
+
+        def stream_fn(backend, request, index=1, total=1):
+            seen_deadlines.append(request.deadline)
+            if backend.access_token == "token-a":
+                yield ImageOutput(
+                    kind="message", model=request.model, index=index, total=total,
+                    text="已生成。", text_reply=True, conversation_id="conv-text",
+                )
+                return
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        patcher, _ = self._patches(["token-a", "token-b"], stream_fn, 0)
+        deadline = time.monotonic() + 0.5
+        with patcher:
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True, deadline=deadline,
+            )))
+
+        # 文本回复通常出现在预算快耗尽时，不续预算重试会在循环顶部被 deadline 拦下。
+        self.assertEqual(outputs[-1].kind, "result")
+        self.assertEqual(len(seen_deadlines), 2)
+        self.assertGreater(seen_deadlines[1], deadline)
 
     def test_retry_switches_account_on_skipped_mainline(self):
         def stream_fn(backend, request, index=1, total=1):

@@ -25,6 +25,7 @@ from services.log_service import (
     merge_extra_detail,
 )
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from services.protocol.conversation import MAX_TEXT_REPLY_RETRIES
 from utils.beijing_time import beijing_now_text, beijing_text_from_timestamp
 from utils.helper import describe_exception, sanitize_image_error_text
 
@@ -351,11 +352,15 @@ class ImageTaskService:
 
     def _timeout_for_payload(self, payload: dict[str, Any]) -> float:
         """任务线程的等待上限：基础轮询预算 + 每次换号重试的预算 + 超分时间。"""
-        timeout_secs = _positive_float(payload.get("timeout_secs"), self._timeout_secs())
+        base_timeout_secs = _positive_float(payload.get("timeout_secs"), self._timeout_secs())
+        timeout_secs = base_timeout_secs
         # 每次「生成失败重试」都会在 handler 里续一份等长的新预算，外层等待时间
         # 不跟着放宽的话，任务线程会先判超时，重试产生的图被白白丢掉。
         retry_count = max(0, int(getattr(config, "image_generation_retry_count", 0) or 0))
-        timeout_secs += timeout_secs * retry_count
+        timeout_secs += base_timeout_secs * retry_count
+        # 文本回复的自动换号重试（最多 MAX_TEXT_REPLY_RETRIES 次）同样会续预算，
+        # 它不受设置页的重试次数控制。
+        timeout_secs += base_timeout_secs * MAX_TEXT_REPLY_RETRIES
         # 请求了 2K/4K 且开了超分时，本地放大要额外时间（还要排队等串行锁）。
         upscale_target = parse_size_long_edge(payload.get("size"))
         if config.image_upscale_enabled and upscale_target and upscale_target > 1024:
