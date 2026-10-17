@@ -890,11 +890,12 @@ function LogsContent() {
           <DialogHeader className="shrink-0 border-b border-neutral-100 px-6 py-5">
             <DialogTitle>日志详情</DialogTitle>
           </DialogHeader>
-          <div className="flex-1 overflow-y-auto px-6 py-5">
-            <div className="space-y-5">
-              {/* 三列：左=请求字段，中=执行/尝试过程，右=图片。窄屏下依次堆叠。 */}
-              <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)_minmax(0,0.8fr)]">
-                <div className="space-y-4">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 px-6 py-5">
+            <div className="flex min-h-0 flex-1 flex-col gap-4">
+              {/* 三列：左=请求字段，中=执行/尝试过程，右=图片。窄屏下依次堆叠；
+                  lg 起每列各自滚动，长日志不会把弹窗撑成一条长页。 */}
+              <div className="grid flex-1 gap-5 overflow-y-auto lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)_minmax(0,0.8fr)] lg:grid-rows-[minmax(0,1fr)] lg:overflow-visible">
+                <div className="min-h-0 space-y-4 lg:overflow-y-auto lg:pr-2 lg:[scrollbar-width:thin]">
                   <div className="space-y-2">
                     <div className="text-sm font-medium text-neutral-700">请求信息</div>
                     <div className="grid grid-cols-1 gap-y-3 rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-600">
@@ -943,7 +944,7 @@ function LogsContent() {
                     </div>
                   ) : null}
                 </div>
-                <div className="space-y-4">
+                <div className="min-h-0 space-y-4 lg:overflow-y-auto lg:pr-2 lg:[scrollbar-width:thin]">
                   {attemptGroups.length ? (
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-neutral-700">
@@ -1058,7 +1059,7 @@ function LogsContent() {
                     </div>
                   ) : null}
                 </div>
-                <div className="space-y-2">
+                <div className="min-h-0 space-y-2 lg:overflow-y-auto lg:pr-2 lg:[scrollbar-width:thin]">
                   {detailUrls.length ? (
                     <>
                       <div className="flex items-center gap-2 text-sm font-medium text-neutral-700">
@@ -1070,13 +1071,14 @@ function LogsContent() {
                           <button
                             key={url}
                             type="button"
-                            className="aspect-square overflow-hidden rounded-xl border border-neutral-200 bg-neutral-100"
+                            className="flex w-full cursor-zoom-in items-center justify-center overflow-hidden rounded-xl border border-neutral-200 bg-neutral-100 p-2 transition-colors hover:border-neutral-300"
                             onClick={() => {
                               setLightboxIndex(index);
                               setLightboxOpen(true);
                             }}
                           >
-                            <img src={url} alt="" className="h-full w-full object-cover" />
+                            {/* 按原图比例完整显示，不裁切；竖图以高度封顶，横图以宽度封顶。 */}
+                            <img src={url} alt="" className="max-h-[480px] w-auto max-w-full rounded-lg object-contain" />
                           </button>
                         ))}
                       </div>
@@ -1085,7 +1087,7 @@ function LogsContent() {
                 </div>
               </div>
               {/* 原始 JSON 默认收起，排查时再展开。 */}
-              <div className="overflow-hidden rounded-xl border border-neutral-200 bg-neutral-50">
+              <div className="shrink-0 overflow-hidden rounded-xl border border-neutral-200 bg-neutral-50">
                 <button
                   type="button"
                   onClick={() => setShowDetailJson((value) => !value)}
@@ -1098,7 +1100,7 @@ function LogsContent() {
                   <span className="text-xs font-normal text-neutral-400">{showDetailJson ? "点击收起" : "点击展开"}</span>
                 </button>
                 {showDetailJson ? (
-                  <pre className="max-h-[60vh] overflow-auto border-t border-neutral-200 bg-white p-4 text-xs leading-6 text-neutral-700">
+                  <pre className="max-h-[42vh] overflow-auto border-t border-neutral-200 bg-white p-4 text-xs leading-6 text-neutral-700">
                     {JSON.stringify(detailLog?.detail || {}, null, 2)}
                   </pre>
                 ) : null}
