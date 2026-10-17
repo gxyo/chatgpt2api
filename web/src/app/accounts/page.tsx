@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps } from "react";
 import {
   Ban,
-  Braces,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -14,6 +13,7 @@ import {
   Download,
   FlaskConical,
   Link2,
+  List,
   LoaderCircle,
   LogIn,
   Pencil,
@@ -1048,6 +1048,12 @@ function AccountsPageContent() {
                   )}
                   <span className="font-mono">{probeResult.model}</span>
                   {probeResult.ok ? "可请求" : "请求失败"}
+                  <span className="font-normal opacity-70">
+                    ·{" "}
+                    {probeResult.channel === "authenticated"
+                      ? `登录通道${probeResult.account_email ? `（${probeResult.account_email}）` : ""}`
+                      : "匿名通道"}
+                  </span>
                 </div>
                 {probeResult.ok ? (
                   <div className="mt-1 text-emerald-600">
@@ -1155,7 +1161,7 @@ function AccountsPageContent() {
                 </span>
               </div>
               <Button variant="outline" size="sm" onClick={openModelListDialog}>
-                <Braces className="size-3.5" />
+                <List className="size-3.5" />
                 获取模型列表
               </Button>
             </div>

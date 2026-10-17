@@ -293,6 +293,7 @@ export async function fetchUpstreamModels(accessToken = "") {
 export type UpstreamModelProbeResponse = {
   model: string;
   channel?: "anonymous" | "authenticated";
+  account_email?: string;
   ok: boolean;
   model_slug?: string;
   conversation_id?: string;

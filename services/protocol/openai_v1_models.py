@@ -60,6 +60,7 @@ def probe_upstream_model(access_token: str, model: str = "") -> dict[str, Any]:
         return {
             "model": requested,
             "channel": "authenticated" if access_token else "anonymous",
+            "account_email": str((getattr(backend, "account", None) or {}).get("email") or "") if access_token else "",
             "ok": False,
             "error": public_error_message(exc),
             "elapsed_ms": int((time.monotonic() - started) * 1000),
@@ -69,6 +70,7 @@ def probe_upstream_model(access_token: str, model: str = "") -> dict[str, Any]:
     result = {
         "model": requested,
         "channel": "authenticated" if access_token else "anonymous",
+        "account_email": str((getattr(backend, "account", None) or {}).get("email") or "") if access_token else "",
         "ok": not error_text,
         "model_slug": model_slug,
         "conversation_id": conversation_id,
