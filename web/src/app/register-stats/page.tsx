@@ -52,18 +52,6 @@ async function loadDomainStats(): Promise<CloudflareDomainStat[]> {
   return payload.register.cloudflare_domain_stats ?? [];
 }
 
-function sumTotals(stats: CloudflareDomainStat[]) {
-  // 对完整数组求和（不要先按 configured 过滤）：被移除的域名也是历史的一部分。
-  const totals = stats.reduce(
-    (acc, item) => ({ success: acc.success + item.success, fail: acc.fail + item.fail }),
-    { success: 0, fail: 0 },
-  );
-  const total = totals.success + totals.fail;
-  // 用总数加权重算，而不是对后端的 success_rate 求平均——后端是四舍五入到 1 位的小数，
-  // 直接平均会让各域名权重失真。
-  return { ...totals, total, successRate: total ? (totals.success * 100) / total : 0 };
-}
-
 function RegisterStatsContent() {
   const today = useMemo(() => getBeijingToday(), []);
   const [stats, setStats] = useState<CloudflareDomainStat[]>([]);
@@ -122,12 +110,18 @@ function RegisterStatsContent() {
   }, [preset, startDate, endDate]);
 
   const applyPreset = (key: PresetKey, days: number) => {
+    const end = getBeijingToday();
+    const start = key === "all" ? startDate : days <= 1 ? end : shiftDate(end, -(days - 1));
+    // 区间没变就不进加载态（effect 不会重跑），变了才清空卡片数字，避免挂着上一个区间的数。
+    if (key === preset && (key === "all" || (start === startDate && end === endDate))) {
+      return;
+    }
+    setIsHistoryLoading(true);
     if (key === "all") {
       setPreset("all");
       return;
     }
-    const end = getBeijingToday();
-    setStartDate(days <= 1 ? end : shiftDate(end, -(days - 1)));
+    setStartDate(start);
     setEndDate(end);
     setPreset(key);
   };
@@ -153,7 +147,6 @@ function RegisterStatsContent() {
     }
   };
 
-  const totals = sumTotals(stats);
   const range = history?.range;
   const granularity = range?.granularity ?? "hour";
   const rangeLabel = range
@@ -161,6 +154,14 @@ function RegisterStatsContent() {
       ? `${range.start_date} 全天 · 按小时`
       : `${range.start_date} 至 ${range.end_date} · 按天`
     : "";
+  // 卡片跟波形共用同一份区间数据：选「今天」就只算今天，不再展示历史累计。
+  const totals = history?.totals;
+  const cardsLoading = !totals;
+  const presetLabel = preset
+    ? PRESETS.find((item) => item.key === preset)?.label ?? ""
+    : startDate === endDate
+      ? startDate
+      : `${startDate} 至 ${endDate}`;
 
   return (
     <section className="space-y-5">
@@ -171,7 +172,7 @@ function RegisterStatsContent() {
           </div>
           <h1 className="text-2xl font-semibold tracking-tight">账号注册统计</h1>
           <p className="text-sm text-neutral-500 dark:text-neutral-400">
-            Cloudflare 临时邮箱注册结果的长期累计，改动注册机页的域名不会清空历史。
+            Cloudflare 临时邮箱注册结果统计，卡片与波形跟随所选区间；改动注册机页的域名不会清空历史。
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -210,27 +211,27 @@ function RegisterStatsContent() {
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
-          label="累计成功"
-          value={isLoading ? "—" : String(totals.success)}
-          caption="Cloudflare 临时邮箱"
+          label="成功"
+          value={cardsLoading ? "—" : String(totals.success)}
+          caption={`${presetLabel} · Cloudflare 临时邮箱`}
           tone={SUCCESS_DOT}
         />
         <StatTile
-          label="累计失败"
-          value={isLoading ? "—" : String(totals.fail)}
-          caption="含超时与上游异常"
+          label="失败"
+          value={cardsLoading ? "—" : String(totals.failed)}
+          caption={`${presetLabel} · 含超时与上游异常`}
           tone={FAILED_DOT}
         />
         <StatTile
-          label="累计总数"
-          value={isLoading ? "—" : String(totals.total)}
-          caption="成功 + 失败"
+          label="总数"
+          value={cardsLoading ? "—" : String(totals.requests)}
+          caption={`${presetLabel} · 成功 + 失败`}
           tone={TOTAL_DOT}
         />
         <StatTile
-          label="整体成功率"
-          value={isLoading ? "—" : totals.total ? `${totals.successRate.toFixed(1)}%` : "-"}
-          caption="按总数加权，非各域名平均"
+          label="成功率"
+          value={cardsLoading ? "—" : totals.requests ? `${totals.success_rate.toFixed(1)}%` : "-"}
+          caption={`${presetLabel} · 按总数加权`}
           tone={RATE_DOT}
         />
       </div>
@@ -243,7 +244,7 @@ function RegisterStatsContent() {
               <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
                 {rangeLabel || " "}
               </div>
-              {/* 上面的卡片是历史累计，波形只能从本功能上线后开始记——不写清楚会被当成 bug。 */}
+              {/* 卡片和波形都来自同一份区间账本，只能从本功能上线后开始记——不写清楚会被当成 bug。 */}
               <div className="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
                 波形自本功能上线后开始记录，更早的历史不在图中
               </div>
