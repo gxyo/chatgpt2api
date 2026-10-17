@@ -278,7 +278,7 @@ function RegisterLogsContent() {
               </TableBody>
             </Table>
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-neutral-100 px-4 py-3 text-sm text-neutral-500">
+          <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-neutral-100 px-4 py-3 text-sm text-neutral-500">
             <PageSizeSelect
               value={pageSize}
               options={[10, 20, 30, 40, 50, 100]}
@@ -287,15 +287,13 @@ function RegisterLogsContent() {
                 setPage(1);
               }}
             />
-            <div className="flex items-center gap-2">
-              <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
-              <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
-                <ChevronLeft className="size-4" />
-              </Button>
-              <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
-                <ChevronRight className="size-4" />
-              </Button>
-            </div>
+            <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+              <ChevronLeft className="size-4" />
+            </Button>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg border-neutral-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
+              <ChevronRight className="size-4" />
+            </Button>
           </div>
           {!isLoading && items.length === 0 ? (
             <div className="px-6 py-14 text-center text-sm text-neutral-500">

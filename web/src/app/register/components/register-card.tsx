@@ -196,11 +196,6 @@ export function RegisterCard() {
               }
             />
 
-            <div className="flex items-start gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-              <span>如果注册日志出现 Cloudflare 拦截，请更换注册代理或出口 IP 后重试。</span>
-            </div>
-
             <Tabs
               value={activeTab}
               onValueChange={(value) => setActiveTab(value as "basic" | "mail")}
@@ -222,7 +217,8 @@ export function RegisterCard() {
                 </TabsTrigger>
               </TabsList>
 
-              <TabsContent value="basic">
+              {/* 基础配置字段比一屏高时在 tab 内部滚动，别让最后一行说明文字顶出卡片。 */}
+              <TabsContent value="basic" className="min-h-0 flex-1 overflow-y-auto pr-1">
                 <div className="grid gap-4 sm:grid-cols-2">
                   <Field label="注册模式">
                     <Select
