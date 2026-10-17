@@ -592,9 +592,9 @@ export type ImageStatsModelBreakdown = {
   model: string;
   /** 该模型成功生成的图片数（按返回的 urls 计）。 */
   images: number;
-  /** 每张图片单价；null 表示未定价。0 表示免费。 */
+  /** 当前配置的每张图片单价；null 表示未定价。0 表示免费。 */
   price: number | null;
-  /** 按当前定价估算的收入（人民币）。 */
+  /** 请求计费时累计的收入（人民币），不随之后的调价变化。 */
   revenue: number;
 };
 
@@ -616,10 +616,14 @@ export type ImageStatsResponse = {
     avg_duration_ms: number;
     /** 成功生成的图片总数。 */
     images: number;
-    /** 按当前定价估算的收入（人民币）。 */
+    /** 请求计费时累计的收入（人民币）。 */
     revenue: number;
+    /** 更早的、没有模型/图片记录的请求按成功次数估算的收入。 */
+    legacy_revenue: number;
+    /** 参与历史收入估算的成功请求数。 */
+    legacy_success: number;
   };
-  /** 全部记录的累计值，不随日期筛选变化（收入按当前定价估算）。 */
+  /** 全部记录的累计值，不随日期筛选变化。 */
   lifetime: {
     images: number;
     revenue: number;

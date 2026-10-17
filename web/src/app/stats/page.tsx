@@ -125,6 +125,8 @@ function StatsContent() {
       : `${range.start_date} 至 ${range.end_date} · 按天`
     : "";
   const byModel = data?.by_model ?? [];
+  // 更早的请求没有模型/图片记录，收入按成功次数估算，明细表里单列不出来。
+  const hasLegacyRevenue = (totals?.legacy_success ?? 0) > 0 || (totals?.legacy_revenue ?? 0) > 0;
   return (
     <section className="space-y-5">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
@@ -227,13 +229,13 @@ function StatsContent() {
         <StatTile
           label="收入"
           value={formatCurrency(totals?.revenue ?? 0)}
-          caption={`成功生成 ${totals?.images ?? 0} 张 · 按当前定价估算`}
+          caption={`成功生成 ${totals?.images ?? 0} 张 · 按计费时单价累计`}
           tone={REVENUE_DOT}
         />
         <StatTile
-          label="累计计费"
+          label="总收入"
           value={formatCurrency(data?.lifetime.revenue ?? 0)}
-          caption={`全部记录 ${data?.lifetime.images ?? 0} 张 · 不随筛选变化`}
+          caption={`全部记录 ${data?.lifetime.images ?? 0} 张 · 含历史请求，不随筛选变化`}
           tone={LIFETIME_DOT}
         />
         <StatTile
@@ -260,9 +262,39 @@ function StatsContent() {
         <CardContent className="space-y-4 p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
+              <div className="font-semibold text-neutral-900 dark:text-neutral-50">请求量波形</div>
+              <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">{rangeLabel}</div>
+            </div>
+            {data?.peak ? (
+              <Badge variant="info" className="rounded-md px-2.5 py-1 tabular-nums">
+                峰值 {data.peak.requests} · {data.peak.full_label}
+              </Badge>
+            ) : null}
+          </div>
+
+          {isLoading && !data ? (
+            <div className="flex h-[288px] items-center justify-center text-sm text-neutral-400">
+              <LoaderCircle className="mr-2 size-4 animate-spin" />
+              加载中
+            </div>
+          ) : data && data.totals.requests > 0 ? (
+            <WaveChart series={data.series} granularity={granularity} />
+          ) : (
+            <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-neutral-400">
+              <span>该时间段没有生图请求</span>
+              <span className="text-xs text-neutral-400/80">换一个日期范围试试</span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+        <CardContent className="space-y-4 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
               <div className="font-semibold text-neutral-900 dark:text-neutral-50">模型收入明细</div>
               <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">
-                按当前定价估算 · {rangeLabel || "全部时间"}
+                收入按计费时的单价累计，调价只影响之后的请求 · {rangeLabel || "全部时间"}
               </div>
             </div>
             <Badge variant="info" className="rounded-md px-2.5 py-1 tabular-nums">
@@ -272,7 +304,7 @@ function StatsContent() {
 
           {byModel.length === 0 ? (
             <div className="flex h-32 flex-col items-center justify-center gap-1 text-sm text-neutral-400">
-              <span>该时间段没有成功生成的图片</span>
+              <span>{hasLegacyRevenue ? "该时间段只有历史请求计费" : "该时间段没有成功生成的图片"}</span>
               <Link
                 href="/settings"
                 className="text-xs text-neutral-500 underline-offset-4 transition hover:text-neutral-800 hover:underline dark:text-neutral-400 dark:hover:text-neutral-100"
@@ -285,7 +317,7 @@ function StatsContent() {
               <div className="grid grid-cols-[minmax(0,1fr)_4rem_5.5rem] items-center gap-3 border-b border-neutral-100 bg-neutral-50 px-4 py-2 text-xs font-medium text-neutral-500 sm:grid-cols-[minmax(0,1fr)_5rem_6rem_6rem] dark:border-white/10 dark:bg-white/5 dark:text-neutral-400">
                 <span>模型</span>
                 <span className="text-right">生成图片</span>
-                <span className="hidden text-right sm:block">单价</span>
+                <span className="hidden text-right sm:block">当前单价</span>
                 <span className="text-right">收入</span>
               </div>
               <div className="divide-y divide-neutral-100 dark:divide-white/10">
@@ -322,36 +354,13 @@ function StatsContent() {
               </div>
             </div>
           )}
-        </CardContent>
-      </Card>
 
-      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-        <CardContent className="space-y-4 p-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <div className="font-semibold text-neutral-900 dark:text-neutral-50">请求量波形</div>
-              <div className="mt-0.5 text-xs text-neutral-500 dark:text-neutral-400">{rangeLabel}</div>
+          {hasLegacyRevenue ? (
+            <div className="text-xs leading-relaxed text-neutral-500 dark:text-neutral-400">
+              含历史请求 {totals?.legacy_success ?? 0} 次、{formatCurrency(totals?.legacy_revenue ?? 0)}
+              （未记录模型，按主要模型单价估算，已计入合计）
             </div>
-            {data?.peak ? (
-              <Badge variant="info" className="rounded-md px-2.5 py-1 tabular-nums">
-                峰值 {data.peak.requests} · {data.peak.full_label}
-              </Badge>
-            ) : null}
-          </div>
-
-          {isLoading && !data ? (
-            <div className="flex h-[288px] items-center justify-center text-sm text-neutral-400">
-              <LoaderCircle className="mr-2 size-4 animate-spin" />
-              加载中
-            </div>
-          ) : data && data.totals.requests > 0 ? (
-            <WaveChart series={data.series} granularity={granularity} />
-          ) : (
-            <div className="flex h-[288px] flex-col items-center justify-center gap-1 text-sm text-neutral-400">
-              <span>该时间段没有生图请求</span>
-              <span className="text-xs text-neutral-400/80">换一个日期范围试试</span>
-            </div>
-          )}
+          ) : null}
         </CardContent>
       </Card>
 

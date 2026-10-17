@@ -48,7 +48,10 @@ _STATUSES = (_STATUS_SUCCESS, _STATUS_FAILED, _STATUS_POLICY_VIOLATION)
 
 # 聚合快照的落盘格式版本。格式变了就换版本号。
 # v2 起小时桶增加 images/models；v1 快照会被加载后做一次模型数据回填，不丢请求统计。
-SNAPSHOT_VERSION = 2
+# v3 起小时桶增加 revenue/models_revenue/legacy_success：收入在消费日志时按当时的
+# 单价计入，之后调价只影响新请求，已计入的收入不会因为改价而变化。v1/v2 快照加载后
+# 会按迁移这一刻的定价补一次收入。
+SNAPSHOT_VERSION = 3
 CURRENCY = "CNY"
 # 两次落盘之间的最小间隔：统计每次查询都会刷新，不能每次都写盘。
 # 因为游标和聚合是一起写入的，崩溃时两者一起回退到上一个一致点，重放日志即可，不会重复计数。
@@ -75,6 +78,12 @@ def _empty_bucket() -> dict[str, Any]:
         "duration_ms": 0,
         "images": 0,
         "models": {},
+        # 已计收入（元）。只增不改：按请求被消费时的定价累计。
+        "revenue": 0.0,
+        # 能归到模型名下的收入；差额（没有模型信息的旧记录）只计入 revenue。
+        "models_revenue": {},
+        # 没有图片/模型记录、按成功请求数估算收入的次数，仅用于展示口径说明。
+        "legacy_success": 0,
         "modes": {mode: _empty_mode_bucket() for mode in MODE_LABELS},
     }
 
@@ -100,6 +109,20 @@ def _restore_bucket(value: Any) -> dict[str, Any]:
                 normalized = 0
             if normalized:
                 bucket["models"][name] = normalized
+    try:
+        bucket["legacy_success"] = max(0, int(source.get("legacy_success") or 0))
+    except (TypeError, ValueError):
+        bucket["legacy_success"] = 0
+    bucket["revenue"] = _parse_amount(source.get("revenue"))
+    models_revenue = source.get("models_revenue")
+    if isinstance(models_revenue, dict):
+        for model, amount in models_revenue.items():
+            name = str(model or "").strip()
+            if not name:
+                continue
+            normalized_amount = _parse_amount(amount)
+            if normalized_amount > 0:
+                bucket["models_revenue"][name] = normalized_amount
     modes = source.get("modes")
     if isinstance(modes, dict):
         for mode, mode_value in modes.items():
@@ -114,7 +137,14 @@ def _restore_bucket(value: Any) -> dict[str, Any]:
 
 
 def _accumulate(
-    bucket: dict[str, Any], *, mode: str, status: str, duration_ms: int, model: str, images: int
+    bucket: dict[str, Any],
+    *,
+    mode: str,
+    status: str,
+    duration_ms: int,
+    model: str,
+    images: int,
+    revenue: float = 0.0,
 ) -> None:
     bucket["requests"] += 1
     bucket[status] += 1
@@ -122,11 +152,28 @@ def _accumulate(
     mode_bucket = bucket["modes"].setdefault(mode, _empty_mode_bucket())
     mode_bucket["requests"] += 1
     mode_bucket[status] += 1
-    if images <= 0:
-        return
-    bucket["images"] += images
-    if model:
-        bucket["models"][model] = bucket["models"].get(model, 0) + images
+    if images > 0:
+        bucket["images"] += images
+        if model:
+            bucket["models"][model] = bucket["models"].get(model, 0) + images
+    if revenue > 0:
+        bucket["revenue"] = round(bucket["revenue"] + revenue, 6)
+        if model:
+            current = bucket["models_revenue"].get(model, 0.0)
+            bucket["models_revenue"][model] = round(current + revenue, 6)
+
+
+def _parse_amount(value: object) -> float:
+    """快照里的金额：非法、负数、非有限值都按 0 处理。"""
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        amount = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(amount) or amount < 0:
+        return 0.0
+    return round(amount, 6)
 
 
 def _parse_price(value: object) -> float | None:
@@ -142,23 +189,29 @@ def _parse_price(value: object) -> float | None:
 
 
 def _build_model_breakdown(
-    models: dict[str, int], prices: dict[str, float]
-) -> tuple[list[dict[str, Any]], float]:
-    """把「模型 -> 图片数」按当前定价折算成明细与总收入。"""
+    models: dict[str, int],
+    models_revenue: dict[str, float],
+    prices: dict[str, float],
+) -> list[dict[str, Any]]:
+    """合并「模型 -> 图片数」与「模型 -> 已计收入」。
+
+    收入是消费日志时按当时单价累计的，这里不再用当前单价重算；`price` 只作为
+    当前配置的参考单价返回，调价后它与收入 / 图片数不一定对得上。
+    """
     by_model: list[dict[str, Any]] = []
-    for model, images in models.items():
-        if images <= 0:
+    for model in set(models) | set(models_revenue):
+        images = models.get(model, 0)
+        revenue = round(models_revenue.get(model, 0.0), 2)
+        if images <= 0 and revenue <= 0:
             continue
-        price = _parse_price(prices.get(model))
-        revenue = round(images * price, 2) if price is not None else 0.0
         by_model.append({
             "model": model,
             "images": images,
-            "price": price,
+            "price": _parse_price(prices.get(model)),
             "revenue": revenue,
         })
     by_model.sort(key=lambda item: (-item["revenue"], -item["images"], item["model"]))
-    return by_model, round(sum(item["revenue"] for item in by_model), 2)
+    return by_model
 
 
 def _parse_duration(detail: dict[str, Any]) -> int:
@@ -227,6 +280,10 @@ def _merge_day(hours: dict[str, dict[str, Any]], day: str) -> dict[str, Any]:
         merged["images"] += bucket["images"]
         for model, count in bucket["models"].items():
             merged["models"][model] = merged["models"].get(model, 0) + count
+        merged["revenue"] += bucket["revenue"]
+        merged["legacy_success"] += bucket["legacy_success"]
+        for model, amount in bucket["models_revenue"].items():
+            merged["models_revenue"][model] = merged["models_revenue"].get(model, 0.0) + amount
         for mode, mode_bucket in bucket["modes"].items():
             target = merged["modes"].setdefault(mode, _empty_mode_bucket())
             for key in ("requests", *_STATUSES):
@@ -255,6 +312,10 @@ def _merge_totals(totals: dict[str, Any], bucket: dict[str, Any]) -> None:
     totals["images"] += bucket["images"]
     for model, count in bucket["models"].items():
         totals["models"][model] = totals["models"].get(model, 0) + count
+    totals["revenue"] += bucket["revenue"]
+    totals["legacy_success"] += bucket["legacy_success"]
+    for model, amount in bucket["models_revenue"].items():
+        totals["models_revenue"][model] = totals["models_revenue"].get(model, 0.0) + amount
     for mode, mode_bucket in bucket["modes"].items():
         target = totals["modes"].setdefault(mode, _empty_mode_bucket())
         for key in ("requests", *_STATUSES):
@@ -294,6 +355,8 @@ class ImageStatsService:
         self._anchor = b""
         self._last_save = 0.0
         self._needs_model_backfill = False
+        self._needs_revenue_bootstrap = False
+        self._migration_dirty = False
 
     def _load_snapshot(self) -> None:
         """载入上次落盘的聚合与游标。读不到或格式对不上就从零开始重建。"""
@@ -304,8 +367,9 @@ class ImageStatsService:
         if not isinstance(snapshot, dict):
             return
         version = snapshot.get("version")
-        # v1 快照没有 images/models，加载后从现存日志回填一次模型数据；v2 直接使用。
-        if version not in (1, SNAPSHOT_VERSION):
+        # v1 缺 images/models，加载后先从现存日志回填模型数据；
+        # v1/v2 都缺收入字段，按迁移这一刻的定价补一次（之后调价不再回改）。
+        if version not in (1, 2, SNAPSHOT_VERSION):
             return
         hours = snapshot.get("hours")
         if not isinstance(hours, dict):
@@ -327,6 +391,7 @@ class ImageStatsService:
         self._hours = restored
         self._last_save = time.monotonic()
         self._needs_model_backfill = version == 1
+        self._needs_revenue_bootstrap = version in (1, 2)
 
     def _save_snapshot(self, *, force: bool = False) -> None:
         """把聚合和游标一起原子落盘。写失败只影响下次重启，不该让查询出错。"""
@@ -403,14 +468,14 @@ class ImageStatsService:
         except FileNotFoundError:
             # 日志已经被清理干净，没有可回填的数据了。
             self._needs_model_backfill = False
-            self._save_snapshot(force=True)
+            self._migration_dirty = True
             return
         except OSError:
             return
         if not self._anchor_matches() and not self._resync():
             # 内容被大改，无法确认 [0, offset) 与旧聚合的对应关系，放弃补模型数据。
             self._needs_model_backfill = False
-            self._save_snapshot(force=True)
+            self._migration_dirty = True
             return
         for bucket in self._hours.values():
             bucket["images"] = 0
@@ -435,9 +500,78 @@ class ImageStatsService:
             # 读日志失败：保持待迁移状态，下次查询再试。
             return
         self._needs_model_backfill = False
-        self._save_snapshot(force=True)
+        self._migration_dirty = True
 
-    def _refresh(self) -> None:
+    def _fallback_price(self, prices: dict[str, float]) -> float | None:
+        """没有模型信息的旧记录用哪个单价估算：主要模型 > auto > 最低已配置价。"""
+        image_totals: dict[str, int] = {}
+        for bucket in self._hours.values():
+            for model, images in bucket["models"].items():
+                image_totals[model] = image_totals.get(model, 0) + images
+        if image_totals:
+            primary = max(image_totals, key=lambda model: (image_totals[model], model))
+            primary_price = _parse_price(prices.get(primary))
+            if primary_price is not None:
+                return primary_price
+        auto_price = _parse_price(prices.get("auto"))
+        if auto_price is not None:
+            return auto_price
+        values = [
+            price
+            for price in (_parse_price(value) for value in prices.values())
+            if price is not None
+        ]
+        return min(values) if values else None
+
+    def _bootstrap_revenue(self, prices: dict[str, float]) -> None:
+        """给 v1/v2 快照补一次收入，口径是迁移这一刻的单价。
+
+        已有 images/models 的桶按模型单价折算；没有模型信息的旧记录用
+        `_fallback_price` 的单价乘成功请求数。写入后版本升到 v3，之后的
+        调价只影响新消费的日志，这些金额保持冻结。
+        """
+        if not self._needs_revenue_bootstrap:
+            return
+        fallback_price = self._fallback_price(prices)
+        for bucket in self._hours.values():
+            revenue = 0.0
+            models_revenue: dict[str, float] = {}
+            for model, images in bucket["models"].items():
+                price = _parse_price(prices.get(model))
+                if price is None or images <= 0:
+                    continue
+                amount = round(images * price, 6)
+                if amount > 0:
+                    models_revenue[model] = amount
+                    revenue += amount
+            # 有图片但没有模型名的部分，按回退单价补上。
+            extra_images = max(0, bucket["images"] - sum(bucket["models"].values()))
+            if extra_images and fallback_price is not None:
+                revenue += round(extra_images * fallback_price, 6)
+            # 更早的记录连 images 都没有，只能按成功请求数估算。
+            legacy_success = 0
+            if bucket["images"] == 0 and bucket["success"] > 0:
+                legacy_success = bucket["success"]
+                if fallback_price is not None:
+                    revenue += round(legacy_success * fallback_price, 6)
+            bucket["revenue"] = round(revenue, 6)
+            bucket["models_revenue"] = models_revenue
+            bucket["legacy_success"] = legacy_success
+        self._needs_revenue_bootstrap = False
+        self._migration_dirty = True
+
+    def _migrate_snapshots(self, prices: dict[str, float]) -> None:
+        """迁移持锁执行：先补模型数据，再按同一批数据补收入，最后一次性落盘。"""
+        self._migrate_model_stats()
+        if self._needs_model_backfill:
+            # 模型回填没完成（读日志失败），收入也等下一轮，避免按错误的模型数据计费。
+            return
+        self._bootstrap_revenue(prices)
+        if self._migration_dirty:
+            self._migration_dirty = False
+            self._save_snapshot(force=True)
+
+    def _refresh(self, prices: dict[str, float]) -> None:
         """把新追加的日志并进聚合结果；文件被改写时只重新对齐游标，不重建聚合。"""
         try:
             size = self.path.stat().st_size
@@ -460,21 +594,30 @@ class ImageStatsService:
             cut = payload.rfind(b"\n")
             if cut >= 0:
                 consumed = payload[: cut + 1]
-                self._consume(consumed.decode("utf-8", errors="replace"))
+                self._consume(consumed.decode("utf-8", errors="replace"), prices)
                 self._offset += len(consumed)
                 self._anchor = (self._anchor + consumed)[-self._ANCHOR_BYTES :]
         # 游标动过就必须落盘，否则重启后会退回旧游标，把已经计入的行再数一遍。
         self._save_snapshot(force=resynced)
 
-    def _consume(self, text: str) -> None:
+    def _consume(self, text: str, prices: dict[str, float]) -> None:
         for raw_line in text.splitlines():
             event = _parse_image_event(raw_line)
             if event is None:
                 continue
             hour_key, mode, status, duration_ms, model, images = event
+            # 计费发生在消费日志的这一刻：以后调价不会回头改已计入的金额。
+            price = _parse_price(prices.get(model)) if model else None
+            revenue = round(images * price, 6) if price is not None and images > 0 else 0.0
             bucket = self._hours.setdefault(hour_key, _empty_bucket())
             _accumulate(
-                bucket, mode=mode, status=status, duration_ms=duration_ms, model=model, images=images
+                bucket,
+                mode=mode,
+                status=status,
+                duration_ms=duration_ms,
+                model=model,
+                images=images,
+                revenue=revenue,
             )
 
     def summary(
@@ -485,13 +628,15 @@ class ImageStatsService:
         pricing: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         scope = SCOPE_ALL if (scope or "").strip().lower() == SCOPE_ALL else SCOPE_RANGE
+        prices = pricing or {}
 
         # 汇总全程持锁：既避免并发查询各自重扫一遍，也避免读到正被 _consume 改写的桶。
         # scope=all 的起点要读聚合，所以区间归一化也一并放进锁里。
         with self._lock:
-            # v1 快照迁移必须在消费新日志之前完成：回填只扫描尚未被 _refresh 推进的游标区间。
-            self._migrate_model_stats()
-            self._refresh()
+            # 快照迁移必须在消费新日志之前完成：回填只扫描尚未被 _refresh 推进的游标区间。
+            # 新日志也在这里按当前定价计费，之后调价不影响已计入的收入。
+            self._migrate_snapshots(prices)
+            self._refresh(prices)
             if scope == SCOPE_ALL:
                 # 全部：从聚合里最早的一天算到今天。聚合只增不减，所以这里给的是「有记录以来的全部」，
                 # 日志过了保留期被清掉也不影响更早的统计。
@@ -526,11 +671,10 @@ class ImageStatsService:
 
             # 累计口径：不受查询区间影响，始终是聚合里全部小时桶的和。
             lifetime_images = 0
-            lifetime_models: dict[str, int] = {}
+            lifetime_revenue = 0.0
             for bucket in hours.values():
                 lifetime_images += bucket["images"]
-                for model, count in bucket["models"].items():
-                    lifetime_models[model] = lifetime_models.get(model, 0) + count
+                lifetime_revenue += bucket["revenue"]
 
         peak = max(series, key=lambda item: item["requests"], default=None)
         if peak is not None and peak["requests"] <= 0:
@@ -551,9 +695,11 @@ class ImageStatsService:
             }
             for mode, label in MODE_LABELS.items()
         ]
-        prices = pricing or {}
-        by_model, revenue = _build_model_breakdown(totals["models"], prices)
-        _lifetime_by_model, lifetime_revenue = _build_model_breakdown(lifetime_models, prices)
+        by_model = _build_model_breakdown(totals["models"], totals["models_revenue"], prices)
+        revenue = round(totals["revenue"], 2)
+        # 没有模型归属的收入（更早的请求只有成功次数）：明细表里对不上，
+        # 单独给前端做口径说明，合计仍以这里的总数为准。
+        legacy_revenue = round(max(0.0, totals["revenue"] - sum(totals["models_revenue"].values())), 2)
 
         return {
             "range": {
@@ -572,11 +718,14 @@ class ImageStatsService:
                 "avg_duration_ms": int(totals["duration_ms"] / requests) if requests else 0,
                 "images": totals["images"],
                 "revenue": revenue,
+                # 历史请求（没有模型/图片记录）按成功次数估算的收入与次数。
+                "legacy_revenue": legacy_revenue,
+                "legacy_success": totals["legacy_success"],
             },
-            # 累计计费：全部记录的和，不随日期 / 区间筛选变化。
+            # 总收入：全部记录的和，不随日期 / 区间筛选变化。
             "lifetime": {
                 "images": lifetime_images,
-                "revenue": lifetime_revenue,
+                "revenue": round(lifetime_revenue, 2),
             },
             "currency": CURRENCY,
             "by_mode": by_mode,

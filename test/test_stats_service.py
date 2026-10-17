@@ -46,6 +46,7 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(result["totals"], {
             "requests": 3, "success": 2, "failed": 1, "policy_violation": 0,
             "success_rate": 2 / 3, "avg_duration_ms": 100, "images": 0, "revenue": 0,
+            "legacy_revenue": 0, "legacy_success": 0,
         })
         by_label = {point["label"]: point for point in result["series"]}
         self.assertEqual(by_label["09:00"]["requests"], 2)
@@ -444,6 +445,7 @@ class SnapshotPersistenceTests(unittest.TestCase):
         self.assertEqual(after_cleanup["totals"], {
             "requests": 2, "success": 1, "failed": 1, "policy_violation": 0,
             "success_rate": 0.5, "avg_duration_ms": 100, "images": 0, "revenue": 0,
+            "legacy_revenue": 0, "legacy_success": 0,
         })
         self.assertEqual(after_restart["series"][0]["requests"], 1)
         self.assertEqual(after_restart["totals"]["requests"], 2)
@@ -566,18 +568,51 @@ class ModelRevenueTests(unittest.TestCase):
         self.assertEqual(everything["totals"]["revenue"], everything["lifetime"]["revenue"])
         self.assertEqual(everything["lifetime"], {"images": 3, "revenue": 3})
 
-    def test_lifetime_revenue_follows_the_current_pricing(self):
+    def test_price_changes_only_affect_future_requests(self):
+        """收入在消费日志时计入：调价只影响之后新增的请求，旧收入保持冻结。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text(log_line(
+                "2026-09-28 10:00:00", "/v1/images/generations",
+                model="gpt-image-2", urls=["https://img/1", "https://img/2"],
+            ) + "\n", encoding="utf-8")
+            service = ImageStatsService(path)
+
+            before = service.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 1})
+            # 调价：已计入的 2 张不能按新价格重算。
+            repriced = service.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 2})
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(log_line(
+                    "2026-09-28 12:00:00", "/v1/images/generations",
+                    model="gpt-image-2", urls=["https://img/3"],
+                ) + "\n")
+            # 新增的 1 张按新价格计费。
+            after = service.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 2})
+
+        self.assertEqual(before["totals"]["revenue"], 2)
+        self.assertEqual(repriced["totals"]["revenue"], 2)
+        self.assertEqual(repriced["lifetime"], {"images": 2, "revenue": 2})
+        self.assertEqual(after["totals"]["revenue"], 4)
+        self.assertEqual(after["totals"]["images"], 3)
+        self.assertEqual(after["lifetime"], {"images": 3, "revenue": 4})
+        # 明细里的单价是当前配置，收入是当时计入的金额，两者可以不一致。
+        self.assertEqual(after["by_model"], [
+            {"model": "gpt-image-2", "images": 3, "price": 2, "revenue": 4.0},
+        ])
+
+    def test_restart_keeps_frozen_revenue(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(tmp_dir, [
                 log_line("2026-09-28 10:00:00", "/v1/images/generations",
                          model="gpt-image-2", urls=["https://img/1"]),
             ])
+            service.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 1})
 
-            unpriced = service.summary("2026-09-28", "2026-09-28")
-            priced = service.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 2.5})
+            restarted = ImageStatsService(Path(tmp_dir) / "logs.jsonl")
+            after = restarted.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 9})
 
-        self.assertEqual(unpriced["lifetime"], {"images": 1, "revenue": 0})
-        self.assertEqual(priced["lifetime"], {"images": 1, "revenue": 2.5})
+        self.assertEqual(after["totals"]["revenue"], 1)
+        self.assertEqual(after["lifetime"], {"images": 1, "revenue": 1})
 
     def test_invalid_prices_are_treated_as_unpriced(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -613,6 +648,19 @@ def downgrade_snapshot_to_v1(snapshot_path: Path) -> None:
     for bucket in snapshot["hours"].values():
         bucket.pop("images", None)
         bucket.pop("models", None)
+        bucket.pop("revenue", None)
+        bucket.pop("models_revenue", None)
+        bucket.pop("legacy_success", None)
+    snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+
+def downgrade_snapshot_to_v2(snapshot_path: Path) -> None:
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["version"] = 2
+    for bucket in snapshot["hours"].values():
+        bucket.pop("revenue", None)
+        bucket.pop("models_revenue", None)
+        bucket.pop("legacy_success", None)
     snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
 
 
@@ -635,7 +683,10 @@ class SnapshotModelMigrationTests(unittest.TestCase):
                          model="gpt-image-2.5", urls=["https://img/3"]),
             ])
             service.summary("2026-09-28", "2026-09-29")
-            self.assertEqual(json.loads(snapshot_path.read_text(encoding="utf-8"))["version"], 2)
+            self.assertEqual(
+                json.loads(snapshot_path.read_text(encoding="utf-8"))["version"],
+                stats_service.SNAPSHOT_VERSION,
+            )
 
             downgrade_snapshot_to_v1(snapshot_path)
             restarted = ImageStatsService(path)
@@ -652,7 +703,7 @@ class SnapshotModelMigrationTests(unittest.TestCase):
             )
 
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            self.assertEqual(snapshot["version"], 2)
+            self.assertEqual(snapshot["version"], stats_service.SNAPSHOT_VERSION)
             self.assertEqual(sum(bucket["images"] for bucket in snapshot["hours"].values()), 3)
 
             # 迁移只做一次：再查一遍不能把图片数翻倍。
@@ -699,7 +750,7 @@ class SnapshotModelMigrationTests(unittest.TestCase):
             self.assertEqual(result["totals"]["images"], 0)
             self.assertEqual(result["by_model"], [])
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            self.assertEqual(snapshot["version"], 2)
+            self.assertEqual(snapshot["version"], stats_service.SNAPSHOT_VERSION)
 
     def test_v1_snapshot_without_log_file_is_marked_migrated(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -717,7 +768,92 @@ class SnapshotModelMigrationTests(unittest.TestCase):
             self.assertEqual(result["totals"]["requests"], 1)
             self.assertEqual(result["totals"]["images"], 0)
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-            self.assertEqual(snapshot["version"], 2)
+            self.assertEqual(snapshot["version"], stats_service.SNAPSHOT_VERSION)
+
+
+class SnapshotRevenueBootstrapTests(unittest.TestCase):
+    """v2 快照没有收入：升级时按迁移这一刻的定价补一次，之后冻结。"""
+
+    def test_v2_snapshot_bills_existing_images_at_migration_prices(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text(log_line(
+                "2026-09-28 10:00:00", "/v1/images/generations",
+                model="gpt-image-2", urls=["https://img/1", "https://img/2"],
+            ) + "\n", encoding="utf-8")
+            snapshot_path = Path(tmp_dir) / "image_stats.json"
+            ImageStatsService(path).summary("2026-09-28", "2026-09-28")
+            downgrade_snapshot_to_v2(snapshot_path)
+
+            restarted = ImageStatsService(path)
+            first = restarted.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 0.75})
+            # 迁移后调价：已经补上的收入不能跟着变。
+            second = restarted.summary("2026-09-28", "2026-09-28", pricing={"gpt-image-2": 5})
+            snapshot_version = json.loads(snapshot_path.read_text(encoding="utf-8"))["version"]
+
+        self.assertEqual(first["totals"]["images"], 2)
+        self.assertEqual(first["totals"]["revenue"], 1.5)
+        self.assertEqual(first["totals"]["legacy_revenue"], 0)
+        self.assertEqual(first["by_model"], [
+            {"model": "gpt-image-2", "images": 2, "price": 0.75, "revenue": 1.5},
+        ])
+        self.assertEqual(second["totals"]["revenue"], 1.5)
+        self.assertEqual(second["lifetime"], {"images": 2, "revenue": 1.5})
+        self.assertEqual(snapshot_version, stats_service.SNAPSHOT_VERSION)
+
+    def test_v2_snapshot_estimates_legacy_success_with_fallback_price(self):
+        """连 images 都没有的旧记录：按成功请求数 × 回退单价估算。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text("", encoding="utf-8")
+            snapshot_path = Path(tmp_dir) / "image_stats.json"
+            snapshot_path.write_text(json.dumps({
+                "version": 2,
+                "hours": {
+                    "2026-09-28T10": {
+                        "requests": 3, "success": 3, "failed": 0, "policy_violation": 0,
+                        "duration_ms": 300, "images": 0, "models": {},
+                        "modes": {"generate": {
+                            "requests": 3, "success": 3, "failed": 0, "policy_violation": 0,
+                        }},
+                    },
+                },
+                "offset": 0,
+                "anchor": "",
+            }), encoding="utf-8")
+
+            service = ImageStatsService(path)
+            result = service.summary("2026-09-28", "2026-09-28", pricing={"auto": 0.5})
+            restarted = ImageStatsService(path)
+            after_restart = restarted.summary(
+                "2026-09-28", "2026-09-28", pricing={"auto": 9, "gpt-image-2": 9},
+            )
+
+        self.assertEqual(result["totals"]["revenue"], 1.5)
+        self.assertEqual(result["totals"]["legacy_revenue"], 1.5)
+        self.assertEqual(result["totals"]["legacy_success"], 3)
+        self.assertEqual(result["by_model"], [])
+        self.assertEqual(result["lifetime"], {"images": 0, "revenue": 1.5})
+        self.assertEqual(after_restart["totals"]["revenue"], 1.5)
+
+    def test_v1_snapshot_bills_backfilled_images_at_migration_prices(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text(log_line(
+                "2026-09-28 10:00:00", "/v1/images/generations",
+                model="gpt-image-2", urls=["https://img/1"],
+            ) + "\n", encoding="utf-8")
+            snapshot_path = Path(tmp_dir) / "image_stats.json"
+            ImageStatsService(path).summary("2026-09-28", "2026-09-28")
+            downgrade_snapshot_to_v1(snapshot_path)
+
+            result = ImageStatsService(path).summary(
+                "2026-09-28", "2026-09-28", pricing={"gpt-image-2": 2},
+            )
+
+        self.assertEqual(result["totals"]["images"], 1)
+        self.assertEqual(result["totals"]["revenue"], 2)
+        self.assertEqual(result["by_model"][0]["revenue"], 2)
 
 
 class BuildImageStatsTests(unittest.TestCase):
