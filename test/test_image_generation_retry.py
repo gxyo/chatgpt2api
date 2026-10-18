@@ -441,6 +441,27 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(outputs[0].kind, "result")
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
 
+    def test_invalid_token_attempt_is_labelled_invalid_token(self):
+        # 401/token 失效不能再落到通用的 upstream_error 标签上。
+        def stream_fn(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                raise ImageGenerationError(
+                    "token invalidated (/backend-api/files)",
+                    status_code=401,
+                    error_type="invalid_request_error",
+                    code="invalid_token",
+                )
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        outputs, accounts = self._run(["token-a", "token-b"], stream_fn, 0)
+        attempts = conversation.collect_image_outputs(outputs)["_attempts"]
+
+        self.assertEqual(outputs[0].kind, "result")
+        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+        self.assertEqual(accounts.image_results, [("token-a", False), ("token-b", True)])
+        self.assertEqual(attempts[0]["outcome"], "invalid_token")
+        self.assertEqual(attempts[1]["outcome"], "success")
+
     def test_no_tool_event_switches_account_without_polling_budget(self):
         # 主链路没起图（SSE 没 id、也没图片工具事件）和轮询超时共用换号路径，
         # 但不该把预算花在轮询上；不续预算也要能立刻换到下一个号。

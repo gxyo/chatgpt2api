@@ -86,11 +86,14 @@ const attemptOutcomes: Record<string, AttemptOutcomeStyle> = {
   message_retry: { label: "文案重试", variant: "warning" },
   poll_timeout: { label: "轮询超时", variant: "warning" },
   no_tool_event: { label: "主链路未出图", variant: "warning" },
+  invalid_token: { label: "token 失效", variant: "danger" },
+  token_refreshed: { label: "刷新 token 重试", variant: "warning" },
   transient_upstream: { label: "上游抖动", variant: "warning" },
   mainline_rejected: { label: "主链路拒绝", variant: "warning" },
   content_policy: { label: "内容拦截", variant: "danger" },
   text_reply: { label: "只回文本", variant: "warning" },
   generation_error: { label: "生成失败", variant: "danger" },
+  upstream_error: { label: "上游报错", variant: "danger" },
   no_image: { label: "未返回图片", variant: "danger" },
   empty_stream: { label: "空流", variant: "warning" },
   account_select_failed: { label: "选号失败", variant: "danger" },
@@ -99,6 +102,23 @@ const attemptOutcomes: Record<string, AttemptOutcomeStyle> = {
 
 function attemptOutcomeStyle(outcome: string): AttemptOutcomeStyle {
   return attemptOutcomes[outcome] || { label: outcome || "未知", variant: "secondary" };
+}
+
+/** 老日志只存了通用 outcome，按错误原文补一个更准确的标签。 */
+function effectiveAttemptOutcome(step: AttemptStep) {
+  if (step.outcome !== "upstream_error" && step.outcome !== "generation_error") {
+    return step.outcome;
+  }
+  const text = `${step.error} ${step.upstreamText ?? ""}`.toLowerCase();
+  if (
+    text.includes("status=401") ||
+    text.includes("token_revoked") ||
+    text.includes("invalidated oauth token") ||
+    text.includes("authentication token is invalid")
+  ) {
+    return "invalid_token";
+  }
+  return step.outcome;
 }
 
 /** 账号轨迹是后端拼好的一行 `a → b → c`。 */
@@ -1234,7 +1254,7 @@ function LogsContent() {
                             <div key={groupIndex} className="overflow-hidden rounded-xl border border-neutral-200 bg-white">
                               {group.parsed ? (
                                 group.steps.map((step, stepIndex) => {
-                                  const outcome = attemptOutcomeStyle(step.outcome);
+                                  const outcome = attemptOutcomeStyle(effectiveAttemptOutcome(step));
                                   return (
                                     <div
                                       key={stepIndex}

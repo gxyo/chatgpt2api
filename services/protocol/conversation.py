@@ -2719,6 +2719,8 @@ def _generate_single_image_attempts(
                 attempt_outcome = "mainline_rejected"
                 account_service.mark_image_mainline_rejected(token)
             if not final_output_emitted and is_token_auth_error(exc, error_text):
+                # 尝试轨迹里别再用 generation_error 这种通用标签：这是明确的 token 失效。
+                attempt_outcome = "invalid_token"
                 try:
                     refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 except Exception as refresh_exc:
@@ -2732,6 +2734,7 @@ def _generate_single_image_attempts(
                         "error": str(refresh_exc)[:200],
                     })
                 if refreshed_token and refreshed_token != token:
+                    attempt_outcome = "token_refreshed"
                     logger.warning({
                         "event": "image_stream_token_refreshed_retry",
                         "trace_id": trace_id,
@@ -2889,6 +2892,8 @@ def _generate_single_image_attempts(
             })
             logger.warning({"event": "image_stream_fail", "error": str(exc), **diagnostics})
             if not final_output_emitted and is_token_auth_error(exc, last_error):
+                # 401 / token_revoked 不走通用的 upstream_error 标签，日志里直接写清楚。
+                attempt_outcome = "invalid_token"
                 try:
                     refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 except Exception as refresh_exc:
@@ -2902,6 +2907,7 @@ def _generate_single_image_attempts(
                         "error": str(refresh_exc)[:200],
                     })
                 if refreshed_token and refreshed_token != token:
+                    attempt_outcome = "token_refreshed"
                     logger.warning({
                         "event": "image_stream_token_refreshed_retry",
                         "trace_id": trace_id,
