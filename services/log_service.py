@@ -29,6 +29,9 @@ LOG_TYPE_REGISTER = "register"
 LOG_STATUS_SUCCESS = "success"
 LOG_STATUS_FAILED = "failed"
 LOG_STATUS_POLICY_VIOLATION = "policy_violation"
+# 日志页「是否重试」筛选：只看这次调用有没有换过号/换过账号重来。
+LOG_RETRIED_YES = "yes"
+LOG_RETRIED_NO = "no"
 # ImageGenerationError.code：conversation 把上游内容审核拦截统一标成这个 code。
 POLICY_VIOLATION_CODE = "content_policy_violation"
 INTERNAL_RESPONSE_KEYS = {
@@ -67,14 +70,43 @@ class LogService:
         return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
+    def _is_retried(item: dict[str, Any]) -> bool:
+        """这条日志是否换过号/换过账号重来。
+
+        口径和日志页的「重试」列一致：成功与失败都只在真的换号时才写
+        `account_trail` / `attempts_summary`。旧日志可能只有
+        `image_diagnostics.attempts`，也一并兼容。
+        """
+        detail = item.get("detail")
+        if not isinstance(detail, dict):
+            return False
+        for key in ("account_trail", "attempts_summary"):
+            value = detail.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+            if isinstance(value, list) and any(str(part or "").strip() for part in value):
+                return True
+        diagnostics = detail.get("image_diagnostics")
+        if isinstance(diagnostics, dict):
+            attempts = diagnostics.get("attempts")
+            if isinstance(attempts, list) and len(attempts) > 1:
+                return True
+        return False
+
+    @staticmethod
     def _matches_filters(
-        item: dict[str, Any], *, type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+        item: dict[str, Any], *, type: str = "", status: str = "", retried: str = "",
+        start_date: str = "", end_date: str = "",
     ) -> bool:
         t = str(item.get("time") or "")
         day = t[:10]
         if type and item.get("type") != type:
             return False
         if status and str((item.get("detail") or {}).get("status") or "") != status:
+            return False
+        if retried == LOG_RETRIED_YES and not LogService._is_retried(item):
+            return False
+        if retried == LOG_RETRIED_NO and LogService._is_retried(item):
             return False
         if start_date and day < start_date:
             return False
@@ -93,7 +125,8 @@ class LogService:
         with self.path.open("a", encoding="utf-8") as file:
             file.write(self._serialize_item(item) + "\n")
 
-    def list(self, type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+    def list(self, type: str = "", status: str = "", retried: str = "",
+             start_date: str = "", end_date: str = "",
              limit: int = 200) -> list[dict[str, Any]]:
         if not self.path.exists():
             return []
@@ -103,7 +136,10 @@ class LogService:
             item = self._parse_line(lines[line_number], line_number)
             if item is None:
                 continue
-            if not self._matches_filters(item, type=type, status=status, start_date=start_date, end_date=end_date):
+            if not self._matches_filters(
+                item, type=type, status=status, retried=retried,
+                start_date=start_date, end_date=end_date,
+            ):
                 continue
             items.append(item)
             if len(items) >= limit:
@@ -115,7 +151,8 @@ class LogService:
         day = str(item.get("time") or "")[:10]
         return day if len(day) == 10 else ""
 
-    def build_export(self, type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+    def build_export(self, type: str = "", status: str = "", retried: str = "",
+                     start_date: str = "", end_date: str = "",
                      limit: int = LOG_EXPORT_DEFAULT_LIMIT) -> tuple[str, int]:
         """把最近 N 条日志排版成一份可以直接复制粘贴的纯文本，返回 (文本, 条数)。
 
@@ -124,10 +161,14 @@ class LogService:
         顺序按时间由旧到新，方便顺着时间线看一次重试/抢救的完整过程。
         """
         count = self._normalize_export_limit(limit)
-        items = self.list(type=type, status=status, start_date=start_date, end_date=end_date, limit=count)
+        items = self.list(
+            type=type, status=status, retried=retried,
+            start_date=start_date, end_date=end_date, limit=count,
+        )
         items.reverse()
+        retried_label = {LOG_RETRIED_YES: "是", LOG_RETRIED_NO: "否"}.get(retried, "不限")
         condition = (
-            f"类型={type or '全部'}，状态={status or '全部'}，"
+            f"类型={type or '全部'}，状态={status or '全部'}，重试={retried_label}，"
             f"日期={f'{start_date} ~ {end_date}' if (start_date or end_date) else '不限'}"
         )
         return self._render_export(items, condition, f"最多 {count} 条，按时间由旧到新排列")

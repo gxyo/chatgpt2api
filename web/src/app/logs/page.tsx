@@ -34,6 +34,12 @@ const LogStatus = {
   PolicyViolation: "policy_violation",
 } as const;
 
+const LogRetried = {
+  All: "all",
+  Yes: "yes",
+  No: "no",
+} as const;
+
 const typeLabels: Record<string, string> = {
   [LogType.Call]: "调用日志",
   [LogType.Account]: "账号管理日志",
@@ -288,12 +294,21 @@ function getUrls(item: SystemLog | null) {
  * 后端只在真的换过号时才写 account_trail / attempts_summary，两个字段有任意一个即视为重试。
  */
 function isAccountRetry(item: SystemLog) {
-  const trail = item.detail?.account_trail;
-  const attempts = item.detail?.attempts_summary;
-  return (
-    (typeof trail === "string" && trail.trim() !== "") ||
-    (typeof attempts === "string" && attempts.trim() !== "")
-  );
+  const hasTrail = (value: unknown) =>
+    (typeof value === "string" && value.trim() !== "") ||
+    (Array.isArray(value) && value.some((part) => String(part ?? "").trim() !== ""));
+  if (hasTrail(item.detail?.account_trail) || hasTrail(item.detail?.attempts_summary)) {
+    return true;
+  }
+  // 旧日志可能只有诊断里的 attempts，没有平铺到 detail 顶层的轨迹。
+  const diagnostics = item.detail?.image_diagnostics;
+  if (diagnostics && typeof diagnostics === "object") {
+    const diagnosticAttempts = (diagnostics as { attempts?: unknown }).attempts;
+    if (Array.isArray(diagnosticAttempts) && diagnosticAttempts.length > 1) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -414,6 +429,7 @@ function LogsContent() {
   const [items, setItems] = useState<SystemLog[]>([]);
   const [type, setType] = useState<string>(LogType.Call);
   const [status, setStatus] = useState<string>(LogStatus.All);
+  const [retried, setRetried] = useState<string>(LogRetried.All);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
@@ -466,6 +482,7 @@ function LogsContent() {
       const data = await fetchSystemLogs({
         type,
         status: status === LogStatus.All ? "" : status,
+        retried: retried === LogRetried.All ? "" : retried,
         start_date: startDate,
         end_date: endDate,
       });
@@ -556,6 +573,7 @@ function LogsContent() {
       const count = await exportSystemLogs({
         type,
         status: status === LogStatus.All ? "" : status,
+        retried: retried === LogRetried.All ? "" : retried,
         start_date: startDate,
         end_date: endDate,
         limit: parsedExportLimit,
@@ -607,15 +625,18 @@ function LogsContent() {
 
   const clearFilters = () => {
     setStatus(LogStatus.All);
+    setRetried(LogRetried.All);
     setStartDate("");
     setEndDate("");
   };
 
   const changeType = (value: string) => {
     setType(value);
-    // 成功/失败只对调用日志有意义，账号日志的 status 记的是账号状态（正常/限流/禁用）。
+    // 成功/失败与是否重试只对调用日志有意义：
+    // 账号日志的 status 记的是账号状态（正常/限流/禁用），也没有换号轨迹。
     if (value !== LogType.Call) {
       setStatus(LogStatus.All);
+      setRetried(LogRetried.All);
     }
   };
 
@@ -652,7 +673,7 @@ function LogsContent() {
 
   useEffect(() => {
     void loadLogs();
-  }, [type, status, startDate, endDate]);
+  }, [type, status, retried, startDate, endDate]);
 
   useEffect(() => {
     void loadRetention();
@@ -684,6 +705,18 @@ function LogsContent() {
                 <SelectItem value={LogStatus.Success}>成功</SelectItem>
                 <SelectItem value={LogStatus.Failed}>失败</SelectItem>
                 <SelectItem value={LogStatus.PolicyViolation}>违反安全策略</SelectItem>
+              </SelectContent>
+            </Select>
+          </FilterField>
+        ) : null}
+        {isCallLog ? (
+          <FilterField label="是否重试">
+            <Select value={retried} onValueChange={setRetried}>
+              <SelectTrigger className="h-10 w-[150px] rounded-xl"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value={LogRetried.All}>全部</SelectItem>
+                <SelectItem value={LogRetried.Yes}>已重试</SelectItem>
+                <SelectItem value={LogRetried.No}>未重试</SelectItem>
               </SelectContent>
             </Select>
           </FilterField>

@@ -136,12 +136,14 @@ def create_router(app_version: str) -> APIRouter:
         return get_image_download_response(image_path)
 
     @router.get("/api/logs")
-    async def get_logs(type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+    async def get_logs(type: str = "", status: str = "", retried: str = "",
+                       start_date: str = "", end_date: str = "",
                        authorization: str | None = Header(default=None)):
         require_admin(authorization)
         items = log_service.list(
             type=type.strip(),
             status=status.strip(),
+            retried=retried.strip(),
             start_date=start_date.strip(),
             end_date=end_date.strip(),
         )
@@ -152,13 +154,15 @@ def create_router(app_version: str) -> APIRouter:
         return {"items": items}
 
     @router.get("/api/logs/export")
-    async def export_logs(type: str = "", status: str = "", start_date: str = "", end_date: str = "",
+    async def export_logs(type: str = "", status: str = "", retried: str = "",
+                          start_date: str = "", end_date: str = "",
                           limit: int = LOG_EXPORT_DEFAULT_LIMIT,
                           authorization: str | None = Header(default=None)):
         """导出最近 N 条日志为 txt，报文完整，方便直接复制出来排查。"""
         require_admin(authorization)
         text, count = await run_in_threadpool(
-            log_service.build_export, type.strip(), status.strip(), start_date.strip(), end_date.strip(), limit,
+            log_service.build_export, type.strip(), status.strip(), retried.strip(),
+            start_date.strip(), end_date.strip(), limit,
         )
         return _log_export_response(text, count)
 

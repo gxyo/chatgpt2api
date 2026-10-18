@@ -78,6 +78,67 @@ class LogListFilterTests(unittest.TestCase):
         self.assertEqual(missing.list(status="failed"), [])
 
 
+def retry_log_line(*, day: str, log_id: str, retried: bool) -> str:
+    detail: dict[str, object] = {"status": "success"}
+    if retried:
+        detail["account_trail"] = "a@example.com → b@example.com"
+        detail["attempts_summary"] = "#1 a@example.com poll_timeout → #2 b@example.com success"
+    return json.dumps(
+        {"id": log_id, "time": f"{day} 10:00:00", "type": "call", "summary": "调用", "detail": detail},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+class LogRetryFilterTests(unittest.TestCase):
+    """「是否重试」筛选：口径与日志页的重试列一致（换过号才算）。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        path = Path(self._tmp.name) / "logs.jsonl"
+        path.write_text("\n".join([
+            retry_log_line(day="2026-09-28", log_id="plain", retried=False),
+            retry_log_line(day="2026-09-29", log_id="retried", retried=True),
+            json.dumps({
+                "id": "diagnostics-only",
+                "time": "2026-09-30 10:00:00",
+                "type": "call",
+                "summary": "调用失败",
+                "detail": {
+                    "status": "failed",
+                    "image_diagnostics": {
+                        "attempts": [
+                            {"n": 1, "account_email": "a@example.com"},
+                            {"n": 2, "account_email": "b@example.com"},
+                        ],
+                    },
+                },
+            }, ensure_ascii=False, separators=(",", ":")),
+        ]) + "\n", encoding="utf-8")
+        self.service = LogService(path)
+
+    @staticmethod
+    def days(items: list[dict[str, object]]) -> list[str]:
+        return [str(item["time"])[:10] for item in items]
+
+    def test_retried_yes_only_keeps_logs_with_a_switch(self):
+        self.assertEqual(self.days(self.service.list(retried="yes")), ["2026-09-30", "2026-09-29"])
+
+    def test_retried_no_keeps_logs_without_a_switch(self):
+        self.assertEqual(self.days(self.service.list(retried="no")), ["2026-09-28"])
+
+    def test_unknown_value_is_ignored(self):
+        self.assertEqual(len(self.service.list(retried="whatever")), 3)
+
+    def test_export_condition_mentions_the_retry_filter(self):
+        text, count = self.service.build_export(retried="yes")
+
+        self.assertEqual(count, 2)
+        self.assertIn("重试=是", text)
+        self.assertIn("重试=不限", self.service.build_export()[0])
+
+
 class LogExportTests(unittest.TestCase):
     """一键导出：完整的报文、跟着筛选走、默认 10 条。"""
 
@@ -376,6 +437,22 @@ class LogExportApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["x-exported-count"], "3")
+
+    def test_export_honours_the_retry_filter(self):
+        with mock.patch.object(system_module, "require_admin", lambda authorization=None: {"role": "admin"}):
+            retried = self.client.get("/api/logs/export", params={"retried": "yes"})
+            not_retried = self.client.get("/api/logs/export", params={"retried": "no"})
+
+        self.assertEqual(retried.headers["x-exported-count"], "0")
+        self.assertIn("重试=是", retried.text)
+        self.assertEqual(not_retried.headers["x-exported-count"], "10")
+
+    def test_log_list_honours_the_retry_filter(self):
+        with mock.patch.object(system_module, "require_admin", lambda authorization=None: {"role": "admin"}):
+            response = self.client.get("/api/logs", params={"retried": "yes"})
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["items"], [])
 
     def test_export_selected_logs_requires_an_admin_key(self):
         response = self.client.post("/api/logs/export", json={"ids": ["call-2026-09-01-success"]})

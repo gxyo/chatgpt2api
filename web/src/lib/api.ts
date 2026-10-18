@@ -574,10 +574,18 @@ export async function fetchImageStorage() {
   return httpRequest<ImageStorageStats>("/api/images/storage");
 }
 
-export async function fetchSystemLogs(filters: { type?: string; status?: string; start_date?: string; end_date?: string }) {
+export async function fetchSystemLogs(filters: {
+  type?: string;
+  status?: string;
+  /** 是否换过号重试：yes / no；空 = 不限。 */
+  retried?: string;
+  start_date?: string;
+  end_date?: string;
+}) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
   if (filters.status) params.set("status", filters.status);
+  if (filters.retried) params.set("retried", filters.retried);
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
@@ -606,6 +614,8 @@ function saveLogExport(blob: Blob, disposition: string | undefined, rawCount: un
 export async function exportSystemLogs(filters: {
   type?: string;
   status?: string;
+  /** 是否换过号重试：yes / no；空 = 不限。 */
+  retried?: string;
   start_date?: string;
   end_date?: string;
   limit?: number;
@@ -613,6 +623,7 @@ export async function exportSystemLogs(filters: {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
   if (filters.status) params.set("status", filters.status);
+  if (filters.retried) params.set("retried", filters.retried);
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   if (filters.limit) params.set("limit", String(filters.limit));
