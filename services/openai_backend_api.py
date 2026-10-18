@@ -301,6 +301,10 @@ class OpenAIBackendAPI:
         # 取图阶段的现场：SSE 给了哪些 id、直接解析是否落空、回退轮询等了多久、
         # 每个 id 换下载地址失败的原因。失败时随诊断一起进调用日志。
         self.image_resolve_diagnostics: Dict[str, Any] = {}
+        # 轮询进行中的实时现场。请求级 deadline 常常是在轮询的 sleep 里撞上的，
+        # 那个异常由 `_remaining_deadline_secs()` 抛，拿不到局部变量；把现场挂在
+        # 实例上，超时异常就能带着查询次数/耗时/最后状态一起出日志。
+        self._image_poll_progress: Dict[str, Any] | None = None
         self.session = requests.Session(**proxy_settings.build_session_kwargs(
             account=self.account,
             impersonate=self.fp["impersonate"],
@@ -373,6 +377,15 @@ class OpenAIBackendAPI:
             # 打个标记：这一路超时和「轮询把预算跑完」不是一回事，日志里要能分开。
             exc = ImageRequestTimeoutError("image request deadline exceeded")
             setattr(exc, "poll_reason", "request_deadline")
+            # deadline 是在轮询的 sleep/请求里撞上的：把实时轮询现场一并带走，
+            # 否则导出日志只能看到「查询 ? 次，耗时 ?s」，分不清是没轮询还是轮询没结果。
+            poll_progress = getattr(self, "_image_poll_progress", None)
+            if isinstance(poll_progress, dict):
+                for key in POLL_DIAGNOSTIC_KEYS:
+                    value = poll_progress.get(key)
+                    if value is None or value == "":
+                        continue
+                    setattr(exc, key, value)
             raise exc
         return remaining
 
@@ -2446,6 +2459,7 @@ class OpenAIBackendAPI:
         self._add_unique(sediment_ids, initial_sediment_ids or [])
         consecutive_upstream_status = 0
         last_upstream_status_code: int | None = None
+        last_task_error = ""
         logger.info({
             "event": "image_poll_start",
             "conversation_id": conversation_id,
@@ -2459,6 +2473,33 @@ class OpenAIBackendAPI:
         def _remaining() -> float:
             return timeout_secs - (time.time() - start)
 
+        def _sync_poll_progress() -> None:
+            """把轮询现场挂到实例上，供 deadline 异常带走。
+
+            请求级 deadline 通常是在 sleep 里撞上的，`_remaining_deadline_secs()`
+            抛异常时读不到这里的局部变量；不挂实例的话导出日志只剩
+            「查询 ? 次，耗时 ?s」。每轮查询后、每次 sleep 前刷新一次即可。
+            """
+            progress: Dict[str, Any] = {
+                "poll_reason": "request_deadline",
+                "poll_attempts": attempt,
+                "poll_elapsed_secs": round(time.time() - start, 1),
+                "poll_timeout_secs": round(float(timeout_secs), 1),
+                "poll_requested_timeout_secs": round(requested_timeout_secs, 1),
+                "poll_budget_clamped_by_deadline": budget_clamped,
+                "poll_interval_secs": interval,
+                "poll_initial_wait_secs": initial_wait,
+                "poll_file_ids": len(file_ids),
+                "poll_sediment_ids": len(sediment_ids),
+                "poll_consecutive_status": consecutive_upstream_status,
+            }
+            if last_upstream_status_code is not None:
+                progress["poll_last_upstream_status"] = last_upstream_status_code
+            if last_task_error:
+                progress["poll_last_task_error"] = str(last_task_error)[:200]
+            self._image_poll_progress = progress
+
+        _sync_poll_progress()
         if initial_wait > 0:
             jitter = random.uniform(0, min(2.0, initial_wait * 0.2))
             sleep_for = min(initial_wait + jitter, max(0.0, _remaining()))
@@ -2485,10 +2526,9 @@ class OpenAIBackendAPI:
             if error is not None:
                 log_payload["error"] = error
             logger.warning(log_payload)
+            _sync_poll_progress()
             self._sleep_with_deadline(sleep_for)
             return True
-
-        last_task_error = ""
 
         def _timeout_context(reason: str, **extra: Any) -> Dict[str, Any]:
             """轮询超时（含提前超时）那一刻的现场。
@@ -2523,6 +2563,7 @@ class OpenAIBackendAPI:
             # 在每次轮询时，检查 /backend-api/tasks/ 是否有错误（仅记录，不中断）
             # 内容政策违规检测通过对话文本进行（在 _find_content_policy_error_in_conversation 中）
             last_task_error = ""
+            _sync_poll_progress()
             try:
                 tasks = self._query_backend_tasks(conversation_id=conversation_id, timeout_secs=5.0)
                 for task in tasks:
@@ -2571,6 +2612,7 @@ class OpenAIBackendAPI:
                         )
                         setattr(fast_exc, "conversation_id", conversation_id or "")
                         setattr(fast_exc, "upstream_status_code", exc.status_code)
+                        self._image_poll_progress = None
                         raise _with_timeout_context(
                             fast_exc,
                             "fast_fail_upstream_status",
@@ -2618,9 +2660,11 @@ class OpenAIBackendAPI:
                 # 首次发现 file_ids/sediment_ids 即返回，不再二次确认。
                 logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids,
                              "sediment_ids": sediment_ids})
+                self._image_poll_progress = None
                 return file_ids, sediment_ids
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
                           "elapsed_secs": round(time.time() - start, 1)})
+            _sync_poll_progress()
             wait = min(interval, max(0.0, _remaining()))
             if wait > 0:
                 self._sleep_with_deadline(wait)
@@ -2648,6 +2692,7 @@ class OpenAIBackendAPI:
             poll_last_upstream_status=last_upstream_status_code,
             poll_consecutive_status=consecutive_upstream_status,
         )
+        self._image_poll_progress = None
         raise exc
 
     def _get_file_download_url(self, file_id: str) -> str:

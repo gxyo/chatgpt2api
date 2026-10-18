@@ -78,6 +78,15 @@ class ImageGenerationError(Exception):
         return error_dict
 
 
+class ImageNoToolEventError(ImagePollTimeoutError):
+    """SSE 结束，但既没有图片 id，也没有任何图片工具事件。
+
+    正常的生图/图生图会在主链路 SSE 里带 `file_ids`/`sediment_ids`。两样都没有，
+    通常说明上游这一轮根本没真正开始生成（静默 skipped_mainline、账号限流或队列
+    丢弃）。这时继续冷轮询只会把剩余预算耗光，直接按可重试失败换号更快。
+    """
+
+
 MAX_INITIAL_TRANSIENT_TEXT_ACCOUNT_ATTEMPTS = 2
 MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS = 3
 # 轮询超时后自动换号重试的次数。设置页的 image_generation_retry_count 是在这之后
@@ -1034,6 +1043,21 @@ def stream_image_outputs(
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
+    # 主链路结束时的现场。成功调用日志的时间线里直接展示，用来一眼确认
+    # 「这一轮上游到底有没有调起图片工具、SSE 有没有带 id」。
+    try:
+        backend.image_stream_summary = {
+            "at": time.monotonic(),
+            "conversation_id": conversation_id,
+            "tool_invoked": last.get("tool_invoked"),
+            "turn_use_case": last.get("turn_use_case"),
+            "model_slug": upstream_model_slug,
+            "file_ids": len(file_ids),
+            "sediment_ids": len(sediment_ids),
+            "message_chars": len(message),
+        }
+    except Exception:
+        pass
     # 上游管道错误有时会被 SSE 包装成 assistant 正文（线上的 400
     # {"skipped_mainline":true} 就出现过这种形态）。它不是模型正文：立即按上游 400
     # 失败，交给外层换号/重建 conduit，别再花轮询预算、更别当 text_reply 重试。
@@ -1133,9 +1157,51 @@ def stream_image_outputs(
                 "error": detailed_error,
             })
 
+    # SSE 已经读完，但既没有图片 id、也没有任何图片工具事件：这轮上游大概率
+    # 根本没开始生成。此时冷轮询查不到任何结果，只会把剩余预算耗光——直接
+    # 按可重试失败换号。文本回复（referenced_image_ids / 工具参数 JSON）是
+    # 已知的「图在异步生成」形态，仍交给下面的轮询。
+    if (
+            not file_ids
+            and not sediment_ids
+            and not is_text_reply
+            and last.get("tool_invoked") is not True
+            # 内容政策拒绝不是账号问题：换号只会继续撞墙，仍交给轮询里的
+            # `_find_content_policy_error_in_conversation` / task error 识别并按 400 返回。
+            and not (message and is_content_policy_error(message))
+            and not (detailed_error and is_content_policy_error(detailed_error))
+    ):
+        logger.warning({
+            "event": "image_stream_no_tool_event_skip_poll",
+            "conversation_id": conversation_id,
+            "tool_invoked": last.get("tool_invoked"),
+            "turn_use_case": last.get("turn_use_case"),
+            "message_chars": len(message),
+            "task_error": detailed_error[:200] if detailed_error else "",
+            "stream_tail": _image_stream_tail(backend, IMAGE_STREAM_TAIL_IN_BODY),
+        })
+        exc = ImageNoToolEventError(
+            "上游本轮生图没有开始（SSE 结束仍无图片 id / 图片工具事件），已跳过轮询并换号重试"
+        )
+        setattr(exc, "conversation_id", conversation_id or "")
+        raise exc
+
     # 当检测到文本回复（含 referenced_image_ids）时仍继续轮询图片结果，
     # 但轮询预算必须尊重请求级 deadline / image_poll_timeout_secs。
     poll_timeout = config.image_poll_timeout_secs
+    if not file_ids and not sediment_ids and not is_text_reply:
+        # 冷轮询：主链路一个图片 id 都没给。即使 tool_invoked=True 说明工具被调起，
+        # 正常路径也已经错过了；按更短的预算等一会儿就换号，别把整个请求预算耗在这。
+        cold_timeout = float(config.image_poll_cold_timeout_secs)
+        if cold_timeout < poll_timeout:
+            logger.info({
+                "event": "image_poll_cold_budget",
+                "conversation_id": conversation_id,
+                "poll_timeout_secs": poll_timeout,
+                "cold_timeout_secs": cold_timeout,
+                "tool_invoked": last.get("tool_invoked"),
+            })
+            poll_timeout = cold_timeout
     if is_text_reply and conversation_id:
         logger.info({
             "event": "image_text_reply_poll",
@@ -1354,8 +1420,11 @@ def stream_image_outputs(
             })
     if should_poll_for_image and conversation_id:
         # 图片可能仍在异步处理中（上游 SSE 流在图片生成完成前就结束了）。
-        # 后续轮询仍使用配置的超时预算，不强制延长到固定 300s。
+        # 后续轮询仍使用配置的超时预算，不强制延长到固定 300s；但如果一个图片
+        # id 都没有，按冷轮询的更短预算处理，避免又把整个请求预算耗在等待上。
         retry_poll_timeout = config.image_poll_timeout_secs
+        if not file_ids and not sediment_ids:
+            retry_poll_timeout = min(retry_poll_timeout, config.image_poll_cold_timeout_secs)
         MAX_FALLBACK_POLL_RETRIES = 3
         for poll_attempt in range(1, MAX_FALLBACK_POLL_RETRIES + 1):
             ensure_image_deadline(request.deadline)
@@ -1701,10 +1770,25 @@ def _image_stream_tail(backend: Any, limit: int = IMAGE_STREAM_TAIL_LIMIT) -> li
     return [dict(item) for item in tail[-max(1, limit):] if isinstance(item, dict)]
 
 
+def _image_stream_summary(backend: Any) -> dict[str, Any]:
+    """主链路结束时的摘要：有没有调起图片工具、SSE 带回了几个图片 id。"""
+    if backend is None:
+        return {}
+    summary = getattr(backend, "image_stream_summary", None)
+    return dict(summary) if isinstance(summary, dict) else {}
+
+
 def _image_stream_diagnostics(backend: Any) -> dict[str, Any]:
     """上游 SSE 尾部现场，失败时随 image_diagnostics 一起进调用日志。"""
+    diagnostics: dict[str, Any] = {}
     tail = _image_stream_tail(backend)
-    return {"stream_tail": tail} if tail else {}
+    if tail:
+        diagnostics["stream_tail"] = tail
+    summary = _image_stream_summary(backend)
+    if summary:
+        # `at` 是 monotonic 时间戳，只给时间线排序用，导出日志里没有意义。
+        diagnostics["stream_summary"] = {key: value for key, value in summary.items() if key != "at"}
+    return diagnostics
 
 
 def _plumbing_message_body(text: str) -> dict[str, Any] | None:
@@ -2031,9 +2115,17 @@ def _generate_single_image_attempts(
         # 清掉上一轮的，避免把上一次的上游响应误当成这一次的。
         stream_diag = _image_stream_diagnostics(backend)
         if stream_diag:
-            diagnostics["stream_tail"] = stream_diag["stream_tail"]
+            if stream_diag.get("stream_tail"):
+                diagnostics["stream_tail"] = stream_diag["stream_tail"]
+            else:
+                diagnostics.pop("stream_tail", None)
+            if stream_diag.get("stream_summary"):
+                diagnostics["stream_summary"] = stream_diag["stream_summary"]
+            else:
+                diagnostics.pop("stream_summary", None)
         else:
             diagnostics.pop("stream_tail", None)
+            diagnostics.pop("stream_summary", None)
         diagnostics.update({
             "trace_id": trace_id,
             "index": index,
@@ -2460,6 +2552,25 @@ def _generate_single_image_attempts(
                 outputs.append(output)
             if retry_after_output:
                 continue
+            if returned_result:
+                # 成功日志也记一份主链路摘要：之后排查「为什么图有了但流里没 id」
+                # 或「这轮到底有没有调起图片工具」时，不用再去翻容器日志。
+                summary = _image_stream_summary(backend)
+                if summary:
+                    tool_invoked = summary.get("tool_invoked")
+                    turn_use_case = str(summary.get("turn_use_case") or "").strip()
+                    mark_timeline(
+                        "stream_summary", "上游流结果",
+                        f"tool_invoked={tool_invoked if tool_invoked is not None else '?'}；"
+                        f"turn_use_case={turn_use_case or '?'}；"
+                        f"图片 id {summary.get('file_ids', 0)} 个 / sediment {summary.get('sediment_ids', 0)} 个",
+                        started=summary.get("at"),
+                        tool_invoked=tool_invoked,
+                        turn_use_case=turn_use_case,
+                        conversation_id=summary.get("conversation_id"),
+                        file_ids=summary.get("file_ids"),
+                        sediment_ids=summary.get("sediment_ids"),
+                    )
             if returned_message:
                 account_service.mark_image_result(token, False)
                 attempt_outcome = "message"
@@ -2484,9 +2595,19 @@ def _generate_single_image_attempts(
             return outputs
         except ImagePollTimeoutError as exc:
             account_service.mark_image_result(token, False)
-            attempt_outcome, attempt_error = "poll_timeout", str(exc)
+            # 「SSE 结束就没有图片工具事件」也走这条换号路径，但原因不是轮询超时，
+            # 日志/轨迹里必须分开写，否则又会把「上游没开始生成」误判成「上游慢」。
+            no_tool_event = isinstance(exc, ImageNoToolEventError)
+            attempt_outcome = "no_tool_event" if no_tool_event else "poll_timeout"
+            attempt_error = str(exc)
             # 轮询是「预算跑完了」还是「上游一直 5xx 提前超时」，两者文案一样、现场不同。
             poll_context = poll_timeout_diagnostics(exc)
+            if no_tool_event:
+                poll_context = {
+                    "poll_reason": "no_image_tool_event",
+                    "poll_attempts": 0,
+                    "poll_elapsed_secs": 0,
+                }
             if poll_context:
                 diagnostics.update(poll_context)
                 # 轮询现场挂到本次尝试上（由 finally 里的 record_attempt_state 统一收尾），
@@ -2494,7 +2615,7 @@ def _generate_single_image_attempts(
                 attempt_extra.update(poll_context)
             if account_email:
                 setattr(exc, "account_email", account_email)
-            # 轮询超时：如果还没有拿到最终消息/图片，只丢弃本账号的进度并换号重试。
+            # 轮询超时 / 主链路没起图：如果还没有拿到最终消息/图片，只丢弃本账号的进度并换号重试。
             if not returned_message and not returned_result:
                 poll_timeout_retry_count += 1
                 # 内置的自动换号重试只能花剩余预算；预算已经耗尽时留给下面
@@ -2509,14 +2630,22 @@ def _generate_single_image_attempts(
                         "account_email": account_email,
                         "retry_count": poll_timeout_retry_count,
                         "index": index,
+                        "reason": poll_context.get("poll_reason"),
+                        "no_tool_event": no_tool_event,
                         "error": str(exc)[:200],
                     })
-                    mark_timeline(
-                        "retry", "轮询超时换号",
+                    retry_detail = (
+                        "SSE 结束仍没有任何图片 id / 图片工具事件，跳过轮询直接换号"
+                        f"（内置换号第 {poll_timeout_retry_count}/{MAX_POLL_TIMEOUT_RETRIES} 次，不续预算）"
+                        if no_tool_event else
                         f"轮询 {poll_context.get('poll_elapsed_secs', '?')}s 没等到图"
                         f"（查询 {poll_context.get('poll_attempts', '?')} 次，原因 "
                         f"{poll_context.get('poll_reason', '?')}）；"
-                        f"内置换号重试第 {poll_timeout_retry_count}/{MAX_POLL_TIMEOUT_RETRIES} 次，不续预算",
+                        f"内置换号重试第 {poll_timeout_retry_count}/{MAX_POLL_TIMEOUT_RETRIES} 次，不续预算"
+                    )
+                    mark_timeline(
+                        "retry", "主链路未出图换号" if no_tool_event else "轮询超时换号",
+                        retry_detail,
                         retry_count=poll_timeout_retry_count,
                         retry_limit=MAX_POLL_TIMEOUT_RETRIES,
                         reason=str(poll_context.get("poll_reason") or ""),

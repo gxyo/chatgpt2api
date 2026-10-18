@@ -441,6 +441,23 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(outputs[0].kind, "result")
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
 
+    def test_no_tool_event_switches_account_without_polling_budget(self):
+        # 主链路没起图（SSE 没 id、也没图片工具事件）和轮询超时共用换号路径，
+        # 但不该把预算花在轮询上；不续预算也要能立刻换到下一个号。
+        def stream_fn(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                raise conversation.ImageNoToolEventError("no image tool event")
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        outputs, accounts = self._run(["token-a", "token-b"], stream_fn, 0)
+
+        self.assertEqual(outputs[0].kind, "result")
+        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+        timeline = conversation.collect_image_outputs(outputs)["_image_timeline"]
+        retry_steps = [step for group in timeline for step in group["steps"] if step["step"] == "retry"]
+        self.assertTrue(any(step.get("label") == "主链路未出图换号" for step in retry_steps))
+        self.assertTrue(any(step.get("reason") == "no_image_tool_event" for step in retry_steps))
+
     def test_local_timeout_retry_is_labelled_as_timeout_not_upstream_error(self):
         # 本地预算耗尽时长这样说「本次尝试超时」：它和上游真的返回错误是两回事，
         # 时间线里混着写会让人以为渠道故障。

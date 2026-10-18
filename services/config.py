@@ -20,6 +20,10 @@ THINKING_EFFORT_CHOICES = ("auto", "standard", "extended", "max")
 DEFAULT_THINKING_EFFORT = "auto"
 
 DEFAULT_IMAGE_POLL_TIMEOUT_SECS = 75
+# 主链路 SSE 结束时一个图片 id 都没带（不是「有 id 但还没落盘」）时，轮询最多等
+# 这么久就换号。正常出图会在 SSE 里直接带 file_ids；没有 id 往往是这一轮根本没
+# 开始生成，等满整个 image_poll_timeout_secs 只是白等。
+DEFAULT_IMAGE_POLL_COLD_TIMEOUT_SECS = 40
 # 生图失败后换号重新生成的次数。留空/0 = 不重试，保持原有行为。
 DEFAULT_IMAGE_GENERATION_RETRY_COUNT = 0
 DEFAULT_IMAGE_CLEANUP_INTERVAL_DAYS = 1
@@ -410,6 +414,22 @@ class ConfigStore:
             return DEFAULT_IMAGE_POLL_TIMEOUT_SECS
 
     @property
+    def image_poll_cold_timeout_secs(self) -> int:
+        """SSE 没给任何图片 id 时的轮询上限。
+
+        正常的生图/图生图会在主链路 SSE 里带 `file_ids`/`sediment_ids`；一个都没有
+        说明这一轮大概率根本没开始生成。继续按 `image_poll_timeout_secs` 等到预算
+        耗尽，线上实测就是白等 100s 左右，之后换号 20s 就出图了。
+        """
+        try:
+            return max(
+                1,
+                int(self.data.get("image_poll_cold_timeout_secs", DEFAULT_IMAGE_POLL_COLD_TIMEOUT_SECS)),
+            )
+        except (TypeError, ValueError):
+            return DEFAULT_IMAGE_POLL_COLD_TIMEOUT_SECS
+
+    @property
     def image_poll_interval_secs(self) -> float:
         try:
             return max(0.5, float(self.data.get("image_poll_interval_secs", 10.0)))
@@ -548,6 +568,7 @@ class ConfigStore:
         data["log_cleanup_keep_today"] = self.log_cleanup_keep_today
         data["log_cleanup_include_register"] = self.log_cleanup_include_register
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
+        data["image_poll_cold_timeout_secs"] = self.image_poll_cold_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_generation_retry_count"] = self.image_generation_retry_count
@@ -626,6 +647,12 @@ class ConfigStore:
         if "image_generation_retry_count" in next_data:
             next_data["image_generation_retry_count"] = _normalize_image_generation_retry_count(
                 next_data.get("image_generation_retry_count")
+            )
+        if "image_poll_cold_timeout_secs" in next_data:
+            next_data["image_poll_cold_timeout_secs"] = _normalize_positive_int(
+                next_data.get("image_poll_cold_timeout_secs"),
+                DEFAULT_IMAGE_POLL_COLD_TIMEOUT_SECS,
+                1,
             )
         if "default_upstream_model_name" in next_data:
             next_data["default_upstream_model_name"] = _normalize_upstream_model_name(

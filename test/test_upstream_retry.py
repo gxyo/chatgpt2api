@@ -574,6 +574,119 @@ class UpstreamRetryTests(unittest.TestCase):
         self.assertEqual(timeouts, [100])
         self.assertEqual(outputs[0].kind, "message")
 
+    def test_cold_poll_uses_shorter_budget_when_sse_has_no_ids(self):
+        timeouts: list[float] = []
+
+        class FakeBackend:
+            def _query_backend_tasks(self, conversation_id="", task_id="", timeout_secs=0):
+                return []
+
+            def resolve_conversation_image_urls(self, conversation_id, file_ids, sediment_ids,
+                                                poll_timeout_secs=None, **kwargs):
+                timeouts.append(poll_timeout_secs)
+                raise ImagePollTimeoutError("poll timeout")
+
+        request = ConversationRequest(model="gpt-image-2", prompt="test")
+        original_timeout = conversation.config.data.get("image_poll_timeout_secs")
+        original_cold_timeout = conversation.config.data.get("image_poll_cold_timeout_secs")
+        conversation.config.data["image_poll_timeout_secs"] = 120
+        conversation.config.data["image_poll_cold_timeout_secs"] = 40
+        try:
+            with mock.patch.object(
+                conversation,
+                "conversation_events",
+                lambda *args, **kwargs: iter([{
+                    "conversation_id": "conv-1",
+                    "file_ids": [],
+                    "sediment_ids": [],
+                    "text": "",
+                    # 工具确实被调起、SSE 却没带 id：仍值得等一会儿，但不能等满 120s。
+                    "tool_invoked": True,
+                    "turn_use_case": "image gen",
+                }]),
+            ):
+                with self.assertRaises(ImagePollTimeoutError):
+                    list(conversation.stream_image_outputs(FakeBackend(), request))
+        finally:
+            if original_timeout is None:
+                conversation.config.data.pop("image_poll_timeout_secs", None)
+            else:
+                conversation.config.data["image_poll_timeout_secs"] = original_timeout
+            if original_cold_timeout is None:
+                conversation.config.data.pop("image_poll_cold_timeout_secs", None)
+            else:
+                conversation.config.data["image_poll_cold_timeout_secs"] = original_cold_timeout
+
+        self.assertEqual(timeouts, [40.0])
+
+    def test_stream_without_image_tool_event_skips_poll(self):
+        polled: list[bool] = []
+
+        class FakeBackend:
+            def _query_backend_tasks(self, conversation_id="", task_id="", timeout_secs=0):
+                return []
+
+            def resolve_conversation_image_urls(self, *args, **kwargs):
+                polled.append(True)
+                return []
+
+        request = ConversationRequest(model="gpt-image-2", prompt="test")
+        with mock.patch.object(
+            conversation,
+            "conversation_events",
+            lambda *args, **kwargs: iter([{
+                "conversation_id": "conv-1",
+                "file_ids": [],
+                "sediment_ids": [],
+                "text": "",
+                "tool_invoked": False,
+                "turn_use_case": "image gen",
+            }]),
+        ):
+            with self.assertRaises(conversation.ImageNoToolEventError):
+                list(conversation.stream_image_outputs(FakeBackend(), request))
+
+        # 上游没开始生成，轮询注定查不到：一次都不该查。
+        self.assertEqual(polled, [])
+
+    def test_poll_deadline_exception_carries_poll_progress(self):
+        class RepeatingSession:
+            headers: dict[str, str] = {}
+
+            def __init__(self):
+                self.calls: list[tuple[str, str, dict]] = []
+
+            def get(self, url: str, **kwargs):
+                self.calls.append(("get", url, kwargs))
+                return FakeResponse(200, {"tasks": [], "mapping": {}})
+
+        api = OpenAIBackendAPI("token-a", deadline=time.monotonic() + 1.0)
+        api.session = RepeatingSession()
+        original_initial_wait = backend_config.data.get("image_poll_initial_wait_secs")
+        original_interval = backend_config.data.get("image_poll_interval_secs")
+        backend_config.data["image_poll_initial_wait_secs"] = 0
+        backend_config.data["image_poll_interval_secs"] = 0.05
+        try:
+            with self.assertRaises(ImageRequestTimeoutError) as ctx:
+                api._poll_image_results("conv-deadline", timeout_secs=120)
+        finally:
+            if original_initial_wait is None:
+                backend_config.data.pop("image_poll_initial_wait_secs", None)
+            else:
+                backend_config.data["image_poll_initial_wait_secs"] = original_initial_wait
+            if original_interval is None:
+                backend_config.data.pop("image_poll_interval_secs", None)
+            else:
+                backend_config.data["image_poll_interval_secs"] = original_interval
+
+        exc = ctx.exception
+        # 之前这里只带 poll_reason，导出日志显示「查询 ? 次，耗时 ?s」。
+        self.assertEqual(getattr(exc, "poll_reason", ""), "request_deadline")
+        self.assertGreaterEqual(getattr(exc, "poll_attempts", 0), 1)
+        self.assertGreater(getattr(exc, "poll_elapsed_secs", 0), 0)
+        self.assertEqual(getattr(exc, "poll_requested_timeout_secs", 0), 120)
+        self.assertTrue(getattr(exc, "poll_budget_clamped_by_deadline", False))
+
     def test_image_pool_releases_account_and_sanitizes_poll_timeout(self):
         fake_accounts = FakeAccountService(["token-a"])
 

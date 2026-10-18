@@ -79,6 +79,7 @@ const attemptOutcomes: Record<string, AttemptOutcomeStyle> = {
   message: { label: "返回文案", variant: "warning" },
   message_retry: { label: "文案重试", variant: "warning" },
   poll_timeout: { label: "轮询超时", variant: "warning" },
+  no_tool_event: { label: "主链路未出图", variant: "warning" },
   transient_upstream: { label: "上游抖动", variant: "warning" },
   mainline_rejected: { label: "主链路拒绝", variant: "warning" },
   content_policy: { label: "内容拦截", variant: "danger" },
