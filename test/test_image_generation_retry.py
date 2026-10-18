@@ -275,6 +275,43 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(failure.code, "content_policy_violation")
         self.assertEqual(accounts.selected_image_tokens, ["token-a"])
 
+    def test_unsupported_app_response_is_not_retried_and_does_not_mark_account_failed(self):
+        def stream_fn(backend, request, index=1, total=1):
+            raise conversation.ImageUnsupportedAppResponseError(
+                conversation.UNSUPPORTED_APP_RESPONSE_MESSAGE,
+                code=conversation.UNSUPPORTED_APP_RESPONSE_CODE,
+            )
+            yield  # pragma: no cover
+
+        failure, accounts = self._run_expecting_error(["token-a", "token-b"], stream_fn, 3)
+
+        self.assertEqual(failure.code, conversation.UNSUPPORTED_APP_RESPONSE_CODE)
+        # 应用响应不是账号故障：不换号、不增加失败计数，只把槽位还回去。
+        self.assertEqual(accounts.selected_image_tokens, ["token-a"])
+        self.assertEqual(accounts.image_results, [])
+        self.assertEqual(accounts.released_slots, ["token-a"])
+        self.assertEqual(failure.image_diagnostics["attempts"][0]["outcome"], "unsupported_app_response")
+
+    def test_unsupported_app_message_is_not_retried(self):
+        refusal = (
+            "当前聊天中我无法直接生成图片，但可以先为你整理好适用于图像生成工具的最终提示词。"
+        )
+
+        def stream_fn(backend, request, index=1, total=1):
+            yield ImageOutput(
+                kind="message", model=request.model, index=index, total=total,
+                text=refusal, conversation_id="conv-refusal",
+            )
+
+        failure, accounts = self._run_expecting_error(["token-a", "token-b"], stream_fn, 3)
+
+        self.assertEqual(failure.code, "unsupported_app_response")
+        self.assertEqual(str(failure), conversation.UNSUPPORTED_APP_RESPONSE_MESSAGE)
+        self.assertEqual(accounts.selected_image_tokens, ["token-a"])
+        self.assertEqual(accounts.image_results, [])
+        self.assertEqual(accounts.released_slots, ["token-a"])
+        self.assertEqual((failure.body or {}).get("upstream_text"), refusal)
+
     def test_text_reply_is_not_reported_as_content_policy_violation(self):
         prose = "已将圣诞镂空桌布融入美式客厅。你希望洞里的宠物保持这只博美犬吗？"
 

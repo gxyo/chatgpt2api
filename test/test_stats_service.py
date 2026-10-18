@@ -45,6 +45,7 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(result["range"]["start_date"], "2026-09-28")
         self.assertEqual(result["totals"], {
             "requests": 3, "success": 2, "failed": 1, "policy_violation": 0,
+            "unsupported_app_response": 0,
             "success_rate": 2 / 3, "avg_duration_ms": 100, "images": 0, "revenue": 0,
             "legacy_revenue": 0, "legacy_success": 0,
         })
@@ -106,8 +107,8 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(result["totals"]["success"], 1)
         self.assertEqual(result["totals"]["failed"], 1)
         self.assertEqual(result["by_mode"], [
-            {"mode": "generate", "label": "文生图", "requests": 2, "success": 1, "failed": 1, "policy_violation": 0, "images": 0},
-            {"mode": "edit", "label": "图生图", "requests": 0, "success": 0, "failed": 0, "policy_violation": 0, "images": 0},
+            {"mode": "generate", "label": "文生图", "requests": 2, "success": 1, "failed": 1, "policy_violation": 0, "unsupported_app_response": 0, "images": 0},
+            {"mode": "edit", "label": "图生图", "requests": 0, "success": 0, "failed": 0, "policy_violation": 0, "unsupported_app_response": 0, "images": 0},
         ])
 
     def test_policy_violations_are_counted_separately_from_failures(self):
@@ -130,6 +131,28 @@ class ImageStatsServiceTests(unittest.TestCase):
         self.assertEqual(result["totals"]["success_rate"], 0.5)
         by_label = {point["label"]: point for point in result["series"]}
         self.assertEqual(by_label["11:00"]["policy_violation"], 1)
+        self.assertEqual(by_label["11:00"]["failed"], 0)
+
+    def test_unsupported_app_responses_are_counted_separately_from_failures(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(tmp_dir, [
+                log_line("2026-09-28 10:00:00", "/v1/images/generations"),
+                log_line("2026-09-28 10:30:00", "/v1/images/generations", status="failed"),
+                log_line("2026-09-28 11:00:00", "/v1/images/generations", status="unsupported_app_response"),
+                # 网页端任务的同类失败也必须计入，不能因为走任务接口就漏掉。
+                log_line("2026-09-28 12:00:00", "/api/image-tasks/edits", status="unsupported_app_response"),
+            ])
+
+            result = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(result["totals"]["requests"], 4)
+        self.assertEqual(result["totals"]["success"], 1)
+        self.assertEqual(result["totals"]["failed"], 1)
+        self.assertEqual(result["totals"]["unsupported_app_response"], 2)
+        # 成功率的分母只有成功 + 失败：应用响应和内容拦截都不参与。
+        self.assertEqual(result["totals"]["success_rate"], 0.5)
+        by_label = {point["label"]: point for point in result["series"]}
+        self.assertEqual(by_label["11:00"]["unsupported_app_response"], 1)
         self.assertEqual(by_label["11:00"]["failed"], 0)
 
     def test_non_image_and_non_call_entries_are_ignored(self):
@@ -448,6 +471,7 @@ class SnapshotPersistenceTests(unittest.TestCase):
 
         self.assertEqual(after_cleanup["totals"], {
             "requests": 2, "success": 1, "failed": 1, "policy_violation": 0,
+            "unsupported_app_response": 0,
             "success_rate": 0.5, "avg_duration_ms": 100, "images": 0, "revenue": 0,
             "legacy_revenue": 0, "legacy_success": 0,
         })
@@ -973,7 +997,7 @@ class ImageLogCostTests(unittest.TestCase):
 
     def test_failed_and_policy_violation_are_free(self):
         pricing = {"gpt-image-2": 1.5}
-        for status in ("failed", "policy_violation"):
+        for status in ("failed", "policy_violation", "unsupported_app_response"):
             self.assertEqual(stats_service.image_log_cost(self._item("/v1/images/edits", status=status), pricing), 0.0)
 
     def test_non_image_call_and_account_log_are_none(self):

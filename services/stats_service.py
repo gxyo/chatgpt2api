@@ -11,6 +11,7 @@ from services.log_service import (
     LOG_STATUS_FAILED,
     LOG_STATUS_POLICY_VIOLATION,
     LOG_STATUS_SUCCESS,
+    LOG_STATUS_UNSUPPORTED_APP_RESPONSE,
     LOG_TYPE_CALL,
     log_service,
 )
@@ -32,9 +33,10 @@ IMAGE_ENDPOINT_MODES = {
     "/v1/images/generations": "generate",
     "/v1/images/edits": "edit",
 }
-# 网页端的生图任务只在「本地审核拦截 / 任务启动失败」时以这两个 endpoint 记日志；
-# 任务真正跑完后由 image_task_service 以 /v1/images/* 记日志，因此这里只统计
-# failed / policy_violation，避免同一次请求被重复计数。
+# 网页端的生图任务只在「本地审核拦截 / 应用响应 / 任务启动失败」时以这两个
+# endpoint 记日志；任务真正跑完后由 image_task_service 以 /v1/images/* 记日志，
+# 因此这里只统计 failed / policy_violation / unsupported_app_response，避免
+# 同一次请求被重复计数。
 IMAGE_TASK_ENDPOINT_MODES = {
     "/api/image-tasks/generations": "generate",
     "/api/image-tasks/edits": "edit",
@@ -44,7 +46,13 @@ MODE_LABELS = {"generate": "文生图", "edit": "图生图"}
 _STATUS_SUCCESS = LOG_STATUS_SUCCESS
 _STATUS_FAILED = LOG_STATUS_FAILED
 _STATUS_POLICY_VIOLATION = LOG_STATUS_POLICY_VIOLATION
-_STATUSES = (_STATUS_SUCCESS, _STATUS_FAILED, _STATUS_POLICY_VIOLATION)
+_STATUS_UNSUPPORTED_APP_RESPONSE = LOG_STATUS_UNSUPPORTED_APP_RESPONSE
+_STATUSES = (
+    _STATUS_SUCCESS,
+    _STATUS_FAILED,
+    _STATUS_POLICY_VIOLATION,
+    _STATUS_UNSUPPORTED_APP_RESPONSE,
+)
 
 # 聚合快照的落盘格式版本。格式变了就换版本号。
 # v2 起小时桶增加 images/models；v1 快照会被加载后做一次模型数据回填，不丢请求统计。
@@ -55,6 +63,8 @@ _STATUSES = (_STATUS_SUCCESS, _STATUS_FAILED, _STATUS_POLICY_VIOLATION)
 # 升级时按成功请求占比把桶里的图片数分摊到各调用方式。
 # v5 起对「有成功请求但没有图片数」的历史桶按 1 次成功 = 1 张图估算（日志已清理、
 # 锚点丢失导致无法回填时的兜底），否则统计页会把整段历史显示成 0 张成功图片。
+# 新增 unsupported_app_response 计数时保持 v5：旧快照缺这个键按 0 处理，
+# 新日志照常追加即可，不需要重建历史桶。
 SNAPSHOT_VERSION = 5
 CURRENCY = "CNY"
 # 两次落盘之间的最小间隔：统计每次查询都会刷新，不能每次都写盘。
@@ -70,7 +80,14 @@ _iter_days = iter_days
 
 
 def _empty_mode_bucket() -> dict[str, int]:
-    return {"requests": 0, "success": 0, "failed": 0, "policy_violation": 0, "images": 0}
+    return {
+        "requests": 0,
+        "success": 0,
+        "failed": 0,
+        "policy_violation": 0,
+        "unsupported_app_response": 0,
+        "images": 0,
+    }
 
 
 def _empty_bucket() -> dict[str, Any]:
@@ -79,6 +96,7 @@ def _empty_bucket() -> dict[str, Any]:
         "success": 0,
         "failed": 0,
         "policy_violation": 0,
+        "unsupported_app_response": 0,
         "duration_ms": 0,
         # 成功请求返回的图片数：统计页主指标，也是计费单位。
         "images": 0,
@@ -97,7 +115,10 @@ def _restore_bucket(value: Any) -> dict[str, Any]:
     """把快照里读回来的桶重新整成内部结构，字段缺失或类型不对的按 0 处理。"""
     source = value if isinstance(value, dict) else {}
     bucket = _empty_bucket()
-    for key in ("requests", "success", "failed", "policy_violation", "duration_ms", "images"):
+    for key in (
+        "requests", "success", "failed", "policy_violation",
+        "unsupported_app_response", "duration_ms", "images",
+    ):
         try:
             bucket[key] = max(0, int(source.get(key) or 0))
         except (TypeError, ValueError):
@@ -133,7 +154,10 @@ def _restore_bucket(value: Any) -> dict[str, Any]:
         for mode, mode_value in modes.items():
             target = bucket["modes"].setdefault(str(mode), _empty_mode_bucket())
             mode_source = mode_value if isinstance(mode_value, dict) else {}
-            for key in ("requests", "success", "failed", "policy_violation", "images"):
+            for key in (
+                "requests", "success", "failed", "policy_violation",
+                "unsupported_app_response", "images",
+            ):
                 try:
                     target[key] = max(0, int(mode_source.get(key) or 0))
                 except (TypeError, ValueError):
@@ -342,6 +366,7 @@ def _point(key: str, label: str, full_label: str, bucket: dict[str, Any] | None)
         "success": source["success"],
         "failed": source["failed"],
         "policy_violation": source["policy_violation"],
+        "unsupported_app_response": source["unsupported_app_response"],
         "images": source["images"],
     }
 
@@ -796,8 +821,9 @@ class ImageStatsService:
                 peak = None
 
         requests = totals["requests"]
-        # 成功率按「成功图片 + 失败」算：违反安全策略是上游拒绝生成，不是我们这边
-        # 的失败，混进分母会把成功率无端拉低。更早的记录没有图片数时退回成功请求数。
+        # 成功率按「成功图片 + 失败」算：违反安全策略、上游返回不支持的应用响应
+        # 都不是我们这边的失败，混进分母会把成功率无端拉低。更早的记录没有图片数时
+        # 退回成功请求数。
         rate_success = totals["images"] if totals["images"] > 0 else totals["success"]
         rate_base = rate_success + totals["failed"]
         by_mode = [
@@ -808,6 +834,7 @@ class ImageStatsService:
                 "success": totals["modes"][mode]["success"],
                 "failed": totals["modes"][mode]["failed"],
                 "policy_violation": totals["modes"][mode]["policy_violation"],
+                "unsupported_app_response": totals["modes"][mode]["unsupported_app_response"],
                 "images": totals["modes"][mode]["images"],
             }
             for mode, label in MODE_LABELS.items()
@@ -831,6 +858,7 @@ class ImageStatsService:
                 "success": totals["success"],
                 "failed": totals["failed"],
                 "policy_violation": totals["policy_violation"],
+                "unsupported_app_response": totals["unsupported_app_response"],
                 "success_rate": (rate_success / rate_base) if rate_base else 0.0,
                 "avg_duration_ms": int(totals["duration_ms"] / requests) if requests else 0,
                 "images": totals["images"],

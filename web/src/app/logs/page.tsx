@@ -32,6 +32,7 @@ const LogStatus = {
   Success: "success",
   Failed: "failed",
   PolicyViolation: "policy_violation",
+  UnsupportedAppResponse: "unsupported_app_response",
 } as const;
 
 const LogRetried = {
@@ -494,6 +495,7 @@ function getStatus(item: SystemLog) {
   if (status === "success") return "成功";
   if (status === "failed") return "失败";
   if (status === "policy_violation") return "违反安全策略";
+  if (status === "unsupported_app_response") return "不支持的应用响应";
   return "-";
 }
 
@@ -501,6 +503,7 @@ function getStatusVariant(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "failed") return "danger";
   if (status === "policy_violation") return "warning";
+  if (status === "unsupported_app_response") return "violet";
   return "success";
 }
 
@@ -876,6 +879,7 @@ function LogsContent() {
                 <SelectItem value={LogStatus.Success}>成功</SelectItem>
                 <SelectItem value={LogStatus.Failed}>失败</SelectItem>
                 <SelectItem value={LogStatus.PolicyViolation}>违反安全策略</SelectItem>
+                <SelectItem value={LogStatus.UnsupportedAppResponse}>不支持的应用响应</SelectItem>
               </SelectContent>
             </Select>
           </FilterField>

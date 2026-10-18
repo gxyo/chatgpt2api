@@ -24,6 +24,8 @@ import { cn } from "@/lib/utils";
 const SUCCESS_DOT = "bg-brand/50";
 const FAILED_DOT = "bg-[#e34948] dark:bg-[#e66767]";
 const POLICY_DOT = "bg-[#d97706] dark:bg-[#f0a13a]";
+// 应用/文本响应既不是成功也不是失败，用主题里的紫罗兰和红色失败线区分开。
+const UNSUPPORTED_DOT = "bg-chart-4";
 const NEUTRAL_DOT = "bg-neutral-300 dark:bg-neutral-600";
 const LIVE_DOT = "bg-[#2fa96b] dark:bg-[#3fc07f]";
 const REVENUE_DOT = "bg-[#c08a2e] dark:bg-[#e0ab4c]";
@@ -257,9 +259,21 @@ function StatsContent() {
                   tone: POLICY_DOT,
                 },
                 {
+                  label: "不支持的应用响应",
+                  value: String(totals?.unsupported_app_response ?? 0),
+                  caption: "上游未生成图片 · 不计入失败",
+                  tone: UNSUPPORTED_DOT,
+                },
+                {
                   label: "成功率",
                   value: totals ? formatRate(totals.success_rate) : "-",
                   caption: `平均耗时 ${formatDuration(totals?.avg_duration_ms ?? 0)}`,
+                  tone: NEUTRAL_DOT,
+                },
+                {
+                  label: "总请求",
+                  value: String(totals?.requests ?? 0),
+                  caption: rangeLabel || " ",
                   tone: NEUTRAL_DOT,
                 },
               ]}

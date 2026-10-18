@@ -303,6 +303,48 @@ class LoggedCallDetailTests(unittest.TestCase):
             self.assertEqual(item["summary"], "文生图违反安全策略")
             self.assertEqual(item["detail"]["status"], "policy_violation")
 
+    def test_unsupported_app_response_is_logged_as_its_own_status(self):
+        from services.protocol.conversation import (
+            ImageUnsupportedAppResponseError,
+            UNSUPPORTED_APP_RESPONSE_CODE,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = LogService(Path(tmp_dir) / "logs.jsonl")
+            error = ImageUnsupportedAppResponseError(
+                "上游返回了不支持的应用响应（没有生成图片文件）",
+                code=UNSUPPORTED_APP_RESPONSE_CODE,
+            )
+            call = LoggedCall({"id": "k1", "name": "管理员", "role": "admin"},
+                              "/v1/images/generations", "gpt-image-2", "文生图")
+            with mock.patch.object(log_service_module, "log_service", service):
+                call.log_failure(error)
+
+            item = service.list()[0]
+            self.assertEqual(item["summary"], "文生图不支持的应用响应")
+            self.assertEqual(item["detail"]["status"], "unsupported_app_response")
+
+    def test_unsupported_app_response_is_found_through_a_wrapping_exception(self):
+        from services.protocol.conversation import (
+            ImageUnsupportedAppResponseError,
+            ImageGenerationError,
+            UNSUPPORTED_APP_RESPONSE_CODE,
+        )
+
+        wrapped = ImageGenerationError("boom", code="upstream_error")
+        wrapped.__cause__ = ImageUnsupportedAppResponseError(
+            "unsupported", code=UNSUPPORTED_APP_RESPONSE_CODE,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = LogService(Path(tmp_dir) / "logs.jsonl")
+            call = LoggedCall({"id": "k1", "name": "管理员", "role": "admin"},
+                              "/v1/images/generations", "gpt-image-2", "文生图")
+            with mock.patch.object(log_service_module, "log_service", service):
+                call.log_failure(wrapped)
+
+            self.assertEqual(service.list()[0]["detail"]["status"], "unsupported_app_response")
+
     def test_policy_violation_is_found_through_a_wrapping_exception(self):
         from services.openai_backend_api import ImageContentPolicyError
         from services.protocol.conversation import ImageGenerationError

@@ -16,6 +16,7 @@ from services.log_service import (
     LOG_STATUS_FAILED,
     LOG_STATUS_POLICY_VIOLATION,
     LOG_STATUS_SUCCESS,
+    LOG_STATUS_UNSUPPORTED_APP_RESPONSE,
     LOG_TYPE_CALL,
     add_attempt_trail_detail,
     add_image_timeline_detail,
@@ -23,6 +24,7 @@ from services.log_service import (
     add_upstream_model_detail,
     image_request_detail,
     is_policy_violation_error,
+    is_unsupported_app_response_error,
     log_service,
     merge_extra_detail,
 )
@@ -336,17 +338,27 @@ class ImageTaskService:
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[],
                               duration_ms=duration_ms,
                               **({"conversation_id": conversation_id} if conversation_id else {}))
-            # 上游内容审核拦截单独记一类：任务本身仍是 error（没产出图片），
+            # 上游内容审核拦截 / 应用响应单独记一类：任务本身仍是 error（没产出图片），
             # 但统计口径上不算「生成失败」。
-            violation = is_policy_violation_error(exc)
+            unsupported = is_unsupported_app_response_error(exc)
+            violation = not unsupported and is_policy_violation_error(exc)
+            if unsupported:
+                suffix = "不支持的应用响应"
+                status = LOG_STATUS_UNSUPPORTED_APP_RESPONSE
+            elif violation:
+                suffix = "违反安全策略"
+                status = LOG_STATUS_POLICY_VIOLATION
+            else:
+                suffix = "调用失败"
+                status = LOG_STATUS_FAILED
             self._log_call(
                 identity,
                 mode,
                 model,
                 started,
-                "违反安全策略" if violation else "调用失败",
+                suffix,
                 request_preview=request_text(payload.get("prompt")),
-                status=LOG_STATUS_POLICY_VIOLATION if violation else LOG_STATUS_FAILED,
+                status=status,
                 error=error_message,
                 account_email=account_email,
                 exc=exc,

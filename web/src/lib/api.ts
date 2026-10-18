@@ -664,6 +664,8 @@ export type ImageStatsPoint = {
   images?: number;
   /** 被内容安全策略拦截的数量；注册统计复用这个类型时没有该字段。 */
   policy_violation?: number;
+  /** 上游返回应用/文本响应、没有产出图片的数量；注册统计复用这个类型时没有该字段。 */
+  unsupported_app_response?: number;
 };
 
 export type ImageStatsBreakdown = {
@@ -673,6 +675,8 @@ export type ImageStatsBreakdown = {
   success: number;
   failed: number;
   policy_violation: number;
+  /** 上游返回应用/文本响应、没有产出图片的数量。 */
+  unsupported_app_response: number;
   /** 该调用方式成功生成的图片数。 */
   images: number;
 };
@@ -701,6 +705,8 @@ export type ImageStatsResponse = {
     success: number;
     failed: number;
     policy_violation: number;
+    /** 上游返回应用/文本响应、没有产出图片的数量；不计入失败。 */
+    unsupported_app_response: number;
     success_rate: number;
     avg_duration_ms: number;
     /** 成功生成的图片总数。 */
