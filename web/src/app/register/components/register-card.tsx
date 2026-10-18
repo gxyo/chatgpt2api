@@ -307,39 +307,36 @@ export function RegisterCard() {
                           targetField: RegisterScheduleField;
                         }>
                       ).map((period) => (
-                        <div key={period.label} className="space-y-3 rounded-lg border border-neutral-200 bg-white p-3">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="text-sm font-medium text-neutral-700">{period.label}</span>
-                            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                              <Input
-                                type="time"
-                                value={config[period.startField] || ""}
-                                onChange={(event) => setSchedule(period.startField, event.target.value)}
-                                className="h-9 w-[7.5rem] max-w-full rounded-lg border-neutral-200 bg-white tabular-nums"
-                                disabled={locked || config.mode !== "available"}
-                              />
-                              <span className="text-xs text-neutral-400">至</span>
-                              <Input
-                                type="time"
-                                value={config[period.endField] || ""}
-                                onChange={(event) => setSchedule(period.endField, event.target.value)}
-                                className="h-9 w-[7.5rem] max-w-full rounded-lg border-neutral-200 bg-white tabular-nums"
-                                disabled={locked || config.mode !== "available"}
-                              />
-                            </div>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="shrink-0 text-xs text-neutral-500">目标可用账号</span>
+                        <div key={period.label} className="rounded-lg border border-neutral-200 bg-white p-3">
+                          {/* 白天/夜间各占一行：时段、目标数量放在同一行；容器不够宽时再自然换行。 */}
+                          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-2">
+                            <span className="shrink-0 text-sm font-medium text-neutral-700">{period.label}</span>
+                            <Input
+                              type="time"
+                              value={config[period.startField] || ""}
+                              onChange={(event) => setSchedule(period.startField, event.target.value)}
+                              className="h-9 w-28 shrink-0 rounded-lg border-neutral-200 bg-white tabular-nums"
+                              disabled={locked || config.mode !== "available"}
+                            />
+                            <span className="shrink-0 text-xs text-neutral-400">至</span>
+                            <Input
+                              type="time"
+                              value={config[period.endField] || ""}
+                              onChange={(event) => setSchedule(period.endField, event.target.value)}
+                              className="h-9 w-28 shrink-0 rounded-lg border-neutral-200 bg-white tabular-nums"
+                              disabled={locked || config.mode !== "available"}
+                            />
+                            <span className="shrink-0 text-xs whitespace-nowrap text-neutral-500">目标可用账号</span>
                             <Input
                               type="number"
                               min={1}
                               step={1}
                               value={String(config[period.targetField] || "")}
                               onChange={(event) => setSchedule(period.targetField, event.target.value)}
-                              className="h-9 w-24 max-w-full rounded-lg border-neutral-200 bg-white tabular-nums"
+                              className="h-9 w-20 shrink-0 rounded-lg border-neutral-200 bg-white tabular-nums"
                               disabled={locked || config.mode !== "available"}
                             />
-                            <span className="text-xs text-neutral-400">个</span>
+                            <span className="shrink-0 text-xs text-neutral-400">个</span>
                           </div>
                         </div>
                       ))}
