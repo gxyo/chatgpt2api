@@ -593,6 +593,17 @@ function LogsContent() {
     }
   };
 
+  // 顶部「导出日志」和列表头的「导出所选」必须统一口径：只要勾选了，
+  // 顶部按钮也导勾选的那几条，而不是默默退回「最近 N 条」。之前两个入口
+  // 行为不一致，勾了日志再点顶部按钮，导出文件里还是最近 10 条。
+  const exportLogsFromToolbar = async () => {
+    if (selectedIds.length > 0) {
+      await exportSelectedLogs();
+      return;
+    }
+    await exportLogs();
+  };
+
   const clearFilters = () => {
     setStatus(LogStatus.All);
     setStartDate("");
@@ -699,13 +710,21 @@ function LogsContent() {
           </Button>
           <Button
             variant="outline"
-            onClick={() => void exportLogs()}
-            disabled={isExporting || !exportLimitValid}
-            title="导出最近 N 条日志的完整报文（txt），按时间由旧到新排列"
+            onClick={() => void exportLogsFromToolbar()}
+            disabled={
+              selectedIds.length > 0
+                ? isExportingSelected
+                : isExporting || !exportLimitValid
+            }
+            title={selectedIds.length > 0
+              ? `只导出勾选的 ${selectedIds.length} 条日志（txt，报文完整）`
+              : "导出最近 N 条日志的完整报文（txt），按时间由旧到新排列"}
             className="h-10 px-4"
           >
-            {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-            导出日志
+            {isExportingSelected || isExporting
+              ? <LoaderCircle className="size-4 animate-spin" />
+              : <Download className="size-4" />}
+            {selectedIds.length > 0 ? `导出所选（${selectedIds.length}）` : "导出日志"}
           </Button>
           <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 px-5">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
