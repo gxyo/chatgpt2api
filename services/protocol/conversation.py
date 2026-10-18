@@ -303,41 +303,48 @@ _UNSUPPORTED_REFUSAL_CONTEXT = (
 _UNSUPPORTED_PROMPT_CONTEXT = ("提示词", "writingblock", "image prompt", "final image prompt", "prompt")
 
 
-def is_unsupported_app_response(message: str) -> bool:
-    """上游没有产出图片文件，而是回了 ChatGPT 应用/文本响应。
+def unsupported_app_response_reason(message: str) -> str:
+    """返回命中的判定原因；空字符串表示不是应用/文本响应。
 
-    这类响应换号重试不会变成图片，日志和统计里应单独归类，不计入失败。
-    只认比较明确的形态，避免把内容审核拒绝和普通文字回复误伤：
+    原因会写进日志的 `image_diagnostics.unsupported_reason` 和异常 body，
+    以后排查时能直接看出是「模型拒绝出图」还是「Create Pet 的 DIL/Library」，
+    不用再去翻 SSE 原文。只认比较明确的形态，避免误伤内容审核拒绝和普通正文：
 
-    1. 「我无法在这个聊天里生成图片，只能帮你整理提示词」；
-    2. Create Pet 等应用工作流：DIL/生成式 UI（`Saved in Library` + `AsyncImage` /
-       `model_dil_v2` / `opGenui`）；
-    3. 返回 `<WritingBlock>` 提示词文档而不是图片。
+    - `refusal_prompt`：「我无法在这个聊天里生成图片，只能帮你整理提示词」；
+    - `dil_library`：Create Pet 等应用工作流（`Saved in Library` + `AsyncImage` /
+      `model_dil_v2` / `opGenui`）；
+    - `async_image` / `genui_app`：只有生成式 UI / AsyncImage 标记；
+    - `writing_block_prompt`：返回 `<WritingBlock>` 提示词文档而不是图片。
     """
     text = str(message or "").strip()
     if not text:
-        return False
+        return ""
     lower = text.lower()
     if _UNSUPPORTED_IMAGE_REFUSAL_RE.search(text):
         if any(marker in text for marker in _UNSUPPORTED_REFUSAL_CONTEXT) or any(
             marker in lower for marker in _UNSUPPORTED_PROMPT_CONTEXT
         ):
-            return True
+            return "refusal_prompt"
     # 应用工作流的 Library 产物：单独一句 “Saved in Library” 可能只是正常解说，
     # 必须同时出现 DIL/AsyncImage 这类应用 UI 标记。
     if "saved in library" in lower and (
         "asyncimage" in lower or "model_dil_v2" in lower or "opgenui" in lower
     ):
-        return True
+        return "dil_library"
     if "asyncimage" in lower and ("query=" in lower or "aspectratio" in lower):
-        return True
+        return "async_image"
     if "opgenui" in lower and ("model_dil_v2" in lower or "dil.render" in lower):
-        return True
+        return "genui_app"
     if "<writingblock" in lower and (
         "提示词" in text or "image prompt" in lower or "final image prompt" in lower
     ):
-        return True
-    return False
+        return "writing_block_prompt"
+    return ""
+
+
+def is_unsupported_app_response(message: str) -> bool:
+    """上游没有产出图片文件，而是回了 ChatGPT 应用/文本响应。"""
+    return bool(unsupported_app_response_reason(message))
 
 
 # 每个 delta 都跑完整正则代价太大；只有 delta 里出现这些词时才检查累计文本。
@@ -348,11 +355,51 @@ _UNSUPPORTED_DELTA_TRIGGER_RE = re.compile(
 )
 
 
+def _record_unsupported_stream_summary(
+        backend: Any,
+        event: dict[str, Any] | None,
+        text: str,
+        conversation_id: str,
+) -> None:
+    """失败时也留一份「上游流结果」摘要。
+
+    正常成功路径在 `conversation_done` 才写 `image_stream_summary`；应用响应可能在
+    流中途就被判定失败，等不到那一步。这里用触发判定时的事件补一份，日志里就能
+    直接看到 `tool_invoked` / `turn_use_case` / `plan_type` / 图片 id 数量。
+    """
+    if backend is None or not isinstance(event, dict):
+        return
+    if getattr(backend, "image_stream_summary", None):
+        return
+    file_ids = event.get("file_ids") or []
+    sediment_ids = event.get("sediment_ids") or []
+    summary = {
+        "at": time.monotonic(),
+        "conversation_id": conversation_id,
+        "tool_invoked": event.get("tool_invoked"),
+        "turn_use_case": event.get("turn_use_case"),
+        "model_slug": event.get("model_slug"),
+        "plan_type": event.get("plan_type"),
+        "product_experience": event.get("product_experience"),
+        "app_ui_marker": bool(event.get("app_ui_marker")),
+        "file_ids": len(file_ids),
+        "sediment_ids": len(sediment_ids),
+        "message_chars": len(text or ""),
+        "unsupported_app_response": True,
+    }
+    try:
+        backend.image_stream_summary = summary
+    except Exception:
+        pass
+
+
 def _unsupported_app_response_error(
         text: str,
         *,
         conversation_id: str = "",
         backend: Any = None,
+        event: dict[str, Any] | None = None,
+        reason: str = "",
 ) -> ImageUnsupportedAppResponseError:
     exc = ImageUnsupportedAppResponseError(
         unsupported_app_response_message(),
@@ -361,7 +408,13 @@ def _unsupported_app_response_error(
         code=UNSUPPORTED_APP_RESPONSE_CODE,
         conversation_id=conversation_id,
     )
+    # 挂在异常上供日志/尝试轨迹读取（body 里的 upstream_text 仍按 1000 字截断）。
+    exc.unsupported_reason = reason
+    exc.upstream_text = text or ""
+    _record_unsupported_stream_summary(backend, event, text, conversation_id)
     body: dict[str, Any] = {"unsupported_app_response": True}
+    if reason:
+        body["unsupported_reason"] = reason
     if text:
         body["upstream_text"] = text[:1000]
     if backend is not None:
@@ -570,6 +623,10 @@ class ConversationState:
     turn_use_case: str = ""
     # server_ste_metadata 里上游汇报的实际调度模型，可能和请求里写的 slug 不同。
     model_slug: str = ""
+    # server_ste_metadata 里的账号计划（free/plus/team…）与产品体验（chat/image…）。
+    # 免费号没有生图能力时，上游会回“只能给提示词”的正文；日志里要能直接看到。
+    plan_type: str = ""
+    product_experience: str = ""
     # 上游回的是 ChatGPT 应用/生成式 UI（payload 里出现 opGenui），不是普通图片结果。
     # 只在「零图片 id + 超时」的兜底判断里用，避免把普通的富文本消息误判成应用响应。
     app_ui_marker: bool = False
@@ -898,6 +955,10 @@ def update_conversation_state(state: ConversationState, payload: str, event: dic
                 state.tool_invoked = metadata["tool_invoked"]
             state.turn_use_case = str(metadata.get("turn_use_case") or state.turn_use_case)
             state.model_slug = str(metadata.get("model_slug") or state.model_slug).strip()
+            state.plan_type = str(metadata.get("plan_type") or state.plan_type).strip()
+            state.product_experience = str(
+                metadata.get("product_experience") or state.product_experience
+            ).strip()
 
 
 def conversation_base_event(event_type: str, state: ConversationState, **extra: Any) -> dict[str, Any]:
@@ -911,6 +972,8 @@ def conversation_base_event(event_type: str, state: ConversationState, **extra: 
         "tool_invoked": state.tool_invoked,
         "turn_use_case": state.turn_use_case,
         "model_slug": state.model_slug,
+        "plan_type": state.plan_type,
+        "product_experience": state.product_experience,
         "app_ui_marker": state.app_ui_marker,
         **extra,
     }
@@ -1145,13 +1208,17 @@ def stream_image_outputs(
                     and not event.get("sediment_ids")
                     and _UNSUPPORTED_DELTA_TRIGGER_RE.search(delta)
                     and not is_content_policy_error(str(event.get("text") or ""))
-                    and is_unsupported_app_response(str(event.get("text") or ""))
                 ):
-                    raise _unsupported_app_response_error(
-                        str(event.get("text") or ""),
-                        conversation_id=str(event.get("conversation_id") or ""),
-                        backend=backend,
-                    )
+                    text = str(event.get("text") or "")
+                    reason = unsupported_app_response_reason(text)
+                    if reason:
+                        raise _unsupported_app_response_error(
+                            text,
+                            conversation_id=str(event.get("conversation_id") or ""),
+                            backend=backend,
+                            event=event,
+                            reason=reason,
+                        )
                 yield ImageOutput(
                     kind="progress",
                     model=request.model,
@@ -1174,21 +1241,23 @@ def stream_image_outputs(
     except ImagePollTimeoutError:
         # Create Pet 这类应用可能一直流 DIL，直到预算到点都没有图片 id。
         # 已经能看出是应用响应时，按「不支持的应用响应」收尾，而不是记成生图失败。
+        text = str(last.get("text") or "")
+        reason = unsupported_app_response_reason(text)
+        marker_timeout = (
+            bool(last.get("app_ui_marker"))
+            and last.get("turn_use_case") != "image gen"
+        )
         if (
             not last.get("file_ids")
             and not last.get("sediment_ids")
-            and (
-                is_unsupported_app_response(str(last.get("text") or ""))
-                or (
-                    bool(last.get("app_ui_marker"))
-                    and last.get("turn_use_case") != "image gen"
-                )
-            )
+            and (reason or marker_timeout)
         ):
             raise _unsupported_app_response_error(
-                str(last.get("text") or ""),
+                text,
                 conversation_id=str(last.get("conversation_id") or ""),
                 backend=backend,
+                event=last,
+                reason=reason or "app_ui_timeout",
             ) from None
         raise
 
@@ -1207,6 +1276,9 @@ def stream_image_outputs(
             "tool_invoked": last.get("tool_invoked"),
             "turn_use_case": last.get("turn_use_case"),
             "model_slug": upstream_model_slug,
+            "plan_type": last.get("plan_type"),
+            "product_experience": last.get("product_experience"),
+            "app_ui_marker": bool(last.get("app_ui_marker")),
             "file_ids": len(file_ids),
             "sediment_ids": len(sediment_ids),
             "message_chars": len(message),
@@ -1248,18 +1320,17 @@ def stream_image_outputs(
         return
     # 上游没出图，而是回了应用/拒绝类文本：单独归类，不轮询、不换号重试。
     # 放在 blocked 之后，内容审核拒绝仍然走上面的策略拦截分支。
+    unsupported_reason = unsupported_app_response_reason(message)
+    marker_only = (
+        not message
+        and bool(last.get("app_ui_marker"))
+        and last.get("turn_use_case") != "image gen"
+    )
     unsupported_app_response = (
         not file_ids
         and not sediment_ids
         and not is_content_policy_error(message)
-        and (
-            is_unsupported_app_response(message)
-            or (
-                not message
-                and bool(last.get("app_ui_marker"))
-                and last.get("turn_use_case") != "image gen"
-            )
-        )
+        and (bool(unsupported_reason) or marker_only)
     )
     if unsupported_app_response:
         logger.warning({
@@ -1267,7 +1338,10 @@ def stream_image_outputs(
             "conversation_id": conversation_id,
             "tool_invoked": last.get("tool_invoked"),
             "turn_use_case": last.get("turn_use_case"),
+            "plan_type": last.get("plan_type"),
+            "product_experience": last.get("product_experience"),
             "app_ui_marker": bool(last.get("app_ui_marker")),
+            "unsupported_reason": unsupported_reason or "app_ui_marker",
             "message_chars": len(message),
             "message_preview": message[:300],
             "stream_tail": _image_stream_tail(backend, IMAGE_STREAM_TAIL_IN_BODY),
@@ -1276,6 +1350,8 @@ def stream_image_outputs(
             message,
             conversation_id=conversation_id,
             backend=backend,
+            event=last,
+            reason=unsupported_reason or "app_ui_marker",
         )
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
     if message and not file_ids and not sediment_ids and not should_poll_for_image:
@@ -2318,12 +2394,18 @@ def _generate_single_image_attempts(
         else:
             diagnostics.pop("stream_tail", None)
             diagnostics.pop("stream_summary", None)
+        # 号池里的账号类型/来源也带上：免费号和订阅号在同一种失败里的处置不同，
+        # 排查时不用再回账号页对照。
+        get_account = getattr(account_service, "get_account", None)
+        account_info = (get_account(token) if callable(get_account) and token else {}) or {}
         diagnostics.update({
             "trace_id": trace_id,
             "index": index,
             # 顶层账号取「本次尝试」的号：以前这里写的是循环变量，导出的现场
             # 常常是上一次尝试、另一个账号，跟 detail.account_email 对不上。
             "account_email": (attempt or {}).get("account_email", account_email),
+            "account_type": str(account_info.get("type") or ""),
+            "account_source_type": str(account_info.get("source_type") or ""),
             "request_token": anonymize_token(token) if token else "",
             "image_inflight": inflight,
             "image_peers": max(0, inflight - 1),
@@ -2669,11 +2751,12 @@ def _generate_single_image_attempts(
                     plumbing_body = _plumbing_message_body(text) if text.strip() else None
                     if plumbing_body is None and getattr(output, "plumbing_error", False):
                         plumbing_body = {"upstream_response": text[:1000]}
-                    unsupported_app = (
-                        not plumbing_body
-                        and not is_content_policy_error(text)
-                        and is_unsupported_app_response(text)
+                    unsupported_reason = (
+                        ""
+                        if plumbing_body or is_content_policy_error(text)
+                        else unsupported_app_response_reason(text)
                     )
+                    unsupported_app = bool(unsupported_reason)
                     text_reply = (
                         bool(output.text_reply)
                         and not plumbing_body
@@ -2687,22 +2770,19 @@ def _generate_single_image_attempts(
                         and is_content_policy_error(text)
                     )
                     if unsupported_app:
-                        failure = ImageUnsupportedAppResponseError(
-                            unsupported_app_response_message(),
-                            status_code=502,
-                            error_type="server_error",
-                            code=UNSUPPORTED_APP_RESPONSE_CODE,
-                            account_email=account_email,
+                        failure = _unsupported_app_response_error(
+                            text,
                             conversation_id=output.conversation_id,
+                            backend=backend,
+                            reason=unsupported_reason,
                         )
-                        failure.body = _attach_stream_context(
-                            {"unsupported_app_response": True, "upstream_text": text[:1000]}, backend,
-                        )
+                        failure.account_email = account_email
                         logger.warning({
                             "event": "image_upstream_unsupported_app_response",
                             "trace_id": trace_id,
                             "conversation_id": output.conversation_id,
                             "account_email": account_email,
+                            "unsupported_reason": unsupported_reason,
                             "text_chars": len(text),
                             "text_preview": text[:300],
                             "stream_tail": (failure.body or {}).get("stream_tail") or [],
@@ -2791,14 +2871,19 @@ def _generate_single_image_attempts(
                 if summary:
                     tool_invoked = summary.get("tool_invoked")
                     turn_use_case = str(summary.get("turn_use_case") or "").strip()
+                    plan_type = str(summary.get("plan_type") or "").strip()
                     mark_timeline(
                         "stream_summary", "上游流结果",
                         f"tool_invoked={tool_invoked if tool_invoked is not None else '?'}；"
                         f"turn_use_case={turn_use_case or '?'}；"
+                        f"plan_type={plan_type or '?'}；"
                         f"图片 id {summary.get('file_ids', 0)} 个 / sediment {summary.get('sediment_ids', 0)} 个",
                         started=summary.get("at"),
                         tool_invoked=tool_invoked,
                         turn_use_case=turn_use_case,
+                        plan_type=plan_type,
+                        product_experience=summary.get("product_experience"),
+                        app_ui_marker=summary.get("app_ui_marker"),
                         conversation_id=summary.get("conversation_id"),
                         file_ids=summary.get("file_ids"),
                         sediment_ids=summary.get("sediment_ids"),
@@ -2909,12 +2994,22 @@ def _generate_single_image_attempts(
             account_service.release_image_slot(token)
             if account_email and not getattr(exc, "account_email", ""):
                 exc.account_email = account_email
+            unsupported_reason = str(getattr(exc, "unsupported_reason", "") or "")
+            upstream_text = str(getattr(exc, "upstream_text", "") or "")
+            if unsupported_reason:
+                diagnostics["unsupported_reason"] = unsupported_reason
+                attempt_extra["unsupported_reason"] = unsupported_reason
+            if upstream_text:
+                # 尝试轨迹里保留完整原文（日志页可展开），body 里只放 1000 字摘要。
+                attempt_extra["upstream_text"] = upstream_text
             logger.warning({
                 "event": "image_unsupported_app_response_final",
                 "trace_id": trace_id,
                 "request_token": anonymize_token(token),
                 "account_email": account_email,
                 "conversation_id": getattr(exc, "conversation_id", ""),
+                "unsupported_reason": unsupported_reason,
+                "upstream_text_chars": len(upstream_text),
                 "error": str(exc),
                 "index": index,
             })

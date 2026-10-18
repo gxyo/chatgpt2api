@@ -13,6 +13,7 @@ from services.protocol.conversation import (
     UNSUPPORTED_APP_RESPONSE_MESSAGE,
     is_unsupported_app_response,
     unsupported_app_response_message,
+    unsupported_app_response_reason,
 )
 
 REFUSAL_TEXTS = (
@@ -35,12 +36,21 @@ class UnsupportedAppResponseDetectionTests(unittest.TestCase):
         for text in REFUSAL_TEXTS:
             with self.subTest(text=text[:20]):
                 self.assertTrue(is_unsupported_app_response(text))
+                self.assertEqual(unsupported_app_response_reason(text), "refusal_prompt")
 
     def test_create_pet_dil_text_is_detected(self):
         self.assertTrue(is_unsupported_app_response(DIL_TEXT))
-        self.assertTrue(is_unsupported_app_response(
-            "Saved in Library <AsyncImage query=\"pixel art\" aspectRatio=\"1:1\" />"
-        ))
+        self.assertEqual(unsupported_app_response_reason(DIL_TEXT), "dil_library")
+        self.assertEqual(
+            unsupported_app_response_reason(
+                "Saved in Library <AsyncImage query=\"pixel art\" aspectRatio=\"1:1\" />"
+            ),
+            "dil_library",
+        )
+
+    def test_writing_block_prompt_is_detected(self):
+        text = "<WritingBlock id=\"1\">**Final Image Prompt** a photo of a cat</WritingBlock>"
+        self.assertEqual(unsupported_app_response_reason(text), "writing_block_prompt")
 
     def test_content_policy_rejection_is_not_detected(self):
         self.assertFalse(is_unsupported_app_response(
@@ -97,7 +107,11 @@ class StreamUnsupportedAppResponseTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, UNSUPPORTED_APP_RESPONSE_CODE)
         self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(raised.exception.unsupported_reason, "refusal_prompt")
         self.assertIn("upstream_text", raised.exception.body or {})
+        self.assertEqual(
+            (raised.exception.body or {}).get("unsupported_reason"), "refusal_prompt",
+        )
 
     def test_dil_library_message_raises_without_polling(self):
         with self.assertRaises(ImageUnsupportedAppResponseError):
@@ -177,6 +191,39 @@ class StreamUnsupportedAppResponseTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertEqual(outputs[0].kind, "message")
         self.assertIn("圣诞", outputs[0].text)
+
+
+class UnsupportedResponseDiagnosticsTests(unittest.TestCase):
+    def test_timeout_summary_records_plan_and_tool_state(self):
+        backend = FakeBackend()
+        event = {
+            "conversation_id": "conv-1",
+            "tool_invoked": False,
+            "turn_use_case": "text",
+            "model_slug": "gpt-6",
+            "plan_type": "free",
+            "product_experience": "chat",
+            "app_ui_marker": True,
+            "file_ids": [],
+            "sediment_ids": [],
+        }
+
+        exc = conversation._unsupported_app_response_error(
+            "working on the pet...",
+            conversation_id="conv-1",
+            backend=backend,
+            event=event,
+            reason="app_ui_timeout",
+        )
+
+        self.assertEqual(exc.unsupported_reason, "app_ui_timeout")
+        self.assertEqual(exc.upstream_text, "working on the pet...")
+        summary = backend.image_stream_summary
+        self.assertTrue(summary["unsupported_app_response"])
+        self.assertEqual(summary["plan_type"], "free")
+        self.assertEqual(summary["product_experience"], "chat")
+        self.assertIs(summary["tool_invoked"], False)
+        self.assertEqual(summary["turn_use_case"], "text")
 
 
 class UnsupportedResponseMessageConfigTests(unittest.TestCase):

@@ -311,6 +311,11 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(accounts.image_results, [])
         self.assertEqual(accounts.released_slots, ["token-a"])
         self.assertEqual((failure.body or {}).get("upstream_text"), refusal)
+        self.assertEqual(failure.image_diagnostics["unsupported_reason"], "refusal_prompt")
+        self.assertEqual(
+            failure.image_diagnostics["attempts"][0]["unsupported_reason"], "refusal_prompt",
+        )
+        self.assertEqual(failure.image_diagnostics["attempts"][0]["upstream_text"], refusal)
 
     def test_text_reply_is_not_reported_as_content_policy_violation(self):
         prose = "已将圣诞镂空桌布融入美式客厅。你希望洞里的宠物保持这只博美犬吗？"
