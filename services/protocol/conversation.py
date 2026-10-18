@@ -486,6 +486,9 @@ class ImageOutput:
     # 调用日志据此把「第 1 个号 → 第 2 个号」写进同一条记录，而不是一次尝试一条。
     account_trail: list[str] = field(default_factory=list)
     attempts_summary: str = ""
+    # 逐次尝试的结构化现场（账号、结局、耗时、错误原文）。只进调用日志：
+    # 日志页据此渲染可展开的「尝试轨迹」，不用再受一行摘要的长度限制。
+    attempts: list[dict[str, Any]] = field(default_factory=list)
     # 本次图片生成的执行时间线：每一步做了什么、什么时候开始、花了多久、为什么。
     # 只进调用日志（日志详情里逐条展示），不返回给客户端。
     image_timeline: list[dict[str, Any]] = field(default_factory=list)
@@ -522,6 +525,8 @@ class ImageOutput:
             chunk["_account_trail"] = list(self.account_trail)
         if self.attempts_summary:
             chunk["_attempts_summary"] = self.attempts_summary
+        if self.attempts:
+            chunk["_attempts"] = [dict(item) for item in self.attempts]
         if self.image_timeline or self.failed_image_timelines:
             groups: list[dict[str, Any]] = []
             if self.image_timeline:
@@ -1912,9 +1917,16 @@ def _attach_attempt_trail(outputs: list[ImageOutput], diagnostics: dict[str, Any
     # 成功分支的 record_attempt_state 只补 outcome、不刷新 attempts_summary，
     # diagnostics 里存的那份可能停在上一次失败尝试上，这里按最新 attempts 重算。
     summary = _attempts_summary(attempts)
+    # 结构化现场只挂到最终 chunk（result/message）：progress chunk 每次增量都带
+    # 一份全量 attempts 会把流式响应撑大，日志层也会重复收集。
     for output in outputs:
         output.account_trail = list(trail)
         output.attempts_summary = summary
+        if output.kind in ("result", "message"):
+            output.attempts = [
+                {**dict(item), "image_index": output.index}
+                for item in attempts
+            ]
 
 
 def _attach_image_timeline(outputs: list[ImageOutput], diagnostics: dict[str, Any]) -> None:
@@ -2468,6 +2480,10 @@ def _generate_single_image_attempts(
                     #   2) 内容策略拒绝（blocked / 对话里检测到 policy 文案）；
                     #   3) 其它上游报错（已 sanitize 成「本次生图失败，请重试。」）。
                     text = output.text or ""
+                    # 上游原文完整进尝试轨迹；日志页对长文本做展开/收起，
+                    # 这里不截断（截断只发生在给用户看的摘要与 error 文案上）。
+                    if text.strip():
+                        attempt_extra["upstream_text"] = text
                     # 正文伪装成模型文本的上游管道错误（如 {"skipped_mainline":true}）
                     # 单独一类：既不是模型正文，也不是内容策略拒绝。这里不只看
                     # output.plumbing_error，按文本兜底再判一次——旧版本产出的
@@ -2541,7 +2557,10 @@ def _generate_single_image_attempts(
                         })
                     if schedule_generation_retry(failure):
                         account_service.mark_image_result(token, False)
-                        attempt_outcome, attempt_error = "message_retry", str(failure)
+                        # 日志里展示上游原生报错，而不是本地兜底文案「本次生图失败，请重试。」
+                        # （面向用户的 error 响应仍由 failure 决定，不受这里影响）。
+                        attempt_outcome = "message_retry"
+                        attempt_error = text.strip() or str(failure)
                         retry_after_output = True
                         break
                     raise failure
@@ -2763,6 +2782,10 @@ def _generate_single_image_attempts(
                     if text_preview
                     else "上游只回了文本，没有出图"
                 )
+                # 完整原文单独存一份，日志页的「尝试轨迹」可展开查看，不受 60 字摘要限制。
+                full_text = upstream_text or error_text
+                if full_text.strip():
+                    attempt_extra["upstream_text"] = full_text
                 text_reply_retry_count += 1
                 diagnostics["text_reply"] = {
                     "chars": len(upstream_text or error_text),
@@ -3186,6 +3209,7 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     account_email = ""
     account_trail: list[str] = []
     attempts_summaries: list[str] = []
+    attempts: list[dict[str, Any]] = []
     image_timelines: list[dict[str, Any]] = []
     postprocess: dict[str, Any] = {}
     upstream_model_slug = ""
@@ -3211,6 +3235,9 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
                 account_trail.append(email)
         if output.attempts_summary and output.attempts_summary not in attempts_summaries:
             attempts_summaries.append(output.attempts_summary)
+        if output.attempts:
+            # 结构化尝试现场只挂在最终 chunk 上；多图时各张图各带一份。
+            attempts.extend(dict(item) for item in output.attempts)
         if output.postprocess:
             _merge_postprocess(postprocess, output.postprocess)
         if output.kind == "progress" and output.text:
@@ -3231,6 +3258,8 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         result["_account_trail"] = account_trail
     if attempts_summaries:
         result["_attempts_summary"] = " | ".join(attempts_summaries)
+    if attempts:
+        result["_attempts"] = attempts
     if image_timelines:
         result["_image_timeline"] = image_timelines
     if postprocess:

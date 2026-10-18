@@ -35,8 +35,8 @@ LOG_RETRIED_NO = "no"
 # ImageGenerationError.code：conversation 把上游内容审核拦截统一标成这个 code。
 POLICY_VIOLATION_CODE = "content_policy_violation"
 INTERNAL_RESPONSE_KEYS = {
-    "_account_email", "_conversation_id", "_account_trail", "_attempts_summary", "_postprocess",
-    "_image_timeline", "_upstream_model_slug",
+    "_account_email", "_conversation_id", "_account_trail", "_attempts_summary", "_attempts",
+    "_postprocess", "_image_timeline", "_upstream_model_slug",
 }
 # 一键导出：默认最近 10 条，条数上界防止一次导出把浏览器拖死。
 LOG_EXPORT_DEFAULT_LIMIT = 10
@@ -391,6 +391,38 @@ def _collect_attempts_summaries(value: object) -> list[str]:
     return summaries
 
 
+def _collect_attempts(value: object) -> list[dict[str, Any]]:
+    """收集结果里的结构化尝试现场（`_attempts`，每张图一份）。"""
+    attempts: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        raw = value.get("_attempts")
+        if isinstance(raw, list):
+            attempts.extend(dict(item) for item in raw if isinstance(item, dict))
+        for key, item in value.items():
+            if key != "_attempts":
+                attempts.extend(_collect_attempts(item))
+    elif isinstance(value, list):
+        for item in value:
+            attempts.extend(_collect_attempts(item))
+    return attempts
+
+
+def _dedupe_attempts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同一个请求里 progress/result 可能各带一份，按内容去重且保持顺序。"""
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in attempts:
+        try:
+            key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+        except Exception:
+            key = repr(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
 def _collect_postprocess(value: object) -> list[dict[str, Any]]:
     """收集结果里的本地后处理数据（4K 超分耗时、排队、失败原因）。"""
     items: list[dict[str, Any]] = []
@@ -592,23 +624,32 @@ def add_attempt_trail_detail(
     exc: BaseException | None = None,
     account_trails: list[list[str]] | None = None,
     attempts_summaries: list[str] | None = None,
+    attempts: list[dict[str, Any]] | None = None,
 ) -> None:
     """把「这次请求先后用过哪些账号」写进同一条调用日志。
 
     只在真的重试过时才有内容：没重试的请求只有一个账号，detail.account_email
     已经写清楚了，再列一遍没有意义。成功和失败都走这里，日志里始终只有一条记录，
     最后结果由 detail.status 表示。
+
+    除了压缩成一行 `attempts_summary`，还会写一份结构化的 `attempts`：
+    文本回复的完整原文、上游原生报错都在里面，日志页据此渲染可展开的尝试轨迹。
     """
     trails = list(account_trails or [])
     trails.extend(_collect_account_trails(result))
     summaries = list(attempts_summaries or [])
     summaries.extend(_collect_attempts_summaries(result))
+    structured = list(attempts or [])
+    structured.extend(_collect_attempts(result))
     if exc is not None:
         diagnostics = _exception_image_diagnostics(exc)
         if diagnostics is not None:
-            attempts = [item for item in (diagnostics.get("attempts") or []) if isinstance(item, dict)]
-            if len(attempts) > 1:
-                trail = [str(item.get("account_email") or "").strip() for item in attempts]
+            diagnostic_attempts = [
+                item for item in (diagnostics.get("attempts") or []) if isinstance(item, dict)
+            ]
+            structured.extend(diagnostic_attempts)
+            if len(diagnostic_attempts) > 1:
+                trail = [str(item.get("account_email") or "").strip() for item in diagnostic_attempts]
                 trail = [email for email in trail if email]
                 if trail:
                     trails.append(trail)
@@ -622,6 +663,9 @@ def add_attempt_trail_detail(
     summary_text = " | ".join(dict.fromkeys(item for item in summaries if item))
     if summary_text:
         detail["attempts_summary"] = summary_text
+    unique_attempts = _dedupe_attempts(structured)
+    if unique_attempts:
+        detail["attempts"] = unique_attempts
 
 
 def _strip_internal_response_fields(value: object) -> object:
@@ -843,6 +887,7 @@ class LoggedCall:
         conversation_ids: list[str] = []
         account_trails: list[list[str]] = []
         attempts_summaries: list[str] = []
+        attempts: list[dict[str, Any]] = []
         image_timelines: list[dict[str, Any]] = []
         postprocess: list[dict[str, Any]] = []
         upstream_model_slug = ""
@@ -854,6 +899,7 @@ class LoggedCall:
                 conversation_ids.extend(_collect_conversation_ids(item))
                 account_trails.extend(_collect_account_trails(item))
                 attempts_summaries.extend(_collect_attempts_summaries(item))
+                attempts.extend(_collect_attempts(item))
                 image_timelines.extend(_collect_image_timelines(item))
                 postprocess.extend(_collect_postprocess(item))
                 if isinstance(item, dict):
@@ -871,6 +917,7 @@ class LoggedCall:
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
                 account_trails=account_trails,
                 attempts_summaries=attempts_summaries,
+                attempts=attempts,
                 image_timelines=image_timelines,
                 postprocess=postprocess,
                 upstream_model_slug=upstream_model_slug,
@@ -885,7 +932,7 @@ class LoggedCall:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
                          conversation_id=conversation_ids[0] if conversation_ids else "",
                          account_trails=account_trails, attempts_summaries=attempts_summaries,
-                         image_timelines=image_timelines, postprocess=postprocess,
+                         attempts=attempts, image_timelines=image_timelines, postprocess=postprocess,
                          upstream_model_slug=upstream_model_slug)
 
     def log_failure(self, exc: BaseException, summary: str = "调用失败", error: str = "",
@@ -904,6 +951,7 @@ class LoggedCall:
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
             exc: BaseException | None = None, account_trails: list[list[str]] | None = None,
             attempts_summaries: list[str] | None = None,
+            attempts: list[dict[str, Any]] | None = None,
             image_timelines: list[dict[str, Any]] | None = None,
             postprocess: list[dict[str, Any]] | None = None,
             upstream_model_slug: str = "") -> None:
@@ -961,6 +1009,7 @@ class LoggedCall:
         add_attempt_trail_detail(
             detail, result=result, exc=exc,
             account_trails=account_trails, attempts_summaries=attempts_summaries,
+            attempts=attempts,
         )
         add_image_timeline_detail(
             detail, result=result, exc=exc, image_timelines=image_timelines,

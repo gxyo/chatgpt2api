@@ -647,6 +647,12 @@ export async function exportSelectedSystemLogs(ids: string[]) {
   );
 }
 
+/** 取勾选日志的导出文本（不触发下载），用于「复制」按钮。 */
+export async function fetchSelectedSystemLogsText(ids: string[]) {
+  const response = await request.post("/api/logs/export", { ids }, { responseType: "blob" });
+  return (response.data as Blob).text();
+}
+
 export type ImageStatsPoint = {
   key: string;
   label: string;

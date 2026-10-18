@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
+import { ArrowRight, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, HardDrive, ImageIcon, ListChecks, LoaderCircle, RefreshCw, RotateCcw, Route, Save, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ContentLoading } from "@/components/content-loading";
@@ -18,7 +18,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { cleanupSystemLogs, deleteSystemLogs, exportSelectedSystemLogs, exportSystemLogs, fetchLogRetention, fetchSystemLogs, saveLogRetention, type LogRetentionInfo, type SystemLog } from "@/lib/api";
+import { cleanupSystemLogs, deleteSystemLogs, exportSelectedSystemLogs, exportSystemLogs, fetchLogRetention, fetchSelectedSystemLogsText, fetchSystemLogs, saveLogRetention, type LogRetentionInfo, type SystemLog } from "@/lib/api";
 import { formatBeijingClock, getBeijingToday, shiftDate } from "@/lib/beijing-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
@@ -132,6 +132,8 @@ type AttemptStep = {
   marks: string[];
   durationMs: number | null;
   error: string;
+  /** 上游完整原文（文本回复正文 / 原生报错），长文本在日志页可展开。 */
+  upstreamText?: string;
 };
 
 type AttemptGroup = {
@@ -167,6 +169,67 @@ function parseAttemptGroups(value: unknown): AttemptGroup[] {
     const parsed = steps.length === parts.length;
     return { raw, steps: parsed ? steps : [], parsed };
   });
+}
+
+/** 优先用后端结构化的 `attempts`（含完整原文）；老日志再退回解析一行摘要。 */
+function structuredAttemptItems(detail: Record<string, unknown> | undefined): unknown[] {
+  if (Array.isArray(detail?.attempts) && detail.attempts.length) {
+    return detail.attempts;
+  }
+  const diagnostics = detail?.image_diagnostics;
+  if (diagnostics && typeof diagnostics === "object") {
+    const attempts = (diagnostics as { attempts?: unknown }).attempts;
+    if (Array.isArray(attempts) && attempts.length) {
+      return attempts;
+    }
+  }
+  return [];
+}
+
+function parseStructuredAttemptGroups(value: unknown[]): AttemptGroup[] {
+  if (!value.length) {
+    return [];
+  }
+  const groups = new Map<number, AttemptStep[]>();
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    const item = raw as Record<string, unknown>;
+    const index = Number(item.n);
+    const imageIndex = Number(item.image_index);
+    const marks: string[] = [];
+    if (item.poll_reason) {
+      marks.push(`poll=${String(item.poll_reason)}`);
+    }
+    if (Number(item.poll_attempts) > 0) {
+      marks.push(`polls=${Number(item.poll_attempts)}`);
+    }
+    if (Number(item.image_peers) > 0) {
+      marks.push(`peers=${Number(item.image_peers)}`);
+    }
+    if (Number(item.conduit_wait_ms) > 0) {
+      marks.push(`conduit_wait=${Number(item.conduit_wait_ms)}ms`);
+    }
+    const step: AttemptStep = {
+      index: Number.isFinite(index) ? `#${index}` : "#?",
+      email: typeof item.account_email === "string" ? item.account_email : "",
+      outcome: typeof item.outcome === "string" ? item.outcome : "unknown",
+      marks,
+      durationMs: typeof item.dur_ms === "number" ? item.dur_ms : null,
+      error: typeof item.error === "string" ? item.error : "",
+      upstreamText: typeof item.upstream_text === "string" ? item.upstream_text : "",
+    };
+    const key = Number.isFinite(imageIndex) && imageIndex > 0 ? imageIndex : 1;
+    groups.set(key, [...(groups.get(key) ?? []), step]);
+  }
+  return Array.from(groups.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([, steps]) => ({
+      raw: steps.map((step) => `${step.index} ${step.email} ${step.outcome}`).join(" → "),
+      steps,
+      parsed: true,
+    }));
 }
 
 function formatAttemptDuration(milliseconds: number | null) {
@@ -284,6 +347,25 @@ function formatCost(item: SystemLog) {
   return costFormatter.format(item.cost);
 }
 
+/** 复制长文本；HTTP 局域网环境没有 navigator.clipboard 时退回 textarea。 */
+async function copyToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  document.body.removeChild(textarea);
+  if (!copied) {
+    throw new Error("当前浏览器不支持自动复制，请使用导出按钮");
+  }
+}
+
 function getUrls(item: SystemLog | null) {
   const urls = item?.detail?.urls;
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
@@ -324,6 +406,37 @@ function RetryText({ retried }: { retried: boolean }) {
       <RotateCcw className="size-3.5" />
       已重试
     </span>
+  );
+}
+
+/** 尝试轨迹里的上游完整原文：默认截一段，长文本可展开/收起。 */
+function UpstreamTextBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const normalized = text.trim();
+  if (!normalized) {
+    return null;
+  }
+  const limit = 180;
+  const long = normalized.length > limit;
+  const shown = expanded || !long ? normalized : `${normalized.slice(0, limit)}…`;
+  return (
+    <div className="mt-1 w-full rounded-lg border border-neutral-200 bg-neutral-50/80 px-2.5 py-2">
+      <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-neutral-500">
+        <span>上游原文（{normalized.length} 字）</span>
+        {long ? (
+          <button
+            type="button"
+            onClick={() => setExpanded(!expanded)}
+            className="shrink-0 text-sky-600 hover:text-sky-700 hover:underline"
+          >
+            {expanded ? "收起" : "展开全部"}
+          </button>
+        ) : null}
+      </div>
+      <pre className="mt-1 max-h-64 overflow-auto font-sans text-xs leading-5 whitespace-pre-wrap break-words text-neutral-600">
+        {shown}
+      </pre>
+    </div>
   );
 }
 
@@ -457,6 +570,8 @@ function LogsContent() {
   const [exportLimit, setExportLimit] = useState("10");
   const [isExporting, setIsExporting] = useState(false);
   const [isExportingSelected, setIsExportingSelected] = useState(false);
+  // 单行操作（导出/复制）的忙碌状态：同一个按钮转圈，不影响其它行。
+  const [rowAction, setRowAction] = useState<{ id: string; kind: "export" | "copy" } | null>(null);
   const detailUrls = getUrls(detailLog);
   const detailUpstreamError = getUpstreamError(detailLog);
   const detail = detailLog?.detail || {};
@@ -465,7 +580,10 @@ function LogsContent() {
     // 稳定排序：同组内保持后端原有的字段顺序。
     .sort(([left], [right]) => detailFieldRank(left) - detailFieldRank(right));
   const accountTrail = collapseAccountTrail(splitAccountTrail(detail.account_trail));
-  const attemptGroups = parseAttemptGroups(detail.attempts_summary);
+  const structuredAttempts = structuredAttemptItems(detail);
+  const attemptGroups = structuredAttempts.length
+    ? parseStructuredAttemptGroups(structuredAttempts)
+    : parseAttemptGroups(detail.attempts_summary);
   const timelineGroups = parseImageTimelines(detail.image_timeline);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
@@ -621,6 +739,39 @@ function LogsContent() {
       return;
     }
     await exportLogs();
+  };
+
+  // 单条日志的导出/复制：导出就是下载这一条的完整 txt，复制就是把同一份文本
+  // 放进剪贴板，方便直接粘到聊天窗口里。
+  const exportSingleLog = async (item: SystemLog) => {
+    setRowAction({ id: item.id, kind: "export" });
+    try {
+      const count = await exportSelectedSystemLogs([item.id]);
+      if (count === null) {
+        toast.success("已导出日志文件");
+      } else if (count > 0) {
+        toast.success("已导出 1 条日志");
+      } else {
+        toast.success("没有可导出的日志");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "导出日志失败");
+    } finally {
+      setRowAction(null);
+    }
+  };
+
+  const copySingleLog = async (item: SystemLog) => {
+    setRowAction({ id: item.id, kind: "copy" });
+    try {
+      const text = await fetchSelectedSystemLogsText([item.id]);
+      await copyToClipboard(text);
+      toast.success("已复制日志导出文本");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "复制日志失败");
+    } finally {
+      setRowAction(null);
+    }
   };
 
   const clearFilters = () => {
@@ -918,7 +1069,7 @@ function LogsContent() {
           </div>
           <div className="overflow-x-auto">
             {/* 行距压紧一点：同样一屏能多放一条日志，按钮仍保留 32px 点击高度。 */}
-            <Table className="min-w-[980px] [&_td]:py-2.5">
+            <Table className="min-w-[1080px] [&_td]:py-2.5">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
@@ -930,7 +1081,7 @@ function LogsContent() {
                   {isCallLog ? <TableHead>数量</TableHead> : null}
                   {isCallLog ? <TableHead>本次消费</TableHead> : null}
                   <TableHead>简述</TableHead>
-                  <TableHead className="w-40">操作</TableHead>
+                  <TableHead className="w-72">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -976,6 +1127,30 @@ function LogsContent() {
                         <div className="flex items-center gap-1">
                           <Button variant="ghost" className="h-8 rounded-lg px-3 text-neutral-600" onClick={() => openDetail(item)}>
                             查看详情
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            className="h-8 rounded-lg px-2.5 text-neutral-600"
+                            onClick={() => void exportSingleLog(item)}
+                            disabled={rowAction?.id === item.id}
+                            title="导出这条日志（txt，完整报文）"
+                          >
+                            {rowAction?.id === item.id && rowAction.kind === "export"
+                              ? <LoaderCircle className="size-4 animate-spin" />
+                              : <Download className="size-4" />}
+                            导出
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            className="h-8 rounded-lg px-2.5 text-neutral-600"
+                            onClick={() => void copySingleLog(item)}
+                            disabled={rowAction?.id === item.id}
+                            title="复制这条日志的导出文本（完整报文）"
+                          >
+                            {rowAction?.id === item.id && rowAction.kind === "copy"
+                              ? <LoaderCircle className="size-4 animate-spin" />
+                              : <Copy className="size-4" />}
+                            复制
                           </Button>
                           <Button variant="ghost" className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeletingItems([item])}>
                             删除
@@ -1082,6 +1257,9 @@ function LogsContent() {
                                         {formatAttemptDuration(step.durationMs)}
                                       </span>
                                       {step.error ? <p className="w-full leading-5 text-neutral-500">{step.error}</p> : null}
+                                      {step.upstreamText && step.upstreamText.trim() !== step.error.trim() ? (
+                                        <UpstreamTextBlock text={step.upstreamText} />
+                                      ) : null}
                                     </div>
                                   );
                                 })

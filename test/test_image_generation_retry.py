@@ -893,6 +893,76 @@ class AttemptTrailLogTests(unittest.TestCase):
         self.assertEqual(groups[2]["steps"][-1]["step"], "attempt_end")
         self.assertEqual(groups[2]["steps"][-1]["outcome"], "generation_error")
 
+    def test_success_log_keeps_full_text_reply_for_expandable_trail(self):
+        long_text = "已生成圣诞主题电商实景图，" + "保留红色木屋风格圣诞镂空桌布、" * 8
+
+        def stream_fn(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                yield ImageOutput(
+                    kind="message", model=request.model, index=index, total=total,
+                    text=long_text, text_reply=True,
+                )
+                return
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        patcher = mock.patch.multiple(
+            conversation,
+            account_service=FakeAccountService(["token-a", "token-b"]),
+            config=SimpleNamespace(image_generation_retry_count=0),
+            stream_image_outputs=stream_fn,
+        )
+        with patcher:
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True,
+            )))
+
+        detail = self._log_call("调用完成", conversation.collect_image_outputs(outputs))
+        attempts = detail["attempts"]
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0]["outcome"], "text_reply")
+        # 摘要仍是一行短的（给列表/导出看），完整原文单独进结构化 attempts。
+        self.assertIn("上游只回了文本", attempts[0]["error"])
+        self.assertEqual(attempts[0]["upstream_text"], long_text)
+        self.assertEqual(attempts[1]["outcome"], "success")
+
+    def test_message_retry_logs_raw_upstream_error(self):
+        raw_error = (
+            '{"error": "upstream rejected this image", "padding": "'
+            + "x" * 300
+            + '"}'
+        )
+
+        def stream_fn(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                yield ImageOutput(
+                    kind="message", model=request.model, index=index, total=total,
+                    text=raw_error,
+                )
+                return
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        patcher = mock.patch.multiple(
+            conversation,
+            account_service=FakeAccountService(["token-a", "token-b"]),
+            config=SimpleNamespace(image_generation_retry_count=1),
+            stream_image_outputs=stream_fn,
+        )
+        with patcher:
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2", prompt="draw a cat", message_as_error=True,
+            )))
+
+        detail = self._log_call("调用完成", conversation.collect_image_outputs(outputs))
+        attempt = detail["attempts"][0]
+
+        self.assertEqual(attempt["outcome"], "message_retry")
+        # 日志里不能再是本地兜底文案；error 至少保留原生报错前 200 字，完整原文在 upstream_text。
+        self.assertIn("upstream rejected this image", attempt["error"])
+        self.assertNotIn("本次生图失败，请重试", attempt["error"])
+        self.assertEqual(attempt["upstream_text"], raw_error)
+        self.assertIn("upstream rejected this image", detail["attempts_summary"])
+
     def test_stream_chunks_yield_one_record_and_hide_internal_keys(self):
         call = LoggedCall(
             {"id": "k1", "name": "管理员", "role": "admin"},
@@ -902,6 +972,7 @@ class AttemptTrailLogTests(unittest.TestCase):
             {"object": "image.generation.result", "data": [{"url": "ok"}],
              "_account_trail": ["token-a@example.test", "token-b@example.test"],
              "_image_timeline": [{"index": 1, "steps": [{"at_ms": 0, "step": "request_start"}]}],
+             "_attempts": [{"n": 1, "account_email": "token-a@example.test", "outcome": "text_reply"}],
              "_attempts_summary": "#1 token-a@example.test poll_timeout → #2 token-b@example.test success"},
         ] * 2
 
@@ -909,6 +980,7 @@ class AttemptTrailLogTests(unittest.TestCase):
 
         self.assertTrue(all("_account_trail" not in item for item in yielded))
         self.assertTrue(all("_image_timeline" not in item for item in yielded))
+        self.assertTrue(all("_attempts" not in item for item in yielded))
         items = self.service.list()
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["detail"]["account_trail"],
@@ -916,6 +988,9 @@ class AttemptTrailLogTests(unittest.TestCase):
         self.assertEqual(
             items[0]["detail"]["image_timeline"][0]["steps"][0]["step"], "request_start",
         )
+        # 重复 chunk 里的同一份 attempts 只落一份。
+        self.assertEqual(len(items[0]["detail"]["attempts"]), 1)
+        self.assertEqual(items[0]["detail"]["attempts"][0]["outcome"], "text_reply")
 
     def test_repeated_chunk_trails_collapse_to_one_round(self):
         """每个流式 chunk 都会带一份同样的轨迹，不能拼成 A → B → A → B。"""
