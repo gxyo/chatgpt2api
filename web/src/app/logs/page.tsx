@@ -402,9 +402,9 @@ function RetryText({ retried }: { retried: boolean }) {
     return null;
   }
   return (
-    <span className="inline-flex items-center gap-1 font-medium text-amber-600">
-      <RotateCcw className="size-3.5" />
-      已重试
+    <span className="inline-flex items-center gap-1 whitespace-nowrap font-medium text-amber-600">
+      <RotateCcw className="size-3.5 shrink-0" />
+      <span className="whitespace-nowrap">已重试</span>
     </span>
   );
 }
@@ -443,9 +443,9 @@ function UpstreamTextBlock({ text }: { text: string }) {
 /** 数量列的小卡片：本次生图实际返回的图片张数。 */
 function ImageCountCard({ count }: { count: number }) {
   return (
-    <span className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-xs font-medium text-sky-700 tabular-nums shadow-sm">
-      <ImageIcon className="size-3.5" />
-      {count} 张
+    <span className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-xs font-medium whitespace-nowrap text-sky-700 tabular-nums shadow-sm">
+      <ImageIcon className="size-3.5 shrink-0" />
+      <span className="whitespace-nowrap">{count} 张</span>
     </span>
   );
 }
@@ -1077,8 +1077,8 @@ function LogsContent() {
                   <TableHead>类型</TableHead>
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
-                  {isCallLog ? <TableHead>重试</TableHead> : null}
-                  {isCallLog ? <TableHead>数量</TableHead> : null}
+                  {isCallLog ? <TableHead className="w-24">重试</TableHead> : null}
+                  {isCallLog ? <TableHead className="w-24">数量</TableHead> : null}
                   {isCallLog ? <TableHead>本次消费</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-72">操作</TableHead>
@@ -1110,12 +1110,12 @@ function LogsContent() {
                         </TableCell>
                       ) : null}
                       {isCallLog ? (
-                        <TableCell>
+                        <TableCell className="whitespace-nowrap">
                           <RetryText retried={isAccountRetry(item)} />
                         </TableCell>
                       ) : null}
                       {isCallLog ? (
-                        <TableCell>
+                        <TableCell className="whitespace-nowrap">
                           <ImageCountCard count={urls.length} />
                         </TableCell>
                       ) : null}

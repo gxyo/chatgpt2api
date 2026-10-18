@@ -286,14 +286,16 @@ export function RegisterCard() {
                       disabled={locked || config.mode !== "quota"}
                     />
                   </Field>
-                  <div className={`sm:col-span-2 ${PROVIDER_CARD_CLASS}`}>
+                  <div className={`@container sm:col-span-2 ${PROVIDER_CARD_CLASS}`}>
                     <div>
                       <div className="text-sm text-neutral-700">目标可用账号</div>
                       <p className="mt-0.5 text-xs text-neutral-400">
                         仅「可用账号数量」模式下生效；按北京时间取当前时段的目标。时段外暂停注册，起止相同表示该时段不生效。
                       </p>
                     </div>
-                    <div className="grid gap-3 sm:grid-cols-2">
+                    {/* 按卡片自身宽度（而不是视口）决定是否并排：平板和窄侧栏都直接堆叠，
+                        避免两个时间输入框把卡片撑出去。 */}
+                    <div className="grid gap-3 @2xl:grid-cols-2">
                       {(
                         [
                           { label: "白天", startField: "available_day_start", endField: "available_day_end", targetField: "available_day_target" },
@@ -306,14 +308,14 @@ export function RegisterCard() {
                         }>
                       ).map((period) => (
                         <div key={period.label} className="space-y-3 rounded-lg border border-neutral-200 bg-white p-3">
-                          <div className="flex items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
                             <span className="text-sm font-medium text-neutral-700">{period.label}</span>
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                               <Input
                                 type="time"
                                 value={config[period.startField] || ""}
                                 onChange={(event) => setSchedule(period.startField, event.target.value)}
-                                className="h-9 w-[7.5rem] rounded-lg border-neutral-200 bg-white tabular-nums"
+                                className="h-9 w-[7.5rem] max-w-full rounded-lg border-neutral-200 bg-white tabular-nums"
                                 disabled={locked || config.mode !== "available"}
                               />
                               <span className="text-xs text-neutral-400">至</span>
@@ -321,12 +323,12 @@ export function RegisterCard() {
                                 type="time"
                                 value={config[period.endField] || ""}
                                 onChange={(event) => setSchedule(period.endField, event.target.value)}
-                                className="h-9 w-[7.5rem] rounded-lg border-neutral-200 bg-white tabular-nums"
+                                className="h-9 w-[7.5rem] max-w-full rounded-lg border-neutral-200 bg-white tabular-nums"
                                 disabled={locked || config.mode !== "available"}
                               />
                             </div>
                           </div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="shrink-0 text-xs text-neutral-500">目标可用账号</span>
                             <Input
                               type="number"
@@ -334,7 +336,7 @@ export function RegisterCard() {
                               step={1}
                               value={String(config[period.targetField] || "")}
                               onChange={(event) => setSchedule(period.targetField, event.target.value)}
-                              className="h-9 w-24 rounded-lg border-neutral-200 bg-white tabular-nums"
+                              className="h-9 w-24 max-w-full rounded-lg border-neutral-200 bg-white tabular-nums"
                               disabled={locked || config.mode !== "available"}
                             />
                             <span className="text-xs text-neutral-400">个</span>
