@@ -3,13 +3,16 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
+from services.config import config
 from services.openai_backend_api import ImagePollTimeoutError
 from services.protocol import conversation
 from services.protocol.conversation import (
     ConversationRequest,
     ImageUnsupportedAppResponseError,
     UNSUPPORTED_APP_RESPONSE_CODE,
+    UNSUPPORTED_APP_RESPONSE_MESSAGE,
     is_unsupported_app_response,
+    unsupported_app_response_message,
 )
 
 REFUSAL_TEXTS = (
@@ -174,6 +177,56 @@ class StreamUnsupportedAppResponseTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertEqual(outputs[0].kind, "message")
         self.assertIn("圣诞", outputs[0].text)
+
+
+class UnsupportedResponseMessageConfigTests(unittest.TestCase):
+    def _with_message(self, value: str):
+        # config 是全局单例，patch.dict 只改内存、不落盘。
+        return mock.patch.dict(config.data, {"image_unsupported_response_message": value})
+
+    def test_unset_uses_the_builtin_message(self):
+        with self._with_message(""):
+            self.assertEqual(unsupported_app_response_message(), UNSUPPORTED_APP_RESPONSE_MESSAGE)
+
+    def test_configured_message_is_returned_to_the_client(self):
+        custom = "当前账号暂不支持生图，请联系管理员"
+        with self._with_message(custom):
+            exc = conversation._unsupported_app_response_error("upstream text")
+            error = exc.to_openai_error()["error"]
+
+        self.assertEqual(error["message"], custom)
+        self.assertEqual(error["code"], UNSUPPORTED_APP_RESPONSE_CODE)
+
+    def test_configured_message_is_used_for_message_outputs(self):
+        custom = "上游没有返回图片，请稍后重试"
+
+        def stream_fn(backend, request, index=1, total=1):
+            yield conversation.ImageOutput(
+                kind="message", model=request.model, index=index, total=total,
+                text=REFUSAL_TEXTS[0], conversation_id="conv-refusal",
+            )
+
+        fake_accounts = mock.Mock()
+        fake_accounts.get_available_access_token.return_value = "token-a"
+        fake_accounts.has_available_image_account.return_value = True
+        fake_accounts.acquire_image_handshake.return_value = True
+        fake_accounts.get_account.return_value = {"email": "a@example.test"}
+        fake_accounts.image_inflight_count.return_value = 0
+        fake_accounts.image_handshake_diagnostics.return_value = {}
+        fake_accounts.release_image_slot.return_value = None
+        fake_accounts.mark_image_result.return_value = None
+
+        with self._with_message(custom), mock.patch.multiple(
+            conversation,
+            account_service=fake_accounts,
+            stream_image_outputs=stream_fn,
+        ):
+            with self.assertRaises(ImageUnsupportedAppResponseError) as raised:
+                list(conversation.stream_image_outputs_with_pool(
+                    ConversationRequest(model="gpt-image-2", prompt="x", message_as_error=True)
+                ))
+
+        self.assertEqual(raised.exception.to_openai_error()["error"]["message"], custom)
 
 
 if __name__ == "__main__":

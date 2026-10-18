@@ -112,6 +112,8 @@ export type SettingsConfig = {
   image_generation_retry_count?: number | string;
   image_account_concurrency?: number | string;
   image_quota_error_message?: string;
+  /** 上游返回应用/文本响应、没有图片时给用户看的文案；留空用内置文案。 */
+  image_unsupported_response_message?: string;
   image_parallel_generation?: boolean;
   image_upscale_enabled?: boolean;
   auto_remove_invalid_accounts?: boolean;

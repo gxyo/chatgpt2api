@@ -91,6 +91,12 @@ UNSUPPORTED_APP_RESPONSE_CODE = "unsupported_app_response"
 UNSUPPORTED_APP_RESPONSE_MESSAGE = "上游返回了不支持的应用响应（没有生成图片文件）"
 
 
+def unsupported_app_response_message() -> str:
+    """给用户看的文案：设置页可覆盖，留空用内置文案。"""
+    override = str(getattr(config, "image_unsupported_response_message", "") or "").strip()
+    return override or UNSUPPORTED_APP_RESPONSE_MESSAGE
+
+
 class ImageUnsupportedAppResponseError(ImageGenerationError):
     """上游回的是 ChatGPT 应用/文本响应，而不是图片文件。
 
@@ -349,7 +355,7 @@ def _unsupported_app_response_error(
         backend: Any = None,
 ) -> ImageUnsupportedAppResponseError:
     exc = ImageUnsupportedAppResponseError(
-        UNSUPPORTED_APP_RESPONSE_MESSAGE,
+        unsupported_app_response_message(),
         status_code=502,
         error_type="server_error",
         code=UNSUPPORTED_APP_RESPONSE_CODE,
@@ -2682,7 +2688,7 @@ def _generate_single_image_attempts(
                     )
                     if unsupported_app:
                         failure = ImageUnsupportedAppResponseError(
-                            UNSUPPORTED_APP_RESPONSE_MESSAGE,
+                            unsupported_app_response_message(),
                             status_code=502,
                             error_type="server_error",
                             code=UNSUPPORTED_APP_RESPONSE_CODE,

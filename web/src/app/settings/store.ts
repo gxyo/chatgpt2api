@@ -131,6 +131,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     image_upscale_enabled: Boolean(config.image_upscale_enabled),
     image_quota_error_message: String(config.image_quota_error_message || ""),
+    image_unsupported_response_message: String(config.image_unsupported_response_message || ""),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
@@ -158,6 +159,7 @@ type SettingsStore = {
   setImageAccountConcurrency: (value: string) => void;
   setImageUpscaleEnabled: (value: boolean) => void;
   setImageQuotaErrorMessage: (value: string) => void;
+  setImageUnsupportedResponseMessage: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
@@ -247,6 +249,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         image_upscale_enabled: Boolean(config.image_upscale_enabled),
         image_quota_error_message: String(config.image_quota_error_message || "").trim(),
+        image_unsupported_response_message: String(config.image_unsupported_response_message || "").trim(),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
@@ -315,6 +318,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageQuotaErrorMessage: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_quota_error_message: value } } : {});
+  },
+
+  setImageUnsupportedResponseMessage: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_unsupported_response_message: value } } : {});
   },
 
   setAutoRemoveInvalidAccounts: (value) => {

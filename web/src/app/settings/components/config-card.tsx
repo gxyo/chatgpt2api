@@ -26,6 +26,7 @@ export function ConfigCard() {
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
   const setImageUpscaleEnabled = useSettingsStore((state) => state.setImageUpscaleEnabled);
   const setImageQuotaErrorMessage = useSettingsStore((state) => state.setImageQuotaErrorMessage);
+  const setImageUnsupportedResponseMessage = useSettingsStore((state) => state.setImageUnsupportedResponseMessage);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
@@ -131,6 +132,21 @@ export function ConfigCard() {
             />
             <p className="text-xs leading-5 text-neutral-500">
               号池里没有可用的生图额度时，把 no available image quota 换成这里填写的文字，例如「请联系管理员补号」；留空则原样返回 no available image quota。
+            </p>
+          </div>
+          <div className="space-y-2 md:col-span-2">
+            <label className="flex items-center gap-2 text-sm text-neutral-700">
+              <Ban className="size-4 text-neutral-500" />
+              不支持的应用响应提示语
+            </label>
+            <Input
+              value={String(config?.image_unsupported_response_message || "")}
+              onChange={(event) => setImageUnsupportedResponseMessage(event.target.value)}
+              placeholder="留空使用默认文案"
+              className="h-10 rounded-xl border-neutral-200 bg-white"
+            />
+            <p className="text-xs leading-5 text-neutral-500">
+              上游没有生成图片、而是回了 ChatGPT 应用/文本响应（例如 Create Pet 的 DIL/Library，或免费号只能整理提示词）时，返回给用户的文案；留空使用「上游返回了不支持的应用响应（没有生成图片文件）」。这类请求在日志和统计里单独记「不支持的应用响应」，不计入失败。
             </p>
           </div>
           <div className="space-y-2">

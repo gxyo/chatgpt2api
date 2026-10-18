@@ -40,6 +40,8 @@ DEFAULT_LOG_CLEANUP_TIME = "03:00"
 MAX_LOG_RETENTION_DAYS = 3650
 # 「无可用生图额度」提示语的长度上限：这是个错误文案，不是留言板。
 MAX_IMAGE_QUOTA_ERROR_MESSAGE_LENGTH = 200
+# 「不支持的应用响应」提示语同样只做错误文案，长度上限保持一致。
+MAX_IMAGE_UNSUPPORTED_RESPONSE_MESSAGE_LENGTH = 200
 
 DEFAULT_CHAT_COMPLETION_CACHE = {
     "enabled": True,
@@ -136,6 +138,11 @@ def _normalize_image_cleanup_time(value: object) -> str:
 def _normalize_image_quota_error_message(value: object) -> str:
     # 留空 = 不改写，继续把上游原文 no available image quota 返回给用户。
     return str(value or "").strip()[:MAX_IMAGE_QUOTA_ERROR_MESSAGE_LENGTH]
+
+
+def _normalize_image_unsupported_response_message(value: object) -> str:
+    # 留空 = 用内置文案「上游返回了不支持的应用响应（没有生成图片文件）」。
+    return str(value or "").strip()[:MAX_IMAGE_UNSUPPORTED_RESPONSE_MESSAGE_LENGTH]
 
 
 def _normalize_image_generation_retry_count(value: object) -> int:
@@ -337,6 +344,13 @@ class ConfigStore:
     def image_quota_error_message(self) -> str:
         """号池无可用生图额度时给用户返回的文案；留空表示返回上游原文。"""
         return _normalize_image_quota_error_message(self.data.get("image_quota_error_message"))
+
+    @property
+    def image_unsupported_response_message(self) -> str:
+        """上游返回应用/文本响应、没有图片时给用户看的文案；留空用内置文案。"""
+        return _normalize_image_unsupported_response_message(
+            self.data.get("image_unsupported_response_message")
+        )
 
     @property
     def log_retention_days(self) -> int:
@@ -556,6 +570,7 @@ class ConfigStore:
         data["refresh_all_accounts_interval_minute"] = self.refresh_all_accounts_interval_minute
         data["image_retention_days"] = self.image_retention_days
         data["image_quota_error_message"] = self.image_quota_error_message
+        data["image_unsupported_response_message"] = self.image_unsupported_response_message
         data["log_retention_days"] = self.log_retention_days
         data["log_auto_cleanup"] = self.log_auto_cleanup
         data["log_cleanup_time"] = self.log_cleanup_time
@@ -633,6 +648,12 @@ class ConfigStore:
         if "image_quota_error_message" in next_data:
             next_data["image_quota_error_message"] = _normalize_image_quota_error_message(
                 next_data.get("image_quota_error_message")
+            )
+        if "image_unsupported_response_message" in next_data:
+            next_data["image_unsupported_response_message"] = (
+                _normalize_image_unsupported_response_message(
+                    next_data.get("image_unsupported_response_message")
+                )
             )
         if "log_retention_days" in next_data:
             next_data["log_retention_days"] = _normalize_log_retention_days(next_data.get("log_retention_days"))
