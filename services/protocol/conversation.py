@@ -92,8 +92,8 @@ MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS = 3
 # 轮询超时后自动换号重试的次数。设置页的 image_generation_retry_count 是在这之后
 # 再追加的「生成失败重试」，两者独立。
 MAX_POLL_TIMEOUT_RETRIES = 4
-# 模型回正文而非出图时自动换号重试的次数。文本回复往往在预算快耗尽时才对上游拿完流，
-# 每次重试都会续一份预算，任务线程的等待上限（image_task_service）也要按它放宽。
+# 模型回正文而非出图时自动换号重试的次数。文本回复往往在预算快耗尽时才对上游
+# 拿完流；重试只花剩余预算，不会把整次请求拖成好几份超时的长度。
 MAX_TEXT_REPLY_RETRIES = 3
 # 同一账号的 conduit 窗口（prepare→mainline）被占时，最多连换几个号，不做等待。
 # 窗口正常只占 1 秒出头；同号并发时排队等窗口会把几十秒预算耗在「等别人」上，
@@ -2032,13 +2032,12 @@ def _generate_single_image_attempts(
     request_budget_secs = (
         max(0.0, float(request.deadline) - time.monotonic()) if request.deadline is not None else None
     )
-    # 本次尝试实际使用的 deadline。换号重试时 schedule_generation_retry 会续一份
-    # 新的完整预算——轮询超时通常正好把原始预算吃干，不续的话重试还没开始就被
-    # deadline 拦下，设置页的「生成失败重试次数」对这类失败永远不生效。
+    # 整次请求（含所有换号重试）共用同一份预算：重试只在剩余时间里跑，不续期。
+    # 以前每次重试都续满一份新预算，单次 120s + 重试 3 次最坏要等 480s
+    # （线上实测 489s），还把号池里的号全烧了一遍；而同样的慢生成重试几次
+    # 并不会变快。需要更长的单次等待，请在设置页调大「图片轮询超时」。
     attempt_deadline = request.deadline
-    # 续预算之前这次尝试真正剩下的预算。日志里的「预算剩余」必须写这个数：
-    # 在 finally 里现算读到的是续过之后的 deadline，永远显示「剩余一整个预算」，
-    # 看起来就像这次尝试空等了 50s 什么都没干。
+    # 这次尝试真正剩下的预算。日志里的「预算剩余」用这份。
     attempt_remaining_secs: float | None = None
     # 下面这几个在循环里被反复重绑，失败快照（finally 里那个闭包）读的是当前值。
     backend: OpenAIBackendAPI | None = None
@@ -2167,39 +2166,35 @@ def _generate_single_image_attempts(
             diagnostics["request_remaining_secs"] = round(remaining, 1) if remaining is not None else None
             diagnostics["request_deadline_expired"] = remaining == 0.0
 
-    def renew_attempt_deadline() -> None:
-        """给下一次换号尝试续一份与原请求等长的新预算。
-
-        轮询超时、文本回复这类失败通常正好把预算吃干；不续的话重试在循环顶部
-        就被 deadline 拦下，等于没重试。
-        """
-        nonlocal attempt_deadline, attempt_remaining_secs
-        if attempt_deadline is None or request_budget_secs is None:
-            return
-        if attempt_remaining_secs is None:
-            # 先记下这次尝试真正剩了多少，再续预算；日志里的「预算剩余」用这份。
-            attempt_remaining_secs = remaining_image_deadline_secs(attempt_deadline)
-        renewed = time.monotonic() + request_budget_secs
-        if renewed > attempt_deadline:
-            attempt_deadline = renewed
-            diagnostics["retry_deadline_extended_secs"] = round(request_budget_secs, 1)
-
     def schedule_generation_retry(failure: ImageGenerationError) -> bool:
         """按设置里的重试次数决定是否换号重来。返回 True 时调用方应 `continue`。
 
         只认 RETRYABLE_IMAGE_FAILURE_MESSAGES 里的三类报错；内容违规、额度不足、
         渠道拥堵等都不在这里重试。
 
-        每次重试都续一份与原请求等长的新预算：轮询超时往往正好把原始预算耗尽，
-        如果还按旧 deadline 判断，配置的重试次数对这类失败永远不会生效。
+        重试共用本次请求的剩余预算，不续期：本地超时通常正好把预算耗尽，
+        此时直接返回 False，避免把同样慢的生成按重试次数重做一遍。
         """
         nonlocal generation_retry_count
         if generation_retry_limit <= 0 or generation_retry_count >= generation_retry_limit:
             return False
         if not is_retryable_image_failure(str(failure)):
             return False
+        if image_deadline_expired(attempt_deadline):
+            diagnostics["retry_stopped"] = "request_deadline"
+            mark_timeline(
+                "retry_stopped",
+                "重试停止",
+                (
+                    f"本次尝试失败后预算已耗尽，不再换号重试"
+                    f"（已用 {generation_retry_count}/{generation_retry_limit} 次）"
+                ),
+                retry_count=generation_retry_count,
+                retry_limit=generation_retry_limit,
+                reason="request_deadline",
+            )
+            return False
         generation_retry_count += 1
-        renew_attempt_deadline()
         logger.warning({
             "event": "image_generation_failure_retry",
             "trace_id": trace_id,
@@ -2222,12 +2217,13 @@ def _generate_single_image_attempts(
         else:
             reason = f"上游返回可重试错误（{str(failure)[:80]}）"
             action = f"按设置换号重试第 {generation_retry_count}/{generation_retry_limit} 次"
+        remaining = remaining_image_deadline_secs(attempt_deadline)
         mark_timeline(
             "retry",
             "换号重试",
             (
                 f"{reason}；{action}"
-                + (f"，预算续期 {request_budget_secs:.0f}s" if request_budget_secs else "")
+                + (f"，用剩余 {remaining:.0f}s 重试" if remaining is not None else "")
             ),
             retry_count=generation_retry_count,
             retry_limit=generation_retry_limit,
@@ -2406,8 +2402,9 @@ def _generate_single_image_attempts(
             transient = last_transient_error or is_retriable_upstream_error(exc)
             poll_failure: ImageGenerationError | None = None
             if poll_timeout_retry_count > 0 and not transient:
-                # 换号重试会续一份新预算，所以要在 deadline 检查之前先尝试调度，
-                # 否则第一轮轮询耗尽预算后，后面的重试全部走不到。
+                # 重试只花本次请求的剩余预算：先调度再检查 deadline，还有剩余时间
+                # 就直接换号；预算已耗尽时 schedule_generation_retry 会返回 False，
+                # 后面的 ensure_image_deadline 再抛出超时。
                 poll_failure = ImageGenerationError(
                     IMAGE_POLL_TIMEOUT_MESSAGE,
                     code="upstream_timeout",
@@ -2637,8 +2634,8 @@ def _generate_single_image_attempts(
             # 轮询超时 / 主链路没起图：如果还没有拿到最终消息/图片，只丢弃本账号的进度并换号重试。
             if not returned_message and not returned_result:
                 poll_timeout_retry_count += 1
-                # 内置的自动换号重试只能花剩余预算；预算已经耗尽时留给下面
-                # 配置的「生成失败重试」处理——那次重试会续一份新预算。
+                # 内置的自动换号重试只能花剩余预算；预算已经耗尽时交给下面
+                # 配置的「生成失败重试」——它同样只在剩余预算内生效，不会再续期。
                 if poll_timeout_retry_count <= MAX_POLL_TIMEOUT_RETRIES and not image_deadline_expired(
                     attempt_deadline,
                 ):
@@ -2797,11 +2794,13 @@ def _generate_single_image_attempts(
                     "code": getattr(exc, "code", ""),
                     "conversation_id": getattr(exc, "conversation_id", ""),
                 }
-                if text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES:
-                    # 文本回复通常是上游把图生成完、最后才回正文（甚至只是取图失败，
-                    # 比如下载时 token 已被并发刷新挤掉），此时预算基本耗尽。不续预算
-                    # 的话重试在循环顶部就被 deadline 拦下，等于没重试。
-                    renew_attempt_deadline()
+                if (
+                    text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES
+                    and not image_deadline_expired(attempt_deadline)
+                ):
+                    # 文本回复通常出现在预算快耗尽时；重试只花剩余预算，不再续期，
+                    # 否则一次请求会因为正文重试被放大到好几分钟。
+                    remaining = remaining_image_deadline_secs(attempt_deadline)
                     logger.warning({
                         "event": "image_model_text_reply_retry",
                         "trace_id": trace_id,
@@ -2817,11 +2816,21 @@ def _generate_single_image_attempts(
                         "retry", "文本回复换号",
                         f"上游回了正文而不是图（code={getattr(exc, 'code', '')}，"
                         f"{len(upstream_text or error_text)} 字）；"
-                        f"换号重试第 {text_reply_retry_count}/{MAX_TEXT_REPLY_RETRIES} 次，预算续期",
+                        f"换号重试第 {text_reply_retry_count}/{MAX_TEXT_REPLY_RETRIES} 次"
+                        + (f"，用剩余 {remaining:.0f}s" if remaining is not None else ""),
                         retry_count=text_reply_retry_count,
                         retry_limit=MAX_TEXT_REPLY_RETRIES,
                     )
                     continue
+                if text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES:
+                    diagnostics["retry_stopped"] = "request_deadline"
+                    mark_timeline(
+                        "retry_stopped", "重试停止",
+                        "文本回复重试的预算已耗尽，不再换号（总耗时封顶）",
+                        retry_count=text_reply_retry_count,
+                        retry_limit=MAX_TEXT_REPLY_RETRIES,
+                        reason="request_deadline",
+                    )
                 logger.warning({
                     "event": "image_model_text_reply_exhausted_retries",
                     "trace_id": trace_id,

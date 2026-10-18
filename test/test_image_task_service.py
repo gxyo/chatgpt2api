@@ -9,8 +9,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 import services.image_task_service as image_task_service_module
-from services.image_task_service import UPSCALE_TIMEOUT_ALLOWANCE_SECS, ImageTaskService
-from services.protocol.conversation import MAX_TEXT_REPLY_RETRIES
+from services.image_task_service import (
+    HANDLER_DEADLINE_GRACE_MAX_SECS,
+    HANDLER_DEADLINE_GRACE_RATIO,
+    UPSCALE_TIMEOUT_ALLOWANCE_SECS,
+    ImageTaskService,
+)
 
 
 OWNER = {"id": "owner-1", "name": "Owner", "role": "admin"}
@@ -149,7 +153,7 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
             self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
 
-    def test_task_timeout_covers_configured_generation_retries(self):
+    def test_task_timeout_does_not_multiply_by_retry_count(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(Path(tmp_dir) / "image_tasks.json", timeout_secs=60)
             config = SimpleNamespace(
@@ -159,11 +163,12 @@ class ImageTaskServiceTests(unittest.TestCase):
             with mock.patch.object(image_task_service_module, "config", config):
                 timeout = service._timeout_for_payload({"timeout_secs": 60, "size": "1024x1024"})
 
-            # 每次换号重试在 handler 里都续一份等长预算，外层也要按 1+重试次数放宽；
-            # 文本回复的自动换号重试还会额外续 MAX_TEXT_REPLY_RETRIES 份。
-            self.assertEqual(timeout, 60 * (1 + 2 + MAX_TEXT_REPLY_RETRIES))
+            # 换号重试只在本次请求的剩余预算内跑，不会按重试次数放大外层等待；
+            # 这里只加一点收尾余量（20%，最多 30s）。
+            grace = min(HANDLER_DEADLINE_GRACE_MAX_SECS, 60 * HANDLER_DEADLINE_GRACE_RATIO)
+            self.assertEqual(timeout, 60 + grace)
 
-    def test_task_timeout_adds_upscale_allowance_on_top_of_retries(self):
+    def test_task_timeout_adds_upscale_allowance(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(Path(tmp_dir) / "image_tasks.json", timeout_secs=30)
             config = SimpleNamespace(
@@ -173,9 +178,10 @@ class ImageTaskServiceTests(unittest.TestCase):
             with mock.patch.object(image_task_service_module, "config", config):
                 timeout = service._timeout_for_payload({"timeout_secs": 30, "size": "4096x4096"})
 
-            # 30 基础 + 1 次配置重试 + MAX_TEXT_REPLY_RETRIES 次文本回复重试，再加超分预留。
+            # 30 基础 + 收尾余量，再加超分预留；重试不再额外加预算。
+            grace = min(HANDLER_DEADLINE_GRACE_MAX_SECS, 30 * HANDLER_DEADLINE_GRACE_RATIO)
             self.assertEqual(
-                timeout, 30 * (1 + 1 + MAX_TEXT_REPLY_RETRIES) + UPSCALE_TIMEOUT_ALLOWANCE_SECS,
+                timeout, 30 + grace + UPSCALE_TIMEOUT_ALLOWANCE_SECS,
             )
 
     def test_task_uses_configured_hard_timeout(self):

@@ -27,7 +27,6 @@ from services.log_service import (
     merge_extra_detail,
 )
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
-from services.protocol.conversation import MAX_TEXT_REPLY_RETRIES
 from utils.beijing_time import beijing_now_text, beijing_text_from_timestamp
 from utils.helper import describe_exception, sanitize_image_error_text
 
@@ -41,6 +40,11 @@ TASK_TIMEOUT_MESSAGE = "图片任务处理超时，请稍后重试"
 # 4K 超分是纯本地 CPU 后处理，不受上游轮询预算约束；任务线程的等待时间要留出这一段，
 # 否则图已经生成好、正在超分时任务先判定超时，结果被白白丢掉。
 UPSCALE_TIMEOUT_ALLOWANCE_SECS = 60
+# handler 内部 deadline 到点后，SSE 收尾/结果解析可能还会晚几秒到十几秒；
+# 外层任务线程的等待上限按基础预算多留一点余量（最多 20%，且不超过 30s），
+# 避免把即将结束的请求误判成任务超时，同时不破坏「小超时必须硬杀」的语义。
+HANDLER_DEADLINE_GRACE_RATIO = 0.2
+HANDLER_DEADLINE_GRACE_MAX_SECS = 30
 
 
 def _now_iso() -> str:
@@ -353,16 +357,12 @@ class ImageTaskService:
         return _positive_float(self.timeout_secs_getter(), float(config.image_poll_timeout_secs))
 
     def _timeout_for_payload(self, payload: dict[str, Any]) -> float:
-        """任务线程的等待上限：基础轮询预算 + 每次换号重试的预算 + 超分时间。"""
+        """任务线程的等待上限：请求预算（重试共用、不续期）+ 收尾余量 + 超分时间。"""
         base_timeout_secs = _positive_float(payload.get("timeout_secs"), self._timeout_secs())
-        timeout_secs = base_timeout_secs
-        # 每次「生成失败重试」都会在 handler 里续一份等长的新预算，外层等待时间
-        # 不跟着放宽的话，任务线程会先判超时，重试产生的图被白白丢掉。
-        retry_count = max(0, int(getattr(config, "image_generation_retry_count", 0) or 0))
-        timeout_secs += base_timeout_secs * retry_count
-        # 文本回复的自动换号重试（最多 MAX_TEXT_REPLY_RETRIES 次）同样会续预算，
-        # 它不受设置页的重试次数控制。
-        timeout_secs += base_timeout_secs * MAX_TEXT_REPLY_RETRIES
+        # 换号重试只在本次请求的剩余预算内跑，handler 的总耗时不会超过基础预算；
+        # 这里只额外留一点收尾余量，避免流式读取晚几秒结束就被任务线程判超时。
+        grace = min(HANDLER_DEADLINE_GRACE_MAX_SECS, base_timeout_secs * HANDLER_DEADLINE_GRACE_RATIO)
+        timeout_secs = base_timeout_secs + grace
         # 请求了 2K/4K 且开了超分时，本地放大要额外时间（还要排队等串行锁）。
         upscale_target = parse_size_long_edge(payload.get("size"))
         if config.image_upscale_enabled and upscale_target and upscale_target > 1024:

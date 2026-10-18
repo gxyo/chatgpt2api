@@ -352,7 +352,7 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(outputs[-1].kind, "result")
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
 
-    def test_text_reply_retry_renews_request_budget(self):
+    def test_text_reply_retry_reuses_request_budget(self):
         seen_deadlines = []
 
         def stream_fn(backend, request, index=1, total=1):
@@ -372,10 +372,10 @@ class GenerationRetryTests(unittest.TestCase):
                 model="gpt-image-2", prompt="draw a cat", message_as_error=True, deadline=deadline,
             )))
 
-        # 文本回复通常出现在预算快耗尽时，不续预算重试会在循环顶部被 deadline 拦下。
+        # 重试只花本次请求的剩余预算，不再续期：第二次尝试拿到的是同一个 deadline。
         self.assertEqual(outputs[-1].kind, "result")
         self.assertEqual(len(seen_deadlines), 2)
-        self.assertGreater(seen_deadlines[1], deadline)
+        self.assertEqual(seen_deadlines[1], deadline)
 
     def test_retry_switches_account_on_skipped_mainline(self):
         def stream_fn(backend, request, index=1, total=1):
@@ -497,35 +497,28 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertIn("本次尝试超时", retry_steps[0]["detail"])
         self.assertNotIn("上游返回", retry_steps[0]["detail"])
 
-    def test_poll_timeout_after_deadline_expires_retries_with_a_fresh_budget(self):
-        # 轮询超时通常正好把原始预算耗尽。配置了「生成失败重试次数」时，
-        # 换号重试必须能拿到一份新预算，否则 deadline 检查会把它拦死。
+    def test_poll_timeout_after_deadline_expires_does_not_retry(self):
+        # 轮询超时通常正好把原始预算耗尽。以前会续一份新预算再换号重试，
+        # 单次 120s + 重试 3 次最坏要等 480s；现在预算耗尽就不再重试。
         import time as _time
 
-        seen_deadlines: dict[str, float] = {}
-
         def stream_fn(backend, request, index=1, total=1):
-            seen_deadlines[backend.access_token] = request.deadline
-            if backend.access_token == "token-a":
-                _time.sleep(0.2)
-                raise ImagePollTimeoutError("poll timed out")
-            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+            _time.sleep(0.2)
+            raise ImagePollTimeoutError("poll timed out")
 
         patcher, accounts = self._patches(["token-a", "token-b"], stream_fn, 1)
         deadline = _time.monotonic() + 0.05
-        with patcher:
-            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+        with patcher, self.assertRaises(ImageGenerationError):
+            list(conversation.stream_image_outputs_with_pool(ConversationRequest(
                 model="gpt-image-2",
                 prompt="draw a cat",
                 message_as_error=True,
                 deadline=deadline,
             )))
 
-        self.assertEqual(outputs[0].kind, "result")
-        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
-        self.assertGreater(seen_deadlines["token-b"], deadline)
+        self.assertEqual(accounts.selected_image_tokens, ["token-a"])
 
-    def test_retry_deadline_extension_is_recorded_in_diagnostics(self):
+    def test_timeout_retry_stops_when_budget_is_exhausted(self):
         import time as _time
 
         def stream_fn(backend, request, index=1, total=1):
@@ -542,36 +535,32 @@ class GenerationRetryTests(unittest.TestCase):
             )))
 
         diagnostics = raised.exception.image_diagnostics
-        self.assertIn("retry_deadline_extended_secs", diagnostics)
+        self.assertEqual(diagnostics.get("retry_stopped"), "request_deadline")
+        self.assertNotIn("retry_deadline_extended_secs", diagnostics)
 
-    def test_attempt_end_reports_budget_before_renewal(self):
-        # 最终失败的那次尝试在 finally 里记录现场时，换号重试已经把 deadline 续成
-        # 「现在 + 一整个预算」了。日志必须写续期前的真实剩余，否则刷完预算的失败
-        # 尝试会显示「预算剩余 50.0s」，看起来像空等了 50 秒却什么都没干。
+    def test_attempt_end_reports_budget_exhausted_for_timeout(self):
+        # 超时后预算耗尽、不再重试时，尝试结束必须写「预算已耗尽」，
+        # 而不是一个虚假的「预算剩余」。
         import time as _time
 
         def stream_fn(backend, request, index=1, total=1):
-            if backend.access_token == "token-a":
-                _time.sleep(0.2)
-                raise ImagePollTimeoutError("poll timed out")
-            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+            _time.sleep(0.2)
+            raise ImagePollTimeoutError("poll timed out")
 
         patcher, _ = self._patches(["token-a", "token-b"], stream_fn, 1)
-        with mock.patch.object(conversation, "MAX_POLL_TIMEOUT_RETRIES", 0), patcher:
-            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+        with mock.patch.object(conversation, "MAX_POLL_TIMEOUT_RETRIES", 0), patcher, \
+                self.assertRaises(ImageGenerationError) as raised:
+            list(conversation.stream_image_outputs_with_pool(ConversationRequest(
                 model="gpt-image-2",
                 prompt="draw a cat",
                 message_as_error=True,
                 deadline=_time.monotonic() + 0.05,
             )))
 
-        groups = conversation.collect_image_outputs(outputs)["_image_timeline"]
-        attempt_ends = [
-            step for step in groups[0]["steps"]
-            if step.get("step") == "attempt_end"
-        ]
+        timeline = (raised.exception.image_diagnostics or {}).get("timeline") or []
+        attempt_ends = [step for step in timeline if step.get("step") == "attempt_end"]
 
-        self.assertEqual(len(attempt_ends), 2)
+        self.assertEqual(len(attempt_ends), 1)
         self.assertIn("预算已耗尽", attempt_ends[0]["detail"])
         self.assertNotIn("预算剩余", attempt_ends[0]["detail"])
 
