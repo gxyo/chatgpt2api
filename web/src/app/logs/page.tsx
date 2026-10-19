@@ -873,7 +873,8 @@ function LogsContent() {
         {isCallLog ? (
           <FilterField label="状态">
             <Select value={status} onValueChange={setStatus}>
-              <SelectTrigger className="h-10 w-[150px] rounded-xl"><SelectValue /></SelectTrigger>
+              {/* 状态文案较长（「不支持的应用响应」），宽度不够会被 line-clamp 截断。 */}
+              <SelectTrigger className="h-10 w-[190px] rounded-xl"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value={LogStatus.All}>全部状态</SelectItem>
                 <SelectItem value={LogStatus.Success}>成功</SelectItem>

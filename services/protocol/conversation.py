@@ -105,7 +105,9 @@ class ImageUnsupportedAppResponseError(ImageGenerationError):
        “Saved in Library”），会话里没有标准 `file_ids`/`sediment_ids`；
     2. 模型直接回“我无法在这个聊天中生成图片，只能帮你整理提示词”的正文。
 
-    这不是账号或渠道故障，换号重试也不会变成图片，因此单独归类、不计入失败。
+    这不是账号或渠道故障：不记该账号失败，但响应形态跟账号、模型路由有关，
+    出现时直接中断当前流并换号重试（次数遵循设置页的「生成失败重试次数」），
+    最终仍未出图才单独归类、不计入失败率。
     """
 
 
@@ -1318,7 +1320,7 @@ def stream_image_outputs(
                           text=sanitize_image_error_text(error_text), conversation_id=conversation_id,
                           upstream_model_slug=upstream_model_slug)
         return
-    # 上游没出图，而是回了应用/拒绝类文本：单独归类，不轮询、不换号重试。
+    # 上游没出图，而是回了应用/拒绝类文本：不轮询，直接抛给外层中断并换号重试。
     # 放在 blocked 之后，内容审核拒绝仍然走上面的策略拦截分支。
     unsupported_reason = unsupported_app_response_reason(message)
     marker_only = (
@@ -2432,8 +2434,9 @@ def _generate_single_image_attempts(
     def schedule_generation_retry(failure: ImageGenerationError) -> bool:
         """按设置里的重试次数决定是否换号重来。返回 True 时调用方应 `continue`。
 
-        只认 RETRYABLE_IMAGE_FAILURE_MESSAGES 里的三类报错；内容违规、额度不足、
-        渠道拥堵等都不在这里重试。
+        只认 RETRYABLE_IMAGE_FAILURE_MESSAGES 里的三类报错，以及「不支持的应用
+        响应」；内容违规、额度不足、渠道拥堵等都不在这里重试。应用响应也占用
+        同一份「生成失败重试」次数：设置几次就最多换几个号。
 
         重试共用本次请求的剩余预算，不续期：本地超时通常正好把预算耗尽，
         此时直接返回 False，避免把同样慢的生成按重试次数重做一遍。
@@ -2441,7 +2444,8 @@ def _generate_single_image_attempts(
         nonlocal generation_retry_count
         if generation_retry_limit <= 0 or generation_retry_count >= generation_retry_limit:
             return False
-        if not is_retryable_image_failure(str(failure)):
+        unsupported = getattr(failure, "code", "") == UNSUPPORTED_APP_RESPONSE_CODE
+        if not unsupported and not is_retryable_image_failure(str(failure)):
             return False
         if image_deadline_expired(attempt_deadline):
             diagnostics["retry_stopped"] = "request_deadline"
@@ -2470,7 +2474,10 @@ def _generate_single_image_attempts(
         })
         # 本地超时和上游报错分开措辞：前者是「没在预算内等到图」，后者才是渠道问题。
         timeout_failure = str(failure).strip() in LOCAL_TIMEOUT_FAILURE_MESSAGES
-        if timeout_failure:
+        if unsupported:
+            reason = "上游回了应用/文本响应，没有产出图片"
+            action = f"按设置换号重试第 {generation_retry_count}/{generation_retry_limit} 次"
+        elif timeout_failure:
             reason = (
                 f"本次尝试超时：{request_budget_secs:.0f}s 预算内没等到上游图片"
                 if request_budget_secs
@@ -2483,7 +2490,7 @@ def _generate_single_image_attempts(
         remaining = remaining_image_deadline_secs(attempt_deadline)
         mark_timeline(
             "retry",
-            "换号重试",
+            "应用响应换号" if unsupported else "换号重试",
             (
                 f"{reason}；{action}"
                 + (f"，用剩余 {remaining:.0f}s 重试" if remaining is not None else "")
@@ -2497,6 +2504,9 @@ def _generate_single_image_attempts(
     while True:
         attempt_remaining_secs = None
         in_rescue = rescue_deadline > 0
+        # 上一次尝试如果回过应用/文本响应，别把它的原因带到这一次：换号后的最终
+        # 失败可能完全是另一类（选号失败、内容策略等）。每次尝试的原文仍在 attempts 里。
+        diagnostics.pop("unsupported_reason", None)
         try:
             ensure_image_deadline(attempt_deadline)
         except ImageGenerationError:
@@ -2848,6 +2858,11 @@ def _generate_single_image_attempts(
                             "text_preview": text[:300],
                             "index": index,
                         })
+                    if unsupported_app:
+                        # 应用/文本响应不是账号故障，也不按普通失败处理：直接交给
+                        # 外层 ImageUnsupportedAppResponseError 分支统一换号重试，
+                        # 避免这里先给账号记一次失败、又消耗两次重试额度。
+                        raise failure
                     if schedule_generation_retry(failure):
                         account_service.mark_image_result(token, False)
                         # 日志里展示上游原生报错，而不是本地兜底文案「本次生图失败，请重试。」
@@ -2987,8 +3002,10 @@ def _generate_single_image_attempts(
                 continue
             raise failure from exc
         except ImageUnsupportedAppResponseError as exc:
-            # 上游回的是应用/文本响应，不是账号或渠道故障：别记这个号一次失败，
-            # 也别换号重试；只把槽位还回去。
+            # 上游回的是应用/文本响应（拒绝出图、Create Pet 的 DIL 等），不是账号
+            # 故障，别记这个号一次失败；但响应形态跟账号、模型路由有关，换号有机会
+            # 正常出图。和 token 失效一样：当前流直接中断，换号重试（不消耗设置页
+            # 的「生成失败重试」次数，只花本次请求的剩余预算）。
             attempt_outcome = "unsupported_app_response"
             attempt_error = str(exc)
             account_service.release_image_slot(token)
@@ -3002,17 +3019,39 @@ def _generate_single_image_attempts(
             if upstream_text:
                 # 尝试轨迹里保留完整原文（日志页可展开），body 里只放 1000 字摘要。
                 attempt_extra["upstream_text"] = upstream_text
+            # 只有一个号（或其它号都占满槽位）时继续换只会撞上「没有可用号」，
+            # 反而把真正的失败原因盖成通用错误；此时保持原来的直接报错。
+            try:
+                has_other_account = account_service.has_available_image_account(
+                    attempted_tokens | conduit_busy_tokens, **select_kwargs,
+                )
+            except Exception:
+                has_other_account = False
+            # 重试次数遵循设置页的「生成失败重试次数」：与普通生成失败共用同一份配额。
+            can_retry = bool(has_other_account) and schedule_generation_retry(exc)
             logger.warning({
-                "event": "image_unsupported_app_response_final",
+                "event": (
+                    "image_unsupported_app_response_retry" if can_retry
+                    else "image_unsupported_app_response_final"
+                ),
                 "trace_id": trace_id,
                 "request_token": anonymize_token(token),
                 "account_email": account_email,
                 "conversation_id": getattr(exc, "conversation_id", ""),
                 "unsupported_reason": unsupported_reason,
                 "upstream_text_chars": len(upstream_text),
+                "retry_count": generation_retry_count,
+                "retry_limit": generation_retry_limit,
+                "has_other_account": has_other_account,
                 "error": str(exc),
                 "index": index,
             })
+            if can_retry:
+                continue
+            if not has_other_account:
+                diagnostics["retry_stopped"] = "no_other_account"
+            elif generation_retry_limit <= 0 or generation_retry_count >= generation_retry_limit:
+                diagnostics["retry_stopped"] = "generation_retry_limit"
             raise
         except ImageContentPolicyError as exc:
             attempt_outcome, attempt_error = "content_policy", str(exc)

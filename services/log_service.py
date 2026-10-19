@@ -30,8 +30,8 @@ LOG_STATUS_SUCCESS = "success"
 LOG_STATUS_FAILED = "failed"
 LOG_STATUS_POLICY_VIOLATION = "policy_violation"
 # 上游没出图，而是回了 ChatGPT 应用/文本响应（Create Pet 的 DIL、Library，
-# 或“我无法在这个聊天里生成图片，只能给提示词”）。既不是成功也不是失败：
-# 换号重试也不会变成图片，单独一类，不计入失败率。
+# 或“我无法在这个聊天里生成图片，只能给提示词”）。生图流程会先换号重试；
+# 所有换号都失败后仍未出图才落成这一类：既不是成功也不是失败，不计入失败率。
 LOG_STATUS_UNSUPPORTED_APP_RESPONSE = "unsupported_app_response"
 # 日志页「是否重试」筛选：只看这次调用有没有换过号/换过账号重来。
 LOG_RETRIED_YES = "yes"
@@ -803,7 +803,8 @@ def _next_item(items):
 def is_unsupported_app_response_error(exc: BaseException | None) -> bool:
     """沿异常链判断这次调用是不是「上游回了应用/文本响应，没有图片文件」。
 
-    这类失败不是账号/渠道问题，换号重试也不会变成图片；日志和统计单独归类。
+    这类失败不是账号/渠道问题，但会被换号重试；所有重试都没出图才最终落成这一类，
+    日志和统计单独归类。
     """
     from services.protocol.conversation import (
         UNSUPPORTED_APP_RESPONSE_CODE,
