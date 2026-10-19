@@ -280,15 +280,41 @@ class ImageMainlineRecoveryTests(unittest.TestCase):
         self.assertEqual(accounts.image_results, [("token-a", False), ("token-a", True)])
         self.assertIsNot(backends[0].session, backends[1].session)
 
-    def test_image_pool_does_not_retry_ordinary_400_or_failure_after_output(self):
+    def test_image_pool_retries_skipped_mainline_after_progress(self):
+        """主链路拒绝前已经发过 progress，也仍要换号：progress 不是最终输出。"""
+        accounts = FakeAccountService(["token-a", "token-b"])
+
+        def output(api, request, index=1, total=1):
+            if api.access_token == "token-a":
+                # 线上的 skipped_mainline 常常先以 message_marker/delta 的形式
+                # 出现在 SSE 里，消费端会先把它们当成 progress 吐出来。
+                yield ImageOutput(kind="progress", model=request.model, index=index, total=total)
+                raise UpstreamHTTPError("conversation", 400, {"skipped_mainline": True})
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        with mock.patch.object(conversation, "account_service", accounts), \
+             mock.patch.object(conversation, "stream_image_outputs", output):
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(model="gpt-image-2", prompt="draw")))
+
+        result = next(item for item in outputs if item.kind == "result")
+        self.assertEqual(result.account_trail, ["token-a@example.test", "token-b@example.test"])
+        self.assertEqual(accounts.image_results, [("token-a", False), ("token-b", True)])
+        first_attempt = result.attempts[0]
+        self.assertEqual(first_attempt["outcome"], "mainline_rejected")
+        self.assertIn("skipped_mainline", first_attempt["error"])
+        retry_step = next(step for step in result.image_timeline if step.get("step") == "retry")
+        self.assertEqual(retry_step["reason"], "mainline_rejected")
+        self.assertIn("主链路拒绝", retry_step["label"])
+        self.assertIn("skipped_mainline", retry_step["detail"])
+
+    def test_image_pool_does_not_retry_ordinary_400_after_output(self):
         for after_output in (False, True):
             with self.subTest(after_output=after_output):
                 accounts = FakeAccountService(["token-a", "token-b"])
                 def output(api, request, index=1, total=1):
                     if after_output:
                         yield ImageOutput(kind="progress", model=request.model, index=index, total=total)
-                    body = {"skipped_mainline": True} if after_output else {"error": "invalid request"}
-                    raise UpstreamHTTPError("conversation", 400, body)
+                    raise UpstreamHTTPError("conversation", 400, {"error": "invalid request"})
                 with mock.patch.object(conversation, "account_service", accounts), \
                      mock.patch.object(conversation, "stream_image_outputs", output):
                     with self.assertRaises(ImageGenerationError) as raised:

@@ -3314,29 +3314,39 @@ def _generate_single_image_attempts(
                     reason="invalid_token",
                 )
                 continue
-            if not emitted_for_token and transient:
+            # skipped_mainline 是 conduit 握手状态被同号并发吃掉，不是模型输出。
+            # 主链路在抛 400 之前往往已经发过 message_marker / conversation.delta，
+            # 消费循环会给这些 progress 置 emitted_for_token=True；但它们既不是最终
+            # 结果，也不该阻止换号——否则这个 400 会掉到下面的配置重试里，而
+            # 「当前渠道拥堵」文案不在可重试集合中，最后就成了不换号直接失败。
+            if transient and (not emitted_for_token or mainline_rejected):
+                # 重试轨迹写清楚是哪类抖动：transient 的 last_error 已经洗成
+                # 「当前渠道拥堵」，skipped_mainline 的上游原文要从 attempt_error 取。
+                retry_reason = "mainline_rejected" if mainline_rejected else "transient_upstream"
+                retry_cause = "主链路拒绝" if mainline_rejected else "上游抖动"
+                retry_detail = (attempt_error if mainline_rejected else last_error)[:80]
                 if in_rescue:
                     mark_timeline(
-                        "retry", "抢救窗口内换号",
-                        f"上游抖动（{last_error[:80]}）；继续换号再试",
-                        reason="transient_rescue",
+                        "retry", f"抢救窗口内{retry_cause}换号",
+                        f"{retry_cause}（{retry_detail}）；继续换号再试",
+                        reason=retry_reason if mainline_rejected else "transient_rescue",
                     )
                     continue
                 if transient_attempts >= MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS:
                     rescue_deadline = time.time() + TRANSIENT_IMAGE_RESCUE_WINDOW_SECS
                     mark_timeline(
                         "rescue_enter", "进入抢救窗口",
-                        f"连续 {transient_attempts} 次上游抖动；接下来 "
+                        f"连续 {transient_attempts} 次{retry_cause}；接下来 "
                         f"{TRANSIENT_IMAGE_RESCUE_WINDOW_SECS:.0f}s 内持续换号重试",
-                        reason="transient_upstream",
+                        reason=retry_reason,
                     )
                     continue
                 mark_timeline(
-                    "retry", "上游抖动换号",
-                    f"上游抖动（{last_error[:80]}）；换号重试第 {transient_attempts}/"
+                    "retry", f"{retry_cause}换号",
+                    f"{retry_cause}（{retry_detail}）；换号重试第 {transient_attempts}/"
                     f"{MAX_INITIAL_TRANSIENT_IMAGE_ACCOUNT_ATTEMPTS} 次",
                     retry_count=transient_attempts,
-                    reason="transient_upstream",
+                    reason=retry_reason,
                 )
                 continue
             # TLS/SSL 连接错误：自动重试
