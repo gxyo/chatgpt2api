@@ -275,7 +275,7 @@ class GenerationRetryTests(unittest.TestCase):
         self.assertEqual(failure.code, "content_policy_violation")
         self.assertEqual(accounts.selected_image_tokens, ["token-a"])
 
-    def test_unsupported_app_response_retries_on_another_account_then_stops(self):
+    def test_unsupported_app_response_returns_immediately_without_switching_account(self):
         def stream_fn(backend, request, index=1, total=1):
             raise conversation.ImageUnsupportedAppResponseError(
                 conversation.UNSUPPORTED_APP_RESPONSE_MESSAGE,
@@ -286,17 +286,18 @@ class GenerationRetryTests(unittest.TestCase):
         failure, accounts = self._run_expecting_error(["token-a", "token-b"], stream_fn, 3)
 
         self.assertEqual(failure.code, conversation.UNSUPPORTED_APP_RESPONSE_CODE)
-        # 应用响应不是账号故障：不记失败，但会换号重试；没有别的号后停止。
-        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+        # 提示词问题换号解决不了：只试第一个号，不记失败，直接收尾。
+        self.assertEqual(accounts.selected_image_tokens, ["token-a"])
         self.assertEqual(accounts.image_results, [])
-        self.assertEqual(accounts.released_slots, ["token-a", "token-b"])
+        self.assertEqual(accounts.released_slots, ["token-a"])
         self.assertEqual(
             [item["outcome"] for item in failure.image_diagnostics["attempts"]],
-            ["unsupported_app_response", "unsupported_app_response"],
+            ["unsupported_app_response"],
         )
-        self.assertEqual(failure.image_diagnostics["retry_stopped"], "no_other_account")
+        self.assertEqual(failure.image_diagnostics["generation_retry_count"], 0)
+        self.assertEqual(failure.image_diagnostics["retry_stopped"], "unsupported_app_response")
 
-    def test_unsupported_app_response_respects_configured_retry_limit(self):
+    def test_unsupported_app_response_ignores_configured_retry_count(self):
         def stream_fn(backend, request, index=1, total=1):
             raise conversation.ImageUnsupportedAppResponseError(
                 conversation.UNSUPPORTED_APP_RESPONSE_MESSAGE,
@@ -305,16 +306,15 @@ class GenerationRetryTests(unittest.TestCase):
             yield  # pragma: no cover
 
         failure, accounts = self._run_expecting_error(
-            ["token-a", "token-b", "token-c"], stream_fn, 1,
+            ["token-a", "token-b", "token-c"], stream_fn, 3,
         )
 
-        # 设置里只允许重试 1 次：即使还有第三个号，也不会继续换。
-        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
-        self.assertEqual(failure.image_diagnostics["generation_retry_count"], 1)
-        self.assertEqual(failure.image_diagnostics["generation_retry_limit"], 1)
-        self.assertEqual(failure.image_diagnostics["retry_stopped"], "generation_retry_limit")
+        # 即使设置页里配了 3 次重试，也不会拿其它号再试。
+        self.assertEqual(accounts.selected_image_tokens, ["token-a"])
+        self.assertEqual(failure.image_diagnostics["generation_retry_limit"], 3)
+        self.assertEqual(failure.image_diagnostics["retry_stopped"], "unsupported_app_response")
 
-    def test_unsupported_app_response_switches_account_and_succeeds(self):
+    def test_unsupported_app_response_refusal_does_not_switch_account(self):
         refusal = (
             "当前聊天中我无法直接生成图片，但可以先为你整理好适用于图像生成工具的最终提示词。"
         )
@@ -328,16 +328,13 @@ class GenerationRetryTests(unittest.TestCase):
                 return
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
 
-        outputs, accounts = self._run(["token-a", "token-b"], stream_fn, 3)
+        failure, accounts = self._run_expecting_error(["token-a", "token-b"], stream_fn, 3)
 
-        self.assertEqual(outputs[0].kind, "result")
-        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
-        self.assertEqual(accounts.image_results, [("token-b", True)])
-        result = conversation.collect_image_outputs(outputs)
-        self.assertIn("unsupported_app_response", result["_attempts_summary"])
-        self.assertIn("token-b@example.test success", result["_attempts_summary"])
+        self.assertEqual(failure.code, "unsupported_app_response")
+        self.assertEqual(accounts.selected_image_tokens, ["token-a"])
+        self.assertEqual(accounts.image_results, [])
 
-    def test_unsupported_app_message_retries_and_keeps_last_upstream_text(self):
+    def test_unsupported_app_message_keeps_upstream_text_without_retry(self):
         refusal = (
             "当前聊天中我无法直接生成图片，但可以先为你整理好适用于图像生成工具的最终提示词。"
         )
@@ -352,18 +349,17 @@ class GenerationRetryTests(unittest.TestCase):
 
         self.assertEqual(failure.code, "unsupported_app_response")
         self.assertEqual(str(failure), conversation.UNSUPPORTED_APP_RESPONSE_MESSAGE)
-        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+        self.assertEqual(accounts.selected_image_tokens, ["token-a"])
         self.assertEqual(accounts.image_results, [])
-        self.assertEqual(accounts.released_slots, ["token-a", "token-b"])
+        self.assertEqual(accounts.released_slots, ["token-a"])
         self.assertEqual((failure.body or {}).get("upstream_text"), refusal)
         self.assertEqual(failure.image_diagnostics["unsupported_reason"], "refusal_prompt")
         self.assertEqual(
             failure.image_diagnostics["attempts"][-1]["unsupported_reason"], "refusal_prompt",
         )
         self.assertEqual(failure.image_diagnostics["attempts"][-1]["upstream_text"], refusal)
-        self.assertTrue(any(
-            item.get("step") == "retry" and item.get("label") == "应用响应换号"
-            for item in failure.image_diagnostics["timeline"]
+        self.assertFalse(any(
+            item.get("step") == "retry" for item in failure.image_diagnostics["timeline"]
         ))
 
     def test_text_reply_is_not_reported_as_content_policy_violation(self):
