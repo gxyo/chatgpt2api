@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from curl_cffi import requests as curl_requests
+
 import services.log_service as log_service_module
 from services.config import ConfigStore
 from services.log_service import LoggedCall, LogService
@@ -438,6 +440,29 @@ class GenerationRetryTests(unittest.TestCase):
 
         self.assertEqual(outputs[-1].kind, "result")
         self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+
+    def test_transient_curl_timeout_retries_after_progress_events(self):
+        def stream_fn(backend, request, index=1, total=1):
+            # 真实上游会先吐一串 conversation.event/delta（progress），随后 SSE 静默
+            # 30s 被 curl 的低速超时掐断（线上 c01ed9d2d672-1 就是这样失败的）。
+            # progress 不是最终输出，失败时整段丢弃，不能拿它拦住换号重试。
+            yield ImageOutput(
+                kind="progress", model=request.model, index=index, total=total,
+                text='{"skipped_mainline":true}', upstream_event_type="conversation.delta",
+            )
+            if backend.access_token == "token-a":
+                raise curl_requests.exceptions.RequestException(
+                    "Failed to perform, curl: (28) Operation too slow. "
+                    "Less than 1 bytes/sec transferred the last 30 seconds."
+                )
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        # 走内建的「上游抖动换号」，与设置页的「生成失败重试次数」无关。
+        outputs, accounts = self._run(["token-a", "token-b"], stream_fn, 0)
+
+        self.assertEqual(outputs[-1].kind, "result")
+        self.assertEqual(accounts.selected_image_tokens, ["token-a", "token-b"])
+        self.assertEqual(accounts.image_results, [("token-a", False), ("token-b", True)])
 
     def test_text_reply_retry_reuses_request_budget(self):
         seen_deadlines = []

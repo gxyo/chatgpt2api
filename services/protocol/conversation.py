@@ -3296,7 +3296,11 @@ def _generate_single_image_attempts(
             # 消费循环会给这些 progress 置 emitted_for_token=True；但它们既不是最终
             # 结果，也不该阻止换号——否则这个 400 会掉到下面的配置重试里，而
             # 「当前渠道拥堵」文案不在可重试集合中，最后就成了不换号直接失败。
-            if transient and (not emitted_for_token or mainline_rejected):
+            # 这里只看「是否已经产出最终结果」，不看 emitted_for_token：后者会被 SSE
+            # 的 progress 事件置 True，但 progress 失败时整段丢弃（stream=true 时也
+            # 只是进度文案），不该拦住换号。线上 curl 28 在吐过一串事件后掐断的
+            # 情况就是被它卡住，一次都没重试。
+            if transient and (not final_output_emitted or mainline_rejected):
                 # 重试轨迹写清楚是哪类抖动：transient 的 last_error 已经洗成
                 # 「当前渠道拥堵」，skipped_mainline 的上游原文要从 attempt_error 取。
                 retry_reason = "mainline_rejected" if mainline_rejected else "transient_upstream"
@@ -3326,8 +3330,10 @@ def _generate_single_image_attempts(
                     reason=retry_reason,
                 )
                 continue
-            # TLS/SSL 连接错误：自动重试
-            if not emitted_for_token and is_tls_connection_error(last_error):
+            # TLS/SSL 连接错误：自动重试。判断用 attempt_error（上游原始异常）：
+            # transient 错误早就把 last_error 洗成了「当前渠道拥堵」，拿它匹配
+            # curl: (35)/(28) 永远匹配不上，这两个分支以前对目标错误全是死代码。
+            if not final_output_emitted and is_tls_connection_error(attempt_error):
                 tls_retry_count += 1
                 if tls_retry_count <= MAX_TLS_RETRIES:
                     logger.warning({
@@ -3337,7 +3343,7 @@ def _generate_single_image_attempts(
                         "account_email": account_email,
                         "retry_count": tls_retry_count,
                         "index": index,
-                        "error": last_error[:200],
+                        "error": attempt_error[:200],
                     })
                     wait_secs = min(2.0 * tls_retry_count, 10.0)
                     mark_timeline(
@@ -3351,7 +3357,7 @@ def _generate_single_image_attempts(
                     sleep_with_image_deadline(wait_secs, attempt_deadline)
                     continue
             # 连接超时错误（curl 28）：同账号短等待重试，不切换账号
-            if not emitted_for_token and is_connection_timeout_error(last_error):
+            if not final_output_emitted and is_connection_timeout_error(attempt_error):
                 conn_timeout_retry_count += 1
                 if conn_timeout_retry_count <= MAX_CONN_TIMEOUT_RETRIES:
                     wait_secs = min(3.0 * conn_timeout_retry_count, 9.0)
@@ -3363,7 +3369,7 @@ def _generate_single_image_attempts(
                         "retry_count": conn_timeout_retry_count,
                         "index": index,
                         "wait_secs": wait_secs,
-                        "error": last_error[:200],
+                        "error": attempt_error[:200],
                     })
                     mark_timeline(
                         "retry", "连接超时重试",
