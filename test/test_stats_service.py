@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from services import stats_service
 from services.stats_service import ImageStatsService, beijing_today
@@ -333,7 +334,8 @@ class IncrementalAggregationTests(unittest.TestCase):
         self.assertEqual(while_incomplete["totals"]["requests"], 0)
         self.assertEqual(after_complete["totals"]["requests"], 1)
 
-    def test_truncated_file_keeps_what_was_already_counted(self):
+    def test_truncated_file_keeps_counted_requests_and_counts_the_new_line(self):
+        """文件被截断后：已计入的请求不回退，替换进来的新行必须计入而不是被丢掉。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             service, path = self.make_service(tmp_dir, [
                 log_line("2026-09-28 10:00:00", "/v1/images/generations"),
@@ -345,7 +347,48 @@ class IncrementalAggregationTests(unittest.TestCase):
             after = service.summary("2026-09-28", "2026-09-28")
 
         self.assertEqual(before["totals"]["requests"], 2)
-        self.assertEqual(after["totals"]["requests"], 2)
+        # 2 条老请求（已计入、不回退）+ 截断后写进来的 1 条新请求。
+        self.assertEqual(after["totals"]["requests"], 3)
+
+    def test_rewritten_log_without_any_old_line_counts_the_new_file(self):
+        """日志被按保留期整份清掉后重写：老统计保留，新文件里的请求一条都不能漏。
+
+        旧逻辑在这里把游标直接退到文件末尾，结果「打开统计页之前」产生的请求全部
+        不计入；线上表现为当天只统计到最近几十分钟。
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service, path = self.make_service(tmp_dir, [
+                log_line("2026-09-27 10:00:00", "/v1/images/generations"),
+                log_line("2026-09-27 11:00:00", "/v1/images/generations"),
+            ])
+            before = service.summary("2026-09-27", "2026-09-27")
+
+            fresh = [
+                log_line(f"2026-09-28 12:{minute:02d}:00", "/v1/images/generations")
+                for minute in range(30)
+            ]
+            path.write_text("\n".join(fresh) + "\n", encoding="utf-8")
+            after = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(before["totals"]["requests"], 2)
+        self.assertEqual(after["totals"]["requests"], 30)
+
+    def test_deleting_the_newest_consumed_line_loses_and_double_counts_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            first = log_line("2026-09-28 10:00:00", "/v1/images/generations")
+            second = log_line("2026-09-28 11:00:00", "/v1/images/generations")
+            third = log_line("2026-09-28 12:00:00", "/v1/images/generations")
+            service, path = self.make_service(tmp_dir, [first, second, third])
+            before = service.summary("2026-09-28", "2026-09-28")
+
+            # 删掉最新一条（尾部字节锚点随之消失），再写入一条新的日志。
+            fourth = log_line("2026-09-28 13:00:00", "/v1/images/generations")
+            path.write_text("\n".join([first, second, fourth]) + "\n", encoding="utf-8")
+            after = service.summary("2026-09-28", "2026-09-28")
+
+        self.assertEqual(before["totals"]["requests"], 3)
+        # 保留的两条不重复计数，被删那条已经计入的不回退，新写入的一条要计入。
+        self.assertEqual(after["totals"]["requests"], 4)
 
     def test_in_place_rewrite_is_detected_even_when_the_file_grows(self):
         """删除部分日志会原地重写文件；若新内容比旧偏移更长，只靠大小判断会漏掉。"""
@@ -445,6 +488,78 @@ class LogCleanupCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(after["totals"]["requests"], 2)
         self.assertEqual(after["series"][14]["requests"], 1)
+
+
+class SnapshotTodayRepairTests(unittest.TestCase):
+    """v5 及更早的快照：游标可能因日志改写跳到末尾，升级时按现存日志重算今天。"""
+
+    def test_v5_snapshot_recovers_today_requests_lost_by_cursor_jump(self):
+        day = "2026-09-28"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            lines = [
+                log_line(f"{day} {hour:02d}:30:00", "/v1/images/generations",
+                         model="gpt-image-2", urls=[f"https://img/{hour}"])
+                for hour in (9, 10, 11, 12, 13)
+            ]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            snapshot_path = Path(tmp_dir) / "image_stats.json"
+            ImageStatsService(path).summary(day, day)
+
+            # 模拟线上坏掉的 v5 快照：游标停在文件末尾，聚合里只剩最后一小时。
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            snapshot["version"] = 5
+            snapshot["hours"] = {
+                key: value for key, value in snapshot["hours"].items() if key == f"{day}T13"
+            }
+            snapshot.pop("recent_ids", None)
+            snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+            with mock.patch.object(stats_service, "beijing_today", return_value=day):
+                restarted = ImageStatsService(path)
+                repaired = restarted.summary(day, day)
+                again = restarted.summary(day, day)
+            snapshot_version = json.loads(
+                snapshot_path.read_text(encoding="utf-8")
+            )["version"]
+
+        # 白天早些时候被跳过的请求要按现存日志补回来。
+        self.assertEqual(repaired["totals"]["requests"], 5)
+        self.assertEqual(repaired["totals"]["images"], 5)
+        self.assertEqual(repaired["series"][9]["requests"], 1)
+        self.assertEqual(again["totals"]["requests"], 5)
+        self.assertEqual(snapshot_version, stats_service.SNAPSHOT_VERSION)
+
+    def test_repair_keeps_history_for_days_outside_the_log(self):
+        """重算只替换今天的桶：更早的历史仍然来自快照，不会被重建抹掉。"""
+        day = "2026-09-28"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "logs.jsonl"
+            path.write_text(
+                log_line(f"{day} 09:30:00", "/v1/images/generations") + "\n", encoding="utf-8"
+            )
+            snapshot_path = Path(tmp_dir) / "image_stats.json"
+            ImageStatsService(path).summary(day, day)
+
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            snapshot["version"] = 5
+            snapshot["hours"]["2026-09-01T08"] = {
+                "requests": 7, "success": 7, "failed": 0, "policy_violation": 0,
+                "unsupported_app_response": 0, "duration_ms": 700, "images": 7,
+                "models": {"gpt-image-2": 7}, "revenue": 0.07,
+                "models_revenue": {"gpt-image-2": 0.07}, "legacy_success": 0,
+                "modes": {},
+            }
+            snapshot.pop("recent_ids", None)
+            snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+            with mock.patch.object(stats_service, "beijing_today", return_value=day):
+                result = ImageStatsService(path).summary("2026-09-01", day)
+
+        self.assertEqual(result["totals"]["requests"], 8)
+        by_day = {point["key"]: point for point in result["series"]}
+        self.assertEqual(by_day["2026-09-01"]["requests"], 7)
+        self.assertEqual(by_day[day]["requests"], 1)
 
 
 class SnapshotPersistenceTests(unittest.TestCase):

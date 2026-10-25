@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import re
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +68,15 @@ _STATUSES = (
 # 锚点丢失导致无法回填时的兜底），否则统计页会把整段历史显示成 0 张成功图片。
 # 新增 unsupported_app_response 计数时保持 v5：旧快照缺这个键按 0 处理，
 # 新日志照常追加即可，不需要重建历史桶。
-SNAPSHOT_VERSION = 5
+# v6 起快照多存一份「最近已消费的日志 id」，日志尾部被改写（清理、删日志、整份替换）
+# 后仍能精确对齐游标；v5 及更早的游标在这种改写后会直接跳到文件末尾，把当天的请求
+# 整段漏掉，因此升级到 v6 时按现存日志重算一次今天。
+SNAPSHOT_VERSION = 6
+# 记多少个最近消费过的日志 id 用于重写后的游标对齐：按 id 而不是行号定位，日志中间
+# 删行、尾部删行都能找回。2000 条足够覆盖日志页一次批量删除（最多 200 条/页）若干轮。
+RECENT_ID_LIMIT = 2000
+# 旧快照没有 id 锚点时，从已消费前缀的尾部回补；只读末尾这一段，避免升级时整份扫描。
+RECENT_ID_BACKFILL_BYTES = 8 * 1024 * 1024
 CURRENCY = "CNY"
 # 两次落盘之间的最小间隔：统计每次查询都会刷新，不能每次都写盘。
 # 因为游标和聚合是一起写入的，崩溃时两者一起回退到上一个一致点，重放日志即可，不会重复计数。
@@ -261,6 +272,19 @@ def _parse_images(detail: dict[str, Any], status: str) -> int:
     return sum(1 for url in urls if isinstance(url, str) and url.strip())
 
 
+# 日志记录的 id 由 log_service.add() 写在行首；老日志没有 id 时退回内容哈希，
+# 这样即使前面删了行导致行号变化，也能认出同一行。
+_LINE_ID_RE = re.compile(r'^\{"id"\s*:\s*"([^"\\]{1,64})"')
+
+
+def _line_identity(raw_line: str) -> str:
+    """一行日志的稳定标识，用于日志被重写后按内容重新对齐统计游标。"""
+    match = _LINE_ID_RE.match(raw_line)
+    if match:
+        return match.group(1)
+    return hashlib.sha1(raw_line.encode("utf-8", errors="replace")).hexdigest()
+
+
 def _parse_image_event(raw_line: str) -> tuple[str, str, str, int, str, int] | None:
     """把一行日志解析成 (小时键, 模式, 状态, 耗时毫秒, 模型, 图片数)，不是生图调用则返回 None。"""
     if "/v1/images/" not in raw_line and "/api/image-tasks/" not in raw_line:
@@ -404,6 +428,11 @@ class ImageStatsService:
 
     对应地，**聚合只增不减**——删日志是存储清理，不代表这些请求没发生过。而且日志被
     按时间截断后，即便重建也只能看到剩下的那一段，重建等于把更早的历史一并抹掉。
+
+    日志被整份改写（按保留期清掉老日志、批量删日志、换文件）时，字节锚点会失效。
+    这时先按「最近已消费的日志 id」重新定位游标；如果一个都对不上，说明旧内容已经
+    整体消失，剩下的每一行都还没计入，从头消费——绝不能像旧逻辑那样跳到文件末尾，
+    否则「打开统计页之前」产生的请求会被静默丢掉（线上表现为当天只统计到最近的几十分）。
     """
 
     # 已消费内容的尾部锚点。文件被重写、截断或轮转时这段字节会对不上，据此重新对齐游标。
@@ -420,11 +449,13 @@ class ImageStatsService:
         self._hours: dict[str, dict[str, Any]] = {}
         self._offset = 0
         self._anchor = b""
+        self._recent_ids: deque[str] = deque(maxlen=RECENT_ID_LIMIT)
         self._last_save = 0.0
         self._needs_model_backfill = False
         self._needs_revenue_bootstrap = False
         self._needs_image_estimate = False
         self._needs_mode_backfill = False
+        self._needs_today_rebuild = False
         self._migration_dirty = False
 
     def _load_snapshot(self) -> None:
@@ -440,7 +471,7 @@ class ImageStatsService:
         # v1/v2 都缺收入字段，按迁移这一刻的定价补一次（之后调价不再回改）。
         # v1~v4 的调用方式桶可能缺 images，升级时按成功请求占比分摊一次；
         # 有成功请求却没有图片数的历史桶按成功次数估算图片数。
-        if version not in (1, 2, 3, 4, SNAPSHOT_VERSION):
+        if version not in (1, 2, 3, 4, 5, SNAPSHOT_VERSION):
             return
         hours = snapshot.get("hours")
         if not isinstance(hours, dict):
@@ -465,17 +496,55 @@ class ImageStatsService:
         self._needs_revenue_bootstrap = version in (1, 2)
         self._needs_image_estimate = version in (1, 2, 3, 4)
         self._needs_mode_backfill = version in (1, 2, 3, 4)
+        # v5 及更早：日志被整份改写后游标可能跳过当天早先的请求，升级时按现存日志重算今天。
+        self._needs_today_rebuild = version != SNAPSHOT_VERSION
+        recent = snapshot.get("recent_ids")
+        if isinstance(recent, list):
+            for item in recent[-RECENT_ID_LIMIT:]:
+                if isinstance(item, str) and item:
+                    self._recent_ids.append(item)
+        elif self._offset:
+            # 旧快照没有 id 锚点：从已消费前缀的尾部回补一批，之后日志被改写也能对齐。
+            self._backfill_recent_ids()
+
+    def _backfill_recent_ids(self) -> None:
+        """旧快照升级：从 [0, offset) 的尾部取回最近消费过的日志 id。
+
+        只读末尾 RECENT_ID_BACKFILL_BYTES 字节；读不到就保持为空，下次日志改写时
+        会按「已消费内容整体消失」处理（从头消费），不会少算。
+        """
+        start = max(0, self._offset - RECENT_ID_BACKFILL_BYTES)
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(start)
+                payload = handle.read(self._offset - start)
+        except OSError:
+            return
+        if not payload:
+            return
+        lines = payload.decode("utf-8", errors="replace").splitlines()
+        if start > 0 and lines:
+            # 读窗口的起点不一定是行首：丢掉这半行。
+            lines = lines[1:]
+        for raw_line in lines:
+            if raw_line.strip():
+                self._recent_ids.append(_line_identity(raw_line))
 
     def _save_snapshot(self, *, force: bool = False) -> None:
         """把聚合和游标一起原子落盘。写失败只影响下次重启，不该让查询出错。"""
         now = time.monotonic()
         if not force and now - self._last_save < SNAPSHOT_INTERVAL_SECONDS:
             return
+        if self._needs_today_rebuild:
+            # 升级修复还没做完（例如日志暂时读不到）：先别写新版本号，否则下次启动
+            # 会以为今天的重算已经做过，那段漏掉的请求就永远补不回来了。
+            return
         payload = {
             "version": SNAPSHOT_VERSION,
             "hours": self._hours,
             "offset": self._offset,
             "anchor": self._anchor.hex(),
+            "recent_ids": list(self._recent_ids),
         }
         try:
             self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -508,10 +577,14 @@ class ImageStatsService:
         按时间清理日志只是把最老的一段前缀删掉，保留下来的尾部字节与上次读到的完全一致，
         所以靠尾部锚点就能算出新的游标位置，既不重复计数也不丢历史。
         逐条删除（中间挖洞）会让后面的字节整体前移，锚点也随之移动，同样能找回来。
-        锚点确实找不到时（内容被大改）只能退到最后一个完整行：宁可漏掉少数尚未计入的行，
-        也不重复计数。
 
-        返回是否靠锚点找回游标；只有找回时，[0, offset) 才能确定仍是已计入的数据。
+        尾部锚点也被删掉时（保留期清理把老日志整段清空、批量删掉了最新几条），
+        用「最近已消费的日志 id」重新定位：找到最近一条仍在文件里的已消费记录，
+        游标接在它后面，既不会重数，也不会把之后新增的请求丢掉。
+        一条已消费记录都不在文件里，说明旧内容已整体消失，剩下的每一行都还没计入，
+        从头消费；旧逻辑在这里退到文件末尾，会把「打开统计页之前」产生的整段请求静默丢掉。
+
+        返回是否能确认 [0, offset) 仍是已计入的数据；只有返回 True 时才能安全地做增量回填。
         """
         try:
             data = self.path.read_bytes()
@@ -522,11 +595,33 @@ class ImageStatsService:
             found = data.rfind(self._anchor)
             if found >= 0:
                 self._offset = found + len(self._anchor)
+                self._anchor = data[max(0, self._offset - self._ANCHOR_BYTES) : self._offset]
                 return True
-        cut = data.rfind(b"\n")
-        self._offset = cut + 1 if cut >= 0 else 0
-        self._anchor = data[max(0, self._offset - self._ANCHOR_BYTES) : self._offset]
+        aligned = self._align_by_recent_ids(data)
+        if aligned is not None:
+            self._offset = aligned
+            self._anchor = data[max(0, self._offset - self._ANCHOR_BYTES) : self._offset]
+            return True
+        self._offset = 0
+        self._anchor = b""
         return False
+
+    def _align_by_recent_ids(self, data: bytes) -> int | None:
+        """返回「最后一条仍在文件里的已消费日志」之后的字节位置；找不到返回 None。"""
+        if not data or not self._recent_ids:
+            return None
+        known = set(self._recent_ids)
+        offset = 0
+        found: int | None = None
+        for raw_line in data.splitlines(keepends=True):
+            offset += len(raw_line)
+            # 末尾可能还留着没写完的半行，不能当成已消费记录。
+            if not raw_line.endswith(b"\n"):
+                continue
+            identity = _line_identity(raw_line.decode("utf-8", errors="replace").rstrip("\r\n"))
+            if identity in known:
+                found = offset
+        return found
 
     def _migrate_model_stats(self) -> None:
         """把 v1 快照缺的 images/models 从现存日志里补回来。
@@ -738,6 +833,9 @@ class ImageStatsService:
 
     def _consume(self, text: str, prices: dict[str, float]) -> None:
         for raw_line in text.splitlines():
+            if raw_line:
+                # 无论是不是生图调用都要记 id：日志被改写后靠它重新对齐游标。
+                self._recent_ids.append(_line_identity(raw_line))
             event = _parse_image_event(raw_line)
             if event is None:
                 continue
@@ -757,6 +855,63 @@ class ImageStatsService:
                 revenue=revenue,
             )
 
+    def _rebuild_today(self, prices: dict[str, float]) -> None:
+        """v5 及更早版本的一次性修复：按现存日志重算今天，补回游标跳变漏掉的请求。
+
+        旧逻辑在日志尾部锚点丢失时会直接把游标推到文件末尾，只统计「打开统计页之后」
+        的那一段。当天的日志不会被按保留期清理（清理只删昨天及更早），所以文件里今天
+        的记录是完整的，可以据此重算。只替换今天的桶，更早的历史继续用快照里的聚合，
+        不会像全量重建那样把已清理日志的历史抹掉。
+        """
+        if not self._needs_today_rebuild:
+            return
+        today = beijing_today()
+        try:
+            data = self.path.read_bytes()
+        except FileNotFoundError:
+            # 日志被删干净：没有可重算的内容，但迁移本身要落盘，别每次查询都重跑。
+            data = b""
+        except OSError:
+            # 日志暂时读不到：保持待修复状态，下次查询再试（快照也先别落新版本号）。
+            return
+        # 只算完整行：末尾可能还留着正在写的半行。
+        cut = data.rfind(b"\n")
+        data = data[: cut + 1] if cut >= 0 else b""
+        prefix = f"{today}T"
+        rebuilt: dict[str, dict[str, Any]] = {}
+        for raw_line in data.decode("utf-8", errors="replace").splitlines():
+            event = _parse_image_event(raw_line)
+            if event is None:
+                continue
+            hour_key, mode, status, duration_ms, model, images = event
+            if not hour_key.startswith(prefix):
+                continue
+            price = _parse_price(prices.get(model)) if model else None
+            revenue = round(images * price, 6) if price is not None and images > 0 else 0.0
+            bucket = rebuilt.setdefault(hour_key, _empty_bucket())
+            _accumulate(
+                bucket,
+                mode=mode,
+                status=status,
+                duration_ms=duration_ms,
+                model=model,
+                images=images,
+                revenue=revenue,
+            )
+        if rebuilt:
+            # 文件里没有今天的日志（今天没流量 / 日志被删）时保持快照原样，不清零；
+            # 重算结果比快照少说明今天的日志被删过，也保持原样，遵守「聚合只增不减」。
+            existing_requests = sum(
+                bucket["requests"] for key, bucket in self._hours.items() if key.startswith(prefix)
+            )
+            if sum(bucket["requests"] for bucket in rebuilt.values()) >= existing_requests:
+                for key in [key for key in self._hours if key.startswith(prefix)]:
+                    del self._hours[key]
+                self._hours.update(rebuilt)
+        self._needs_today_rebuild = False
+        self._migration_dirty = True
+        self._save_snapshot(force=True)
+
     def summary(
         self,
         start_date: str = "",
@@ -774,6 +929,9 @@ class ImageStatsService:
             # 新日志也在这里按当前定价计费，之后调价不影响已计入的收入。
             self._migrate_snapshots(prices)
             self._refresh(prices)
+            # 必须放在 _refresh 之后：先让游标推到文件末尾，再按现存日志重算今天，
+            # 否则刚补上的行会被下一次增量消费再数一遍。
+            self._rebuild_today(prices)
             if scope == SCOPE_ALL:
                 # 全部：从聚合里最早的一天算到今天。聚合只增不减，所以这里给的是「有记录以来的全部」，
                 # 日志过了保留期被清掉也不影响更早的统计。
