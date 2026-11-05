@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronLeft, ChevronRight, Download, X } from "lucide-react";
 
+import { downloadImageFile, imageDownloadFilename } from "@/lib/download-image";
 import { cn } from "@/lib/utils";
 
 type LightboxImage = {
@@ -184,10 +185,16 @@ export function ImageLightbox({
 
   const handleDownload = useCallback(() => {
     if (!current) return;
-    const link = document.createElement("a");
-    link.href = current.src;
-    link.download = `image-${current.id}.png`;
-    link.click();
+    // 以前文件名写死 .png，GIF 下载下来扩展名却是 .png，看起来就像一张静态图。
+    // 现在按 URL 推断扩展名，并抓原始字节下载，动图不会被转成静态图。
+    void downloadImageFile(current.src, `image-${current.id}`).catch(() => {
+      const link = document.createElement("a");
+      link.href = current.src;
+      link.download = imageDownloadFilename(current.src, `image-${current.id}`);
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.click();
+    });
   }, [current]);
 
   const toggleZoom = useCallback(() => {

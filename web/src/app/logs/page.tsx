@@ -20,6 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cleanupSystemLogs, deleteSystemLogs, exportSelectedSystemLogs, exportSystemLogs, fetchLogRetention, fetchSelectedSystemLogsText, fetchSystemLogs, saveLogRetention, type LogRetentionInfo, type SystemLog } from "@/lib/api";
 import { formatBeijingClock, getBeijingToday, shiftDate } from "@/lib/beijing-time";
+import { downloadImageFile, imageDownloadFilename } from "@/lib/download-image";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LogType = {
@@ -567,6 +568,7 @@ function LogsContent() {
   const [showDetailJson, setShowDetailJson] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [downloadingImageUrl, setDownloadingImageUrl] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [isLoading, setIsLoading] = useState(true);
@@ -811,6 +813,19 @@ function LogsContent() {
     setDetailLog(item);
     setShowDetailJson(false);
     setDetailOpen(true);
+  };
+
+  // 日志详情的图片按原始字节下载：GIF 直接存成 .gif，不会像「复制图片」那样
+  // 拿到一张渲染后的静态图。
+  const downloadDetailImage = async (url: string) => {
+    setDownloadingImageUrl(url);
+    try {
+      await downloadImageFile(url);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "下载图片失败");
+    } finally {
+      setDownloadingImageUrl(null);
+    }
   };
 
   const toggleIds = (ids: string[], checked: boolean) => {
@@ -1381,20 +1396,43 @@ function LogsContent() {
                         <span className="text-xs font-normal text-neutral-400">{detailUrls.length} 张</span>
                       </div>
                       <div className="flex flex-col gap-3">
-                        {detailUrls.map((url, index) => (
-                          <button
-                            key={url}
-                            type="button"
-                            className="flex w-full cursor-zoom-in items-center justify-center overflow-hidden rounded-xl border border-neutral-200 bg-neutral-100 p-2 transition-colors hover:border-neutral-300"
-                            onClick={() => {
-                              setLightboxIndex(index);
-                              setLightboxOpen(true);
-                            }}
-                          >
-                            {/* 按原图比例完整显示，不裁切；竖图以高度封顶，横图以宽度封顶。 */}
-                            <img src={url} alt="" className="max-h-[480px] w-auto max-w-full rounded-lg object-contain" />
-                          </button>
-                        ))}
+                        {detailUrls.map((url, index) => {
+                          const isGif = imageDownloadFilename(url).toLowerCase().endsWith(".gif");
+                          return (
+                            <div key={url} className="relative">
+                              <button
+                                type="button"
+                                className="flex w-full cursor-zoom-in items-center justify-center overflow-hidden rounded-xl border border-neutral-200 bg-neutral-100 p-2 transition-colors hover:border-neutral-300"
+                                onClick={() => {
+                                  setLightboxIndex(index);
+                                  setLightboxOpen(true);
+                                }}
+                              >
+                                {/* 按原图比例完整显示，不裁切；竖图以高度封顶，横图以宽度封顶。 */}
+                                <img src={url} alt="" className="max-h-[480px] w-auto max-w-full rounded-lg object-contain" />
+                              </button>
+                              {isGif ? (
+                                <span className="pointer-events-none absolute left-3 top-3 rounded-md bg-black/55 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-white">
+                                  GIF
+                                </span>
+                              ) : null}
+                              <button
+                                type="button"
+                                className="absolute right-3 top-3 inline-flex size-8 items-center justify-center rounded-full bg-black/55 text-white/90 transition hover:bg-black/75 disabled:opacity-60"
+                                title={isGif ? "下载 GIF（保留动画）" : "下载原图"}
+                                aria-label={isGif ? "下载 GIF" : "下载原图"}
+                                disabled={downloadingImageUrl === url}
+                                onClick={() => void downloadDetailImage(url)}
+                              >
+                                {downloadingImageUrl === url ? (
+                                  <LoaderCircle className="size-4 animate-spin" />
+                                ) : (
+                                  <Download className="size-4" />
+                                )}
+                              </button>
+                            </div>
+                          );
+                        })}
                       </div>
                     </>
                   ) : null}
