@@ -275,6 +275,9 @@ class UpstreamRetryTests(unittest.TestCase):
 
         with mock.patch.dict(backend_config.data, configured, clear=True):
             self.assertEqual(api._image_model_settings("gpt-image-2"), ("gpt-5-5", ""))
+            self.assertEqual(api._image_model_settings("gpt-image-2.6"), ("gpt-5-5", ""))
+            self.assertEqual(api._image_model_settings("gpt-image-2.6-flare"), ("gpt-5-5", ""))
+            self.assertEqual(api._image_model_settings("gpt-image-2.6-sunburst"), ("gpt-5-5", ""))
 
     def test_picture_stream_rebuilds_handshake_after_skipped_mainline(self):
         api = OpenAIBackendAPI("token-a")
