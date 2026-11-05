@@ -40,7 +40,7 @@ LOG_RETRIED_NO = "no"
 POLICY_VIOLATION_CODE = "content_policy_violation"
 INTERNAL_RESPONSE_KEYS = {
     "_account_email", "_conversation_id", "_account_trail", "_attempts_summary", "_attempts",
-    "_postprocess", "_image_timeline", "_upstream_model_slug",
+    "_image_timeline", "_upstream_model_slug",
 }
 # 一键导出：默认最近 10 条，条数上界防止一次导出把浏览器拖死。
 LOG_EXPORT_DEFAULT_LIMIT = 10
@@ -427,22 +427,6 @@ def _dedupe_attempts(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique
 
 
-def _collect_postprocess(value: object) -> list[dict[str, Any]]:
-    """收集结果里的本地后处理数据（4K 超分耗时、排队、失败原因）。"""
-    items: list[dict[str, Any]] = []
-    if isinstance(value, dict):
-        raw = value.get("_postprocess")
-        if isinstance(raw, dict) and raw:
-            items.append(raw)
-        for key, item in value.items():
-            if key != "_postprocess":
-                items.extend(_collect_postprocess(item))
-    elif isinstance(value, list):
-        for item in value:
-            items.extend(_collect_postprocess(item))
-    return items
-
-
 def _collect_image_timelines(value: object) -> list[dict[str, Any]]:
     """收集结果里的执行时间线（`_image_timeline`，每张图一份）。"""
     groups: list[dict[str, Any]] = []
@@ -513,33 +497,6 @@ def add_image_timeline_detail(
             }
     if by_index:
         detail["image_timeline"] = [by_index[key] for key in sorted(by_index)]
-
-
-def add_postprocess_detail(
-    detail: dict[str, Any],
-    *,
-    result: object = None,
-    postprocess: list[dict[str, Any]] | None = None,
-) -> None:
-    """把超分耗时和失败原因平铺进调用日志，页面上直接能看到卡在哪。
-
-    超分失败不影响请求结果（会回退成原图），所以这里不是 error，只是一组
-    诊断字段：upscale_ms 很大说明 4K 放大吃掉了请求时间，upscale_error 有值
-    说明是本地放大失败、返回的是 1K 原图。
-    """
-    merged: dict[str, Any] = {}
-    for item in [*(postprocess or []), *_collect_postprocess(result)]:
-        for key in ("upscale_ms", "upscale_queue_wait_ms"):
-            value = item.get(key)
-            if value:
-                merged[key] = int(merged.get(key) or 0) + int(value)
-        for key in ("upscale_target", "upscale_from_size", "upscale_to_size", "upscale_error"):
-            value = item.get(key)
-            if value and not merged.get(key):
-                merged[key] = value
-        if item.get("upscale_to_size") or item.get("upscale_error"):
-            merged["upscale_images"] = int(merged.get("upscale_images") or 0) + 1
-    detail.update(merged)
 
 
 def add_upstream_model_detail(
@@ -916,7 +873,6 @@ class LoggedCall:
         attempts_summaries: list[str] = []
         attempts: list[dict[str, Any]] = []
         image_timelines: list[dict[str, Any]] = []
-        postprocess: list[dict[str, Any]] = []
         upstream_model_slug = ""
         failed = False
         try:
@@ -928,7 +884,6 @@ class LoggedCall:
                 attempts_summaries.extend(_collect_attempts_summaries(item))
                 attempts.extend(_collect_attempts(item))
                 image_timelines.extend(_collect_image_timelines(item))
-                postprocess.extend(_collect_postprocess(item))
                 if isinstance(item, dict):
                     upstream_model_slug = upstream_model_slug or str(
                         item.get("_upstream_model_slug") or ""
@@ -946,7 +901,6 @@ class LoggedCall:
                 attempts_summaries=attempts_summaries,
                 attempts=attempts,
                 image_timelines=image_timelines,
-                postprocess=postprocess,
                 upstream_model_slug=upstream_model_slug,
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
@@ -959,7 +913,7 @@ class LoggedCall:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
                          conversation_id=conversation_ids[0] if conversation_ids else "",
                          account_trails=account_trails, attempts_summaries=attempts_summaries,
-                         attempts=attempts, image_timelines=image_timelines, postprocess=postprocess,
+                         attempts=attempts, image_timelines=image_timelines,
                          upstream_model_slug=upstream_model_slug)
 
     def log_failure(self, exc: BaseException, summary: str = "调用失败", error: str = "",
@@ -993,7 +947,6 @@ class LoggedCall:
             attempts_summaries: list[str] | None = None,
             attempts: list[dict[str, Any]] | None = None,
             image_timelines: list[dict[str, Any]] | None = None,
-            postprocess: list[dict[str, Any]] | None = None,
             upstream_model_slug: str = "") -> None:
         detail = {
             "key_id": self.identity.get("id"),
@@ -1054,7 +1007,6 @@ class LoggedCall:
         add_image_timeline_detail(
             detail, result=result, exc=exc, image_timelines=image_timelines,
         )
-        add_postprocess_detail(detail, result=result, postprocess=postprocess)
         # 上游请求模型 / 上游 SSE 回报的实际调度模型，分开记。
         add_upstream_model_detail(detail, result=result, upstream_model_slug=upstream_model_slug)
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)

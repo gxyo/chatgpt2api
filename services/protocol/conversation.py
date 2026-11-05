@@ -13,7 +13,6 @@ import tiktoken
 from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
-from services.image_upscale_service import parse_size_long_edge, upscale_png
 from services.openai_backend_api import (
     CONDUIT_WINDOW_TIMEOUT_SECS,
     ImageContentPolicyError,
@@ -128,6 +127,11 @@ TRANSIENT_TEXT_RESCUE_WINDOW_SECS = 12.0
 TRANSIENT_IMAGE_RESCUE_WINDOW_SECS = 20.0
 TRANSIENT_RESCUE_SLEEP_SECS = 2.0
 IMAGE_POLL_TIMEOUT_MESSAGE = "当前生图任务处理超时，请稍后重试"
+# 上游已经把图片资产 id 发进 SSE、但请求预算刚好在流尾耗尽时，给「换下载地址 +
+# 拉字节」留的宽限。图已经生成，不能因为预算到点就把成品丢掉；这段宽限只作用在
+# backend.deadline（取图），不改外层 attempt_deadline（换号重试预算）。
+# 45s = RESOLVE_FALLBACK_POLL_SECS(30s，等附件落盘) + 约 15s 换地址/下载余量。
+RESULT_FETCH_GRACE_SECS = 45.0
 # 「生成失败重试」只认这几类最终报错：上游普通失败、token 失效、轮询超时，
 # 以及 skipped_mainline（见 is_retryable_image_failure 里的正则判断）。
 # 内容违规（裸露/色情等）重试也不会过，换号只会白白消耗账号，必须排除在外。
@@ -537,20 +541,6 @@ def count_text_tokens(text: str, model: str) -> int:
     return len(encoding_for_model(model).encode(text))
 
 
-def _merge_postprocess(target: dict[str, Any], source: dict[str, Any]) -> None:
-    """合并多张图的本地后处理数据：耗时累加，尺寸/错误保留第一次有值的。"""
-    for key in ("upscale_ms", "upscale_queue_wait_ms"):
-        value = source.get(key)
-        if value:
-            target[key] = int(target.get(key) or 0) + int(value)
-    for key in ("upscale_target", "upscale_from_size", "upscale_to_size", "upscale_error"):
-        value = source.get(key)
-        if value and not target.get(key):
-            target[key] = value
-    if source.get("upscale_to_size") or source.get("upscale_error"):
-        target["upscale_images"] = int(target.get("upscale_images") or 0) + 1
-
-
 def format_image_result(
     items: list[dict[str, Any]],
     prompt: str,
@@ -558,22 +548,16 @@ def format_image_result(
     base_url: str | None = None,
     created: int | None = None,
     message: str = "",
-    size: str | None = None,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
-    # 超分是本地 CPU 耗时，不进上游轮询预算，但要记下来：4K 失败时得能看出
-    # 时间花在 1K 出图还是本地放大上。
-    postprocess: dict[str, Any] = {}
     for item in items:
         b64_json = str(item.get("b64_json") or "").strip()
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
-        # 免费号只出 1K 图，落盘前放大：客户端 size 要了 2K/4K 就照办，
-        # 不传或 "auto" 则维持 1K。b64_json 和 url 用同一份字节，免得两个出口不一致。
-        upscale_diagnostics: dict[str, Any] = {}
-        image_bytes = upscale_png(base64.b64decode(b64_json), parse_size_long_edge(size), upscale_diagnostics)
-        _merge_postprocess(postprocess, upscale_diagnostics)
+        # 上游返回什么字节就落盘什么字节：不再做本地超分/转码，GIF 动画才不会被
+        # PIL 压成单帧 PNG。
+        image_bytes = base64.b64decode(b64_json)
         url = save_image_bytes(image_bytes, base_url)
         if response_format == "b64_json":
             data.append({
@@ -589,8 +573,6 @@ def format_image_result(
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
     if message and not data:
         result["message"] = message
-    if postprocess:
-        result["_postprocess"] = postprocess
     return result
 
 
@@ -667,8 +649,10 @@ class ImageOutput:
     # 这条 message 的正文其实是上游管道错误（例如 400 {"skipped_mainline":true} 被
     # 解析进了 assistant 文本）。它不是模型正文，不能按 text_reply 重试/展示。
     plumbing_error: bool = False
-    # 本地后处理（4K 超分）的耗时与失败原因，只进调用日志，不返回给客户端。
-    postprocess: dict[str, Any] = field(default_factory=dict)
+    # 这条 progress 对应的上游事件里是否已经带图片资产 id。外层消费 progress 时
+    # 会检查 deadline；已经拿到图的事件不能因为预算到点被外层先打断，否则生成器
+    # 来不及进入「预算耗尽也继续取图」的兜底。
+    has_image_asset: bool = False
 
     def to_chunk(self) -> dict[str, Any]:
         chunk: dict[str, Any] = {
@@ -703,8 +687,6 @@ class ImageOutput:
                 })
             groups.extend(self.failed_image_timelines)
             chunk["_image_timeline"] = groups
-        if self.postprocess:
-            chunk["_postprocess"] = dict(self.postprocess)
         if self.kind == "message":
             chunk.update({
                 "object": "image.generation.message",
@@ -1186,6 +1168,9 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
+    # 预算在流尾耗尽、但上游已经把图片 id 发出来时，记下原超时：取图成功就正常
+    # 返回；取图失败再把它抛出去，保持「没拿到图 = 超时失败」的原有语义。
+    stream_timeout_exc: ImagePollTimeoutError | None = None
     # 阶段打点：失败时 backend.image_phase_diagnostics() 会折算成各阶段耗时，
     # 用来回答「这条请求的时间到底花在握手、主链路还是轮询上」。
     _mark_phase(backend, "conversation_start")
@@ -1228,6 +1213,7 @@ def stream_image_outputs(
                     total=total,
                     text=delta,
                     upstream_event_type="conversation.delta",
+                    has_image_asset=bool(event.get("file_ids") or event.get("sediment_ids")),
                 )
                 continue
             if event.get("type") == "conversation.event":
@@ -1239,8 +1225,9 @@ def stream_image_outputs(
                     index=index,
                     total=total,
                     upstream_event_type=raw_type,
+                    has_image_asset=bool(event.get("file_ids") or event.get("sediment_ids")),
                 )
-    except ImagePollTimeoutError:
+    except ImagePollTimeoutError as exc:
         # Create Pet 这类应用可能一直流 DIL，直到预算到点都没有图片 id。
         # 已经能看出是应用响应时，按「不支持的应用响应」收尾，而不是记成生图失败。
         text = str(last.get("text") or "")
@@ -1261,13 +1248,28 @@ def stream_image_outputs(
                 event=last,
                 reason=reason or "app_ui_timeout",
             ) from None
-        raise
+        if not last.get("file_ids") and not last.get("sediment_ids"):
+            raise
+        # 图已经生成、id 也已经在 SSE 里拿到了，只是预算恰好在流尾耗尽。
+        # 不能把成品丢掉：继续往下走取图，backend.deadline 会补一段取图宽限。
+        stream_timeout_exc = exc
+        logger.warning({
+            "event": "image_stream_deadline_with_asset",
+            "conversation_id": str(last.get("conversation_id") or ""),
+            "file_ids": len(last.get("file_ids") or []),
+            "sediment_ids": len(last.get("sediment_ids") or []),
+            "index": index,
+        })
 
     _mark_phase(backend, "conversation_done")
     conversation_id = str(last.get("conversation_id") or "")
     upstream_model_slug = str(last.get("model_slug") or "").strip()
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
+    if file_ids or sediment_ids:
+        # 图已经生成，剩下的只是「换下载地址 + 拉字节」：不能让请求预算在这里
+        # 把成品卡掉（流尾刚好撞上 deadline 是线上出现过的形态）。
+        _grant_result_fetch_grace(backend)
     message = str(last.get("text") or "").strip()
     # 主链路结束时的现场。成功调用日志的时间线里直接展示，用来一眼确认
     # 「这一轮上游到底有没有调起图片工具、SSE 有没有带 id」。
@@ -1284,6 +1286,8 @@ def stream_image_outputs(
             "file_ids": len(file_ids),
             "sediment_ids": len(sediment_ids),
             "message_chars": len(message),
+            # 预算是在流尾耗尽的，但图片 id 已经拿到：这次走的是「取图宽限」路径。
+            "deadline_rescue": stream_timeout_exc is not None,
         }
     except Exception:
         pass
@@ -1488,6 +1492,16 @@ def stream_image_outputs(
                 "error": str(exc),
             })
             image_urls = []
+        elif stream_timeout_exc is not None:
+            # 预算到点但图已经生成：取图失败就按原超时收尾，别换成别的分类。
+            logger.warning({
+                "event": "image_deadline_rescue_resolve_failed",
+                "conversation_id": conversation_id,
+                "file_ids": len(file_ids),
+                "sediment_ids": len(sediment_ids),
+                "error": repr(exc)[:300],
+            })
+            image_urls = []
         else:
             raise
     except Exception as exc:
@@ -1500,33 +1514,60 @@ def stream_image_outputs(
                 "error": repr(exc)[:300],
             })
             image_urls = []
+        elif stream_timeout_exc is not None:
+            logger.warning({
+                "event": "image_deadline_rescue_resolve_failed",
+                "conversation_id": conversation_id,
+                "file_ids": len(file_ids),
+                "sediment_ids": len(sediment_ids),
+                "error": repr(exc)[:300],
+            })
+            image_urls = []
         else:
             raise
 
     _mark_phase(backend, "poll_done")
     if image_urls:
-        if request.progress_callback:
-            request.progress_callback("receiving_image")
-        _mark_phase(backend, "download_start")
-        image_items = [
-            {"b64_json": base64.b64encode(image_data).decode("ascii")}
-            for image_data in backend.download_image_bytes(image_urls)
-        ]
-        _mark_phase(backend, "download_done")
-        formatted = format_image_result(
-            image_items,
-            request.prompt,
-            request.response_format,
-            request.base_url,
-            int(time.time()),
-            size=request.size,
-        )
+        try:
+            if request.progress_callback:
+                request.progress_callback("receiving_image")
+            _mark_phase(backend, "download_start")
+            image_items = [
+                {"b64_json": base64.b64encode(image_data).decode("ascii")}
+                for image_data in backend.download_image_bytes(image_urls)
+            ]
+            _mark_phase(backend, "download_done")
+            formatted = format_image_result(
+                image_items,
+                request.prompt,
+                request.response_format,
+                request.base_url,
+                int(time.time()),
+            )
+        except Exception as exc:
+            if stream_timeout_exc is None:
+                raise
+            # 下载/后处理失败：对客户端仍然报「预算超时」，和救援前的分类保持一致。
+            logger.warning({
+                "event": "image_deadline_rescue_download_failed",
+                "conversation_id": conversation_id,
+                "url_count": len(image_urls),
+                "error": repr(exc)[:300],
+            })
+            raise stream_timeout_exc from None
         data = formatted["data"]
         if data:
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data,
-                              conversation_id=conversation_id, upstream_model_slug=upstream_model_slug,
-                              postprocess=formatted.get("_postprocess") or {})
+                              conversation_id=conversation_id, upstream_model_slug=upstream_model_slug)
+            return
+        if stream_timeout_exc is not None:
+            raise stream_timeout_exc
         return
+
+    if stream_timeout_exc is not None:
+        # 预算在拿到图片 id 之后耗尽，取图仍没成功：按原来的超时收尾，
+        # 不要再走后面的 message/fallback（那些路径还会继续撞已耗尽的预算）。
+        raise stream_timeout_exc
 
     if message:
         # 检测模型是否返回了文本描述（含 referenced_image_ids）而非实际生成图片
@@ -1619,14 +1660,12 @@ def stream_image_outputs(
                         request.response_format,
                         request.base_url,
                         int(time.time()),
-                        size=request.size,
                     )
                     data = formatted["data"]
                     if data:
                         yield ImageOutput(kind="result", model=request.model, index=index, total=total,
                                           data=data, conversation_id=conversation_id,
-                                          upstream_model_slug=upstream_model_slug,
-                                          postprocess=formatted.get("_postprocess") or {})
+                                          upstream_model_slug=upstream_model_slug)
                         return
         elif is_text_reply:
             logger.warning({
@@ -1759,14 +1798,12 @@ def stream_image_outputs(
                     request.response_format,
                     request.base_url,
                     int(time.time()),
-                    size=request.size,
                 )
                 data = formatted["data"]
                 if data:
                     yield ImageOutput(kind="result", model=request.model, index=index, total=total,
                                       data=data, conversation_id=conversation_id,
-                                      upstream_model_slug=upstream_model_slug,
-                                      postprocess=formatted.get("_postprocess") or {})
+                                      upstream_model_slug=upstream_model_slug)
                     return
 
         # 重试后仍然失败，yield 错误消息
@@ -1836,12 +1873,10 @@ def stream_codex_image_outputs(
         request.response_format,
         request.base_url,
         int(time.time()),
-        size=request.size,
     )
     data = formatted["data"]
     if data:
-        yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data,
-                          postprocess=formatted.get("_postprocess") or {})
+        yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
         return
     raise ImageGenerationError("No image result found in response")
 
@@ -1854,6 +1889,22 @@ def _mark_phase(backend: Any, name: str) -> None:
     try:
         marker(name)
     except Exception:
+        pass
+
+
+def _grant_result_fetch_grace(backend: Any, grace_secs: float = RESULT_FETCH_GRACE_SECS) -> None:
+    """图片已经生成时，给取图/下载留一段独立宽限。
+
+    只放宽 backend.deadline（resolve/download 用它做超时），外层 attempt_deadline
+    保持不变，所以不会借机多跑一次换号重试。预算还充裕时 max() 不会把 deadline
+    提前。
+    """
+    deadline = getattr(backend, "deadline", None)
+    if deadline is None:
+        return
+    try:
+        backend.deadline = max(float(deadline), time.monotonic() + grace_secs)
+    except (TypeError, ValueError):
         pass
 
 
@@ -1974,6 +2025,34 @@ def _image_resolve_diagnostics(backend: Any) -> dict[str, Any]:
     if not isinstance(data, dict) or not data:
         return {}
     return dict(data)
+
+
+def _resolve_attempt_fields(backend: Any) -> dict[str, Any]:
+    """把本次尝试自己的取图现场压成几个字段，随 attempts[n] 一起导出。
+
+    终态的 resolve_* 只保留最后一次 backend 的；换号时上一轮的会被清掉。
+    所以导出日志里曾经看不出「第 1 次尝试到底有没有拿到 id」。每次尝试各留
+    一份精简快照，下次排查时不用再猜。
+    """
+    data = _image_resolve_diagnostics(backend)
+    if not data:
+        return {}
+    fields: dict[str, Any] = {}
+    initial_files = data.get("resolve_initial_file_ids")
+    initial_sediments = data.get("resolve_initial_sediment_ids")
+    if isinstance(initial_files, list):
+        fields["fetch_file_ids"] = len(initial_files)
+    if isinstance(initial_sediments, list):
+        fields["fetch_sediment_ids"] = len(initial_sediments)
+    for source, target in (
+            ("resolve_direct", "fetch_direct"),
+            ("resolve_poll", "fetch_poll"),
+            ("resolve_outcome", "fetch_outcome"),
+    ):
+        value = data.get(source)
+        if value:
+            fields[target] = value
+    return fields
 
 
 # 上游 SSE 最近几条原始事件：失败时随诊断/异常 body 进调用日志。
@@ -2359,11 +2438,14 @@ def _generate_single_image_attempts(
         if attempt_outcome == "success":
             # 成功路径没有异常带着 diagnostics 出去，这份快照注定被丢掉；
             # 跳过号池快照（要抢号池锁）省点开销。之后的尝试失败时会重新算。
-            _finish_image_attempt(attempt, attempt_outcome, attempt_error)
+            _finish_image_attempt(attempt, attempt_outcome, attempt_error, **_resolve_attempt_fields(backend))
             return
         conduit = _conduit_state(backend)
         # 握手/主链路现场同时挂到这一条尝试记录上，尝试轨迹那一行才有东西可写。
-        _finish_image_attempt(attempt, attempt_outcome, attempt_error, **conduit, **attempt_extra)
+        _finish_image_attempt(
+            attempt, attempt_outcome, attempt_error,
+            **conduit, **attempt_extra, **_resolve_attempt_fields(backend),
+        )
         # 换号重试在异常分支里就已经续了预算，这里读 attempt_deadline 会永远显示
         # 「剩余一整个预算」；优先用续期前记下的真实剩余。
         remaining = (
@@ -2732,10 +2814,12 @@ def _generate_single_image_attempts(
             outputs: list[ImageOutput] = []
             retry_after_output = False
             for output in stream_fn(backend, stream_request, index, total):
-                # result 已经产出说明上游生图完成，后面的耗时是本地后处理（4K 超分、
-                # 落盘）。把这段时间算进上游轮询预算的话，超分慢几秒就会被误判成
+                # result 已经产出说明上游生图完成，后面的耗时是本地落盘/编码。
+                # 把这段时间算进上游轮询预算的话，慢几秒就会被误判成
                 # 「当前生图任务处理超时」，还会因为 deadline 已过而不触发换号重试。
-                if output.kind != "result":
+                # 同理，进度事件里已经带图片资产 id 时也不在这里拦：生成器内部会
+                # 判断「预算耗尽但图已生成」，继续把图取回来（见 stream_image_outputs）。
+                if output.kind != "result" and not output.has_image_asset:
                     ensure_image_deadline(attempt_deadline)
                 if account_email and not output.account_email:
                     output.account_email = account_email
@@ -3587,7 +3671,6 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     attempts_summaries: list[str] = []
     attempts: list[dict[str, Any]] = []
     image_timelines: list[dict[str, Any]] = []
-    postprocess: dict[str, Any] = {}
     upstream_model_slug = ""
     for output in outputs:
         created = created or output.created
@@ -3614,8 +3697,6 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         if output.attempts:
             # 结构化尝试现场只挂在最终 chunk 上；多图时各张图各带一份。
             attempts.extend(dict(item) for item in output.attempts)
-        if output.postprocess:
-            _merge_postprocess(postprocess, output.postprocess)
         if output.kind == "progress" and output.text:
             progress_parts.append(output.text)
         elif output.kind == "message":
@@ -3638,8 +3719,6 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         result["_attempts"] = attempts
     if image_timelines:
         result["_image_timeline"] = image_timelines
-    if postprocess:
-        result["_postprocess"] = postprocess
     if upstream_model_slug:
         result["_upstream_model_slug"] = upstream_model_slug
     return result

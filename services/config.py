@@ -480,11 +480,6 @@ class ConfigStore:
         return bool(value)
 
     @property
-    def image_upscale_enabled(self) -> bool:
-        """超分总开关。关掉后客户端就算传 4K 也不放大。"""
-        return _normalize_bool(self.data.get("image_upscale_enabled", False))
-
-    @property
     def auto_remove_invalid_accounts(self) -> bool:
         value = self.data.get("auto_remove_invalid_accounts", False)
         if isinstance(value, str):
@@ -589,7 +584,6 @@ class ConfigStore:
         data["image_generation_retry_count"] = self.image_generation_retry_count
         data["image_account_concurrency"] = self.image_account_concurrency
         data["image_parallel_generation"] = self.image_parallel_generation
-        data["image_upscale_enabled"] = self.image_upscale_enabled
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels
@@ -607,6 +601,8 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
+        # 超分功能已移除：旧配置里残留的开关不再保留，下次保存时一并清掉。
+        next_data.pop("image_upscale_enabled", None)
         if "refresh_account_interval_minute" in next_data:
             next_data["refresh_account_interval_minute"] = _normalize_optional_interval(
                 next_data.get("refresh_account_interval_minute"), 5
@@ -663,8 +659,6 @@ class ConfigStore:
             next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(
                 next_data.get("chat_completion_cache")
             )
-        if "image_upscale_enabled" in next_data:
-            next_data["image_upscale_enabled"] = _normalize_bool(next_data.get("image_upscale_enabled"))
         if "image_generation_retry_count" in next_data:
             next_data["image_generation_retry_count"] = _normalize_image_generation_retry_count(
                 next_data.get("image_generation_retry_count")

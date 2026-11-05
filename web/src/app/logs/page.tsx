@@ -53,13 +53,6 @@ const detailLabels: Record<string, string> = {
   upstream_model_requested: "上游请求模型",
   request_text: "请求内容",
   error: "错误信息",
-  upscale_target: "超分目标(px)",
-  upscale_from_size: "超分前尺寸",
-  upscale_to_size: "超分后尺寸",
-  upscale_images: "超分张数",
-  upscale_ms: "超分耗时(ms)",
-  upscale_queue_wait_ms: "超分排队(ms)",
-  upscale_error: "超分失败原因",
 };
 
 /** 这两个字段单独排版，不进右侧对齐的键值网格。 */

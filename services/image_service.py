@@ -21,6 +21,15 @@ from utils.log import logger
 
 THUMBNAIL_SIZE = (320, 320)
 MEGABYTE = 1024 * 1024
+# 显式给出 Content-Type，不依赖 Windows 上的 mimetypes 注册表推断；GIF 必须
+# 按 image/gif 返回，否则客户端可能把它当静态图或直接拒绝显示。
+IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 IMAGE_CLEANUP_CHECK_SECONDS = 30
 STORAGE_CLEANUP_CHECK_SECONDS = 1800
 IMAGE_CLEANUP_TIMEZONE_KEY = "+08:00"
@@ -101,15 +110,20 @@ def _safe_image_path(relative_path: str) -> Path:
     return path
 
 
+def _image_media_type(relative_path: str) -> str:
+    return IMAGE_MEDIA_TYPES.get(Path(relative_path).suffix.lower(), "image/png")
+
+
 def get_image_response(relative_path: str) -> FileResponse | Response:
     headers = {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": "*",
     }
+    media_type = _image_media_type(relative_path)
     if image_storage_service.has_local(relative_path):
-        return FileResponse(_safe_image_path(relative_path), headers=headers)
-    return Response(content=image_storage_service.get_bytes(relative_path), media_type="image/png", headers=headers)
+        return FileResponse(_safe_image_path(relative_path), media_type=media_type, headers=headers)
+    return Response(content=image_storage_service.get_bytes(relative_path), media_type=media_type, headers=headers)
 
 
 def _thumbnail_path(relative_path: str) -> Path:
@@ -170,10 +184,11 @@ def get_image_download_response(relative_path: str) -> FileResponse:
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": "*",
     }
+    media_type = _image_media_type(relative_path)
     if image_storage_service.has_local(relative_path):
         path = _safe_image_path(relative_path)
         headers = {**cors_headers, "Content-Disposition": f'attachment; filename="{path.name}"'}
-        return FileResponse(path, filename=path.name, headers=headers)
+        return FileResponse(path, filename=path.name, media_type=media_type, headers=headers)
     rel = _safe_relative_path(relative_path)
     headers = {
         **cors_headers,
@@ -181,7 +196,7 @@ def get_image_download_response(relative_path: str) -> FileResponse:
     }
     return Response(
         content=image_storage_service.get_bytes(rel),
-        media_type="image/png",
+        media_type=media_type,
         headers=headers,
     )
 

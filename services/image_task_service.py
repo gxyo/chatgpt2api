@@ -11,7 +11,6 @@ from typing import Any
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
-from services.image_upscale_service import parse_size_long_edge
 from services.log_service import (
     LOG_STATUS_FAILED,
     LOG_STATUS_POLICY_VIOLATION,
@@ -20,7 +19,6 @@ from services.log_service import (
     LOG_TYPE_CALL,
     add_attempt_trail_detail,
     add_image_timeline_detail,
-    add_postprocess_detail,
     add_upstream_model_detail,
     image_request_detail,
     is_policy_violation_error,
@@ -39,9 +37,6 @@ TASK_STATUS_ERROR = "error"
 TERMINAL_STATUSES = {TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}
 UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
 TASK_TIMEOUT_MESSAGE = "图片任务处理超时，请稍后重试"
-# 4K 超分是纯本地 CPU 后处理，不受上游轮询预算约束；任务线程的等待时间要留出这一段，
-# 否则图已经生成好、正在超分时任务先判定超时，结果被白白丢掉。
-UPSCALE_TIMEOUT_ALLOWANCE_SECS = 60
 # handler 内部 deadline 到点后，SSE 收尾/结果解析可能还会晚几秒到十几秒；
 # 外层任务线程的等待上限按基础预算多留一点余量（最多 20%，且不超过 30s），
 # 避免把即将结束的请求误判成任务超时，同时不破坏「小超时必须硬杀」的语义。
@@ -369,17 +364,12 @@ class ImageTaskService:
         return _positive_float(self.timeout_secs_getter(), float(config.image_poll_timeout_secs))
 
     def _timeout_for_payload(self, payload: dict[str, Any]) -> float:
-        """任务线程的等待上限：请求预算（重试共用、不续期）+ 收尾余量 + 超分时间。"""
+        """任务线程的等待上限：请求预算（重试共用、不续期）+ 收尾余量。"""
         base_timeout_secs = _positive_float(payload.get("timeout_secs"), self._timeout_secs())
         # 换号重试只在本次请求的剩余预算内跑，handler 的总耗时不会超过基础预算；
         # 这里只额外留一点收尾余量，避免流式读取晚几秒结束就被任务线程判超时。
         grace = min(HANDLER_DEADLINE_GRACE_MAX_SECS, base_timeout_secs * HANDLER_DEADLINE_GRACE_RATIO)
-        timeout_secs = base_timeout_secs + grace
-        # 请求了 2K/4K 且开了超分时，本地放大要额外时间（还要排队等串行锁）。
-        upscale_target = parse_size_long_edge(payload.get("size"))
-        if config.image_upscale_enabled and upscale_target and upscale_target > 1024:
-            timeout_secs += UPSCALE_TIMEOUT_ALLOWANCE_SECS
-        return timeout_secs
+        return base_timeout_secs + grace
 
     def _run_handler_with_timeout(
         self,
@@ -459,8 +449,6 @@ class ImageTaskService:
         add_attempt_trail_detail(detail, result=result, exc=exc)
         # 执行时间线：每一步做了什么、花了多久、为什么（成功和失败都有）。
         add_image_timeline_detail(detail, result=result, exc=exc)
-        # 4K 超分的耗时/失败原因也平铺进这条记录。
-        add_postprocess_detail(detail, result=result)
         # 上游请求模型 / 上游 SSE 回报的实际调度模型，分开记录。
         add_upstream_model_detail(detail, result=result)
         try:

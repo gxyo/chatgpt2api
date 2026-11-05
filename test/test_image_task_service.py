@@ -12,7 +12,6 @@ import services.image_task_service as image_task_service_module
 from services.image_task_service import (
     HANDLER_DEADLINE_GRACE_MAX_SECS,
     HANDLER_DEADLINE_GRACE_RATIO,
-    UPSCALE_TIMEOUT_ALLOWANCE_SECS,
     ImageTaskService,
 )
 
@@ -157,7 +156,7 @@ class ImageTaskServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(Path(tmp_dir) / "image_tasks.json", timeout_secs=60)
             config = SimpleNamespace(
-                image_upscale_enabled=False, image_generation_retry_count=2, image_poll_timeout_secs=60,
+                image_generation_retry_count=2, image_poll_timeout_secs=60,
             )
 
             with mock.patch.object(image_task_service_module, "config", config):
@@ -167,22 +166,6 @@ class ImageTaskServiceTests(unittest.TestCase):
             # 这里只加一点收尾余量（20%，最多 30s）。
             grace = min(HANDLER_DEADLINE_GRACE_MAX_SECS, 60 * HANDLER_DEADLINE_GRACE_RATIO)
             self.assertEqual(timeout, 60 + grace)
-
-    def test_task_timeout_adds_upscale_allowance(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            service = self.make_service(Path(tmp_dir) / "image_tasks.json", timeout_secs=30)
-            config = SimpleNamespace(
-                image_upscale_enabled=True, image_generation_retry_count=1, image_poll_timeout_secs=30,
-            )
-
-            with mock.patch.object(image_task_service_module, "config", config):
-                timeout = service._timeout_for_payload({"timeout_secs": 30, "size": "4096x4096"})
-
-            # 30 基础 + 收尾余量，再加超分预留；重试不再额外加预算。
-            grace = min(HANDLER_DEADLINE_GRACE_MAX_SECS, 30 * HANDLER_DEADLINE_GRACE_RATIO)
-            self.assertEqual(
-                timeout, 30 + grace + UPSCALE_TIMEOUT_ALLOWANCE_SECS,
-            )
 
     def test_task_uses_configured_hard_timeout(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

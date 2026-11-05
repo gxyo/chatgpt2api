@@ -73,6 +73,14 @@ def _image_extension(mime_type: str) -> str:
     return "jpg" if image_type == "jpeg" else image_type or "png"
 
 
+def is_gif_bytes(data: bytes) -> bool:
+    """按魔数判断是不是 GIF（GIF87a/GIF89a）。
+
+    存储时据此保留 .gif 扩展名，URL/Content-Type 才能和字节内容对上。
+    """
+    return bytes(data[:6]) in (b"GIF87a", b"GIF89a")
+
+
 def _decode_json_image_string(value: str, index: int, filename: str | None = None, mime_type: str | None = None) -> tuple[bytes, str, str]:
     text = value.strip()
     if not text:
@@ -437,18 +445,20 @@ def iter_sse_payloads(
     `on_line` 在每读到一行（包括心跳注释行、空行）时回调一次：生图主链路等待
     上游出图时经常几十秒只发 `: ping` 之类的保活行，如果只在 data 行上检查
     预算，这段时间就完全不受 deadline 约束，50s 的预算能拖到 80s 以上。
+
+    回调放在 payload 产出之后：预算恰好在「上游刚把图片资产发出来」的那一行
+    到点时，这一行仍会先被解析、id 先进入状态，再由下一次检查抛超时。否则
+    生成好的图片会跟着这一行一起丢掉。
     """
     for raw_line in response.iter_lines():
+        if raw_line:
+            line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload:
+                    yield payload
         if on_line is not None:
             on_line()
-        if not raw_line:
-            continue
-        line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
-        if not line.startswith("data:"):
-            continue
-        payload = line[5:].strip()
-        if payload:
-            yield payload
 
 
 def save_images_from_text(text: str, prefix: str) -> list[Path]:
