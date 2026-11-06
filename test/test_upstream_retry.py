@@ -23,6 +23,7 @@ from services.protocol.conversation import (
     ConversationRequest,
     ImageGenerationError,
     ImageOutput,
+    is_invalid_image_format_error,
     is_upload_limit_error,
 )
 from utils.helper import CHANNEL_BUSY_MESSAGE, UpstreamHTTPError, is_retriable_upstream_error, public_error_message
@@ -837,6 +838,46 @@ class UpstreamRetryTests(unittest.TestCase):
             [("token-a", "image_stream_upload_limit")],
         )
         self.assertEqual(fake_accounts.image_results, [("token-a", False), ("token-b", True)])
+
+    def test_invalid_image_format_classifier(self):
+        self.assertTrue(is_invalid_image_format_error(UpstreamHTTPError(
+            "/backend-api/f/conversation",
+            400,
+            {"detail": "We couldn't process this image. Error code: invalid_image_format."},
+        )))
+        self.assertFalse(is_invalid_image_format_error(UpstreamHTTPError(
+            "/backend-api/f/conversation", 400, {"detail": "skipped_mainline"},
+        )))
+        self.assertFalse(is_invalid_image_format_error(UpstreamHTTPError("/backend-api/files", 429, "")))
+
+    def test_invalid_image_format_error_stops_without_account_switch(self):
+        fake_accounts = FakeAccountService(["token-a", "token-b"])
+
+        def fake_stream_image_outputs(backend, request, index=1, total=1):
+            raise UpstreamHTTPError(
+                "/backend-api/f/conversation",
+                400,
+                {"detail": "We couldn't process this image. Error code: invalid_image_format."},
+            )
+            yield
+
+        with mock.patch.object(conversation, "account_service", fake_accounts), \
+             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs):
+            with self.assertRaises(ImageGenerationError) as ctx:
+                list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                    model="gpt-image-2",
+                    prompt="test",
+                )))
+
+        exc = ctx.exception
+        self.assertEqual(exc.code, "invalid_image_format")
+        self.assertEqual(exc.status_code, 400)
+        self.assertIn("PNG", str(exc))
+        # 参考图格式是输入问题：只尝试一个号，不换号、不删号、不消耗重试次数。
+        self.assertEqual(fake_accounts.selected_image_tokens, ["token-a"])
+        self.assertEqual(fake_accounts.image_results, [("token-a", False)])
+        self.assertEqual(fake_accounts.removed_invalid_tokens, [])
+        self.assertEqual(exc.image_diagnostics.get("retry_stopped"), "invalid_image_format")
 
     def test_image_pool_sanitizes_transient_account_lookup_failure(self):
         fake_accounts = SimpleNamespace(

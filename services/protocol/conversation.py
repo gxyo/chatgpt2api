@@ -189,12 +189,10 @@ UPLOAD_LIMIT_ERROR_MARKERS = (
 )
 
 
-def is_upload_limit_error(exc: BaseException, message: str = "") -> bool:
-    """检测「文件上传达到上限」的 429（upload_protection_limit_exceed）。
+def _exception_text_with_body(exc: BaseException, message: str = "") -> str:
+    """拼出异常的全部可搜索文本：传入文案 + str(exc) + 完整的结构化 body。
 
-    这种号当天不能再传参考图，留在号池里只会让每次图生图先白传一遍再换号，
-    所以和 token 失效一样直接移出号池。只看上传保护的原因码/文案，不能按
-    普通 429 判断——普通 429 是渠道拥堵，换号即可，不该删号。
+    str(UpstreamHTTPError) 会把 body 截断到 500 字，判定原因码不能只靠它。
     """
     parts = [str(message or ""), str(exc or "")]
     body = getattr(exc, "body", None)
@@ -205,8 +203,28 @@ def is_upload_limit_error(exc: BaseException, message: str = "") -> bool:
             parts.append(repr(body))
     elif body:
         parts.append(str(body))
-    text = "\n".join(parts).lower()
+    return "\n".join(parts).lower()
+
+
+def is_upload_limit_error(exc: BaseException, message: str = "") -> bool:
+    """检测「文件上传达到上限」的 429（upload_protection_limit_exceed）。
+
+    这种号当天不能再传参考图，留在号池里只会让每次图生图先白传一遍再换号，
+    所以和 token 失效一样直接移出号池。只看上传保护的原因码/文案，不能按
+    普通 429 判断——普通 429 是渠道拥堵，换号即可，不该删号。
+    """
+    text = _exception_text_with_body(exc, message)
     return any(marker in text for marker in UPLOAD_LIMIT_ERROR_MARKERS)
+
+
+def is_invalid_image_format_error(exc: BaseException, message: str = "") -> bool:
+    """检测上游无法解析参考图（400 invalid_image_format）。
+
+    这是输入图片本身的问题：4 个不同账号在同一个主链路 POST 上都会回同样的
+    400，换号解决不了，只会每个号白跑一次上传 + 握手。识别出来就直接把错误
+    返回给用户，提示换 PNG/JPEG。
+    """
+    return "invalid_image_format" in _exception_text_with_body(exc, message)
 
 
 def is_tls_connection_error(message: str) -> bool:
@@ -3348,6 +3366,34 @@ def _generate_single_image_attempts(
                     reason="upload_limit",
                 )
                 continue
+            if not final_output_emitted and is_invalid_image_format_error(exc, str(exc)):
+                # 参考图格式上游解析不了（400 invalid_image_format）：换多少号都会
+                # 在同一步回同样的 400，重试只是每个号白传一次图、白握一次手。
+                # 按输入错误直接返回，不消耗配置重试次数。
+                attempt_outcome = "invalid_image_format"
+                attempt_error = str(exc)
+                diagnostics["retry_stopped"] = "invalid_image_format"
+                logger.warning({
+                    "event": "image_stream_invalid_image_format_final",
+                    "trace_id": trace_id,
+                    "request_token": anonymize_token(token),
+                    "account_email": account_email,
+                    "index": index,
+                    "error": attempt_error[:200],
+                })
+                mark_timeline(
+                    "retry_stopped", "重试停止",
+                    "上游无法解析参考图（invalid_image_format）；问题在输入图片，"
+                    "换号重试没有意义，直接返回错误",
+                    reason="invalid_image_format",
+                )
+                raise ImageGenerationError(
+                    "参考图格式不受支持，请将参考图转换为 PNG 或 JPEG 后重试。",
+                    status_code=400,
+                    error_type="invalid_request_error",
+                    code="invalid_image_format",
+                    account_email=account_email,
+                ) from exc
             # Local handshake recovery can still exhaust its attempts. Use
             # the bounded account rescue flow with a fresh backend session;
             # never mark this 400 retryable in the generic same-POST loop.
