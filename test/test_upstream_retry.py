@@ -19,7 +19,12 @@ from services.openai_backend_api import (
     is_skipped_mainline_error,
 )
 from services.protocol import conversation
-from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput
+from services.protocol.conversation import (
+    ConversationRequest,
+    ImageGenerationError,
+    ImageOutput,
+    is_upload_limit_error,
+)
 from utils.helper import CHANNEL_BUSY_MESSAGE, UpstreamHTTPError, is_retriable_upstream_error, public_error_message
 
 
@@ -770,6 +775,68 @@ class UpstreamRetryTests(unittest.TestCase):
         self.assertEqual(outputs[0].kind, "result")
         self.assertEqual(calls, 4)
         self.assertEqual(fake_accounts.image_results[-1], ("token-a", True))
+
+    def test_upload_limit_classifier_only_matches_upload_protection(self):
+        upload_limited = UpstreamHTTPError(
+            "/backend-api/files",
+            429,
+            {
+                "detail": {
+                    "code": "throttled",
+                    "error_code": "throttled",
+                    "message": "你已达到文件上传上限。请1天 内重试。",
+                    "type": "throttled",
+                    "reason": "upload_protection_limit_exceed",
+                }
+            },
+        )
+        chinese_only = UpstreamHTTPError(
+            "/backend-api/files", 429, {"detail": {"message": "你已达到文件上传上限。请1天 内重试。"}}
+        )
+        plain_throttle = UpstreamHTTPError(
+            "/backend-api/files", 429, {"detail": {"code": "throttled", "message": "当前渠道拥堵，请稍后再试"}}
+        )
+
+        self.assertTrue(is_upload_limit_error(upload_limited))
+        self.assertTrue(is_upload_limit_error(chinese_only))
+        # 普通 429 是渠道拥堵：换号即可，不能把账号当成上传超限删掉。
+        self.assertFalse(is_upload_limit_error(plain_throttle))
+        self.assertFalse(is_upload_limit_error(UpstreamHTTPError("/backend-api/me", 503, "")))
+
+    def test_image_pool_removes_account_on_upload_protection_limit(self):
+        fake_accounts = FakeAccountService(["token-a", "token-b"])
+
+        def fake_stream_image_outputs(backend, request, index=1, total=1):
+            if backend.access_token == "token-a":
+                raise UpstreamHTTPError(
+                    "/backend-api/files",
+                    429,
+                    {
+                        "detail": {
+                            "code": "throttled",
+                            "error_code": "throttled",
+                            "message": "你已达到文件上传上限。请1天 内重试。",
+                            "type": "throttled",
+                            "reason": "upload_protection_limit_exceed",
+                        }
+                    },
+                )
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=[{"url": "ok"}])
+
+        with mock.patch.object(conversation, "account_service", fake_accounts), \
+             mock.patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs):
+            outputs = list(conversation.stream_image_outputs_with_pool(ConversationRequest(
+                model="gpt-image-2",
+                prompt="test",
+            )))
+
+        self.assertEqual(outputs[0].kind, "result")
+        # 上传超限的号直接移出号池，且不消耗“配置重试次数”，下一个号接着生成。
+        self.assertEqual(
+            fake_accounts.removed_invalid_tokens,
+            [("token-a", "image_stream_upload_limit")],
+        )
+        self.assertEqual(fake_accounts.image_results, [("token-a", False), ("token-b", True)])
 
     def test_image_pool_sanitizes_transient_account_lookup_failure(self):
         fake_accounts = SimpleNamespace(

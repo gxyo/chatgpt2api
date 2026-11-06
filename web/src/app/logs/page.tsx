@@ -84,6 +84,7 @@ const attemptOutcomes: Record<string, AttemptOutcomeStyle> = {
   invalid_token: { label: "token 失效", variant: "danger" },
   token_refreshed: { label: "刷新 token 重试", variant: "warning" },
   transient_upstream: { label: "上游抖动", variant: "warning" },
+  upload_limit: { label: "上传超限", variant: "danger" },
   mainline_rejected: { label: "主链路拒绝", variant: "warning" },
   content_policy: { label: "内容拦截", variant: "danger" },
   text_reply: { label: "只回文本", variant: "warning" },

@@ -180,6 +180,35 @@ def is_token_auth_error(exc: BaseException, message: str) -> bool:
     )
 
 
+# 上游文件上传保护：当天该号的参考图上传额度用完了。body 里的 reason 最稳定，
+# 中文/英文文案只用来兜底（上游改文案时仍能识别）。
+UPLOAD_LIMIT_ERROR_MARKERS = (
+    "upload_protection_limit_exceed",
+    "文件上传上限",
+    "file upload limit",
+)
+
+
+def is_upload_limit_error(exc: BaseException, message: str = "") -> bool:
+    """检测「文件上传达到上限」的 429（upload_protection_limit_exceed）。
+
+    这种号当天不能再传参考图，留在号池里只会让每次图生图先白传一遍再换号，
+    所以和 token 失效一样直接移出号池。只看上传保护的原因码/文案，不能按
+    普通 429 判断——普通 429 是渠道拥堵，换号即可，不该删号。
+    """
+    parts = [str(message or ""), str(exc or "")]
+    body = getattr(exc, "body", None)
+    if isinstance(body, (dict, list)):
+        try:
+            parts.append(json.dumps(body, ensure_ascii=False))
+        except (TypeError, ValueError):
+            parts.append(repr(body))
+    elif body:
+        parts.append(str(body))
+    text = "\n".join(parts).lower()
+    return any(marker in text for marker in UPLOAD_LIMIT_ERROR_MARKERS)
+
+
 def is_tls_connection_error(message: str) -> bool:
     """检测 TLS/SSL 连接错误，这类错误通常可以通过重试解决。"""
     text = str(message or "").lower()
@@ -3294,6 +3323,31 @@ def _generate_single_image_attempts(
             raise
         except Exception as exc:
             account_service.mark_image_result(token, False)
+            if not final_output_emitted and is_upload_limit_error(exc, str(exc)):
+                # 文件上传上限（429 upload_protection_limit_exceed）：这个号当天
+                # 传不了参考图，图生图每次都会卡在 uploading。直接移出号池，别让
+                # 它反复被选中、白耗一次上传和一轮换号预算。这里先于 transient
+                # 分类处理：它不是渠道抖动，不该计入 transient_attempts 或触发抢救窗口。
+                attempt_outcome = "upload_limit"
+                attempt_error = str(exc)
+                removed = account_service.remove_invalid_token(token, "image_stream_upload_limit")
+                logger.warning({
+                    "event": "image_stream_upload_limit_switch_account",
+                    "trace_id": trace_id,
+                    "request_token": anonymize_token(token),
+                    "account_email": account_email,
+                    "index": index,
+                    "removed": removed,
+                    "error": attempt_error[:200],
+                })
+                mark_timeline(
+                    "retry", "文件上传超限换号",
+                    "上游返回文件上传上限（upload_protection_limit_exceed）；"
+                    + ("已移除该账号" if removed else "已把该号标记异常")
+                    + "并立即换号（不消耗配置重试次数）",
+                    reason="upload_limit",
+                )
+                continue
             # Local handshake recovery can still exhaust its attempts. Use
             # the bounded account rescue flow with a fresh backend session;
             # never mark this 400 retryable in the generic same-POST loop.
