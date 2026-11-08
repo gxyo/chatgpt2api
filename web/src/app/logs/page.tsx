@@ -67,7 +67,8 @@ function detailFieldRank(key: string) {
   if (topDetailKeys.has(key)) {
     return 0;
   }
-  return bottomDetailKeys.has(key) ? 2 : 1;
+  // 客户端额外参数（param.xxx）和 size/n/quality 一样属于幕后信息，排到键值区最后。
+  return bottomDetailKeys.has(key) || key.startsWith("param.") ? 2 : 1;
 }
 
 type AttemptOutcomeStyle = {
@@ -1233,7 +1234,10 @@ function LogsContent() {
                     <div className="text-sm font-medium text-neutral-700">请求信息</div>
                     <div className="grid grid-cols-1 gap-y-3 rounded-xl border border-neutral-200 bg-white p-4 text-sm text-neutral-600">
                       {detailFields.map(([key, value]) => {
-                        const label = detailLabels[key] || key;
+                        // param.format 这类客户端额外参数直接展示原始参数名。
+                        const label = key.startsWith("param.")
+                          ? key.slice("param.".length)
+                          : detailLabels[key] || key;
                         // 提示词/错误信息是长文本，单独排版并支持折叠，避免把左列撑得读不下去。
                         if (key === "request_text" || key === "error") {
                           return (

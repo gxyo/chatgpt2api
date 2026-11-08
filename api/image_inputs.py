@@ -60,8 +60,27 @@ def _parse_count(value: object) -> int:
     return count
 
 
-def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
-    """构造图片编辑载荷：从表单或 JSON 字段提取通用参数。"""
+# 载荷里已经显式解析的字段。其余字段（格式/帧数这类扩展参数）原样保留，
+# 当前只是传下去并落日志，方便先确认客户端实际发了什么。
+_PAYLOAD_FIELD_KEYS = {
+    "client_task_id", "prompt", "model", "n", "size", "quality", "response_format", "stream",
+}
+# 内部字段不透传给 handler：timeout_secs 会改请求预算，其余是服务端自己塞的。
+_INTERNAL_FIELD_KEYS = {"base_url", "timeout_secs", "progress_callback"}
+
+
+def _extra_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """收集客户端多传的扩展字段；图片字段单独解析，上传文件不能当普通参数。"""
+    skipped = _PAYLOAD_FIELD_KEYS | _INTERNAL_FIELD_KEYS | IMAGE_REFERENCE_FIELDS | MASK_REFERENCE_FIELDS
+    return {
+        key: value
+        for key, value in fields.items()
+        if key not in skipped and not _is_upload(value)
+    }
+
+
+def _payload_from_fields(fields: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """构造图片编辑载荷：从表单或 JSON 字段提取通用参数，并返回扩展参数。"""
     prompt = _clean(fields.get("prompt"))
     if not prompt:
         raise HTTPException(status_code=400, detail={"error": "prompt is required"})
@@ -76,7 +95,7 @@ def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
     }
     if "client_task_id" in fields:
         payload["client_task_id"] = _clean(fields.get("client_task_id"))
-    return payload
+    return payload, _extra_fields(fields)
 
 
 def _json_reference_value(value: object) -> object:
@@ -166,10 +185,13 @@ def _json_mask_sources(body: dict[str, Any]) -> list[ImageSource]:
     return []
 
 
-async def parse_image_edit_request(request: Request) -> tuple[dict[str, Any], list[ImageSource], list[ImageSource]]:
+async def parse_image_edit_request(
+        request: Request,
+) -> tuple[dict[str, Any], list[ImageSource], list[ImageSource], dict[str, Any]]:
     """解析图片编辑请求：同时支持 multipart 上传和官方 JSON 图片 URL。
 
-    返回 (payload, image_sources, mask_sources)
+    返回 (payload, image_sources, mask_sources, extra_params)。
+    extra_params 是客户端多传的扩展字段（如 GIF 的格式/帧数），用于透传和日志。
     """
     content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type == "application/json":
@@ -179,7 +201,8 @@ async def parse_image_edit_request(request: Request) -> tuple[dict[str, Any], li
             raise HTTPException(status_code=400, detail={"error": "invalid JSON body"}) from exc
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail={"error": "JSON body must be an object"})
-        return _payload_from_fields(body), _json_image_sources(body), _json_mask_sources(body)
+        payload, extra_params = _payload_from_fields(body)
+        return payload, _json_image_sources(body), _json_mask_sources(body), extra_params
 
     form = await request.form()
     fields: dict[str, Any] = {}
@@ -194,7 +217,11 @@ async def parse_image_edit_request(request: Request) -> tuple[dict[str, Any], li
             sources.extend(_sources_from_value(value))
         elif key in MASK_REFERENCE_FIELDS:
             mask_sources.extend(_sources_from_value(value))
-    return _payload_from_fields(fields), sources, mask_sources
+        elif isinstance(value, str):
+            # 扩展字段原样保留（重复键取第一个），后面透传并落日志。
+            fields.setdefault(key, value)
+    payload, extra_params = _payload_from_fields(fields)
+    return payload, sources, mask_sources, extra_params
 
 
 def _extension_from_mime(mime_type: str) -> str:

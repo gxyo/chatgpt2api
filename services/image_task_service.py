@@ -74,6 +74,16 @@ def _positive_float(value: object, default: float, minimum: float = 0.001) -> fl
     return max(minimum, normalized)
 
 
+def _merge_extra_params(payload: dict[str, Any], extra_params: dict[str, Any] | None) -> None:
+    """把客户端多传的扩展字段并进载荷；已知字段和内部字段以服务端为准。
+
+    目前扩展字段只是透传并落日志（排查 GIF 的格式/帧数等参数），handler 只读
+    自己认识的键，多出来的不会影响生图流程。
+    """
+    for key, value in (extra_params or {}).items():
+        payload.setdefault(key, value)
+
+
 def _owner_id(identity: dict[str, object]) -> str:
     return _clean(identity.get("id")) or "anonymous"
 
@@ -162,6 +172,7 @@ class ImageTaskService:
         size: str | None,
         quality: str = "auto",
         base_url: str = "",
+        extra_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -173,6 +184,7 @@ class ImageTaskService:
             "base_url": base_url,
             "timeout_secs": self._timeout_secs(),
         }
+        _merge_extra_params(payload, extra_params)
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
     def submit_edit(
@@ -187,6 +199,7 @@ class ImageTaskService:
         base_url: str = "",
         images: list[tuple[bytes, str, str]] | None = None,
         masks: list[tuple[bytes, str, str]] | None = None,
+        extra_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -200,6 +213,7 @@ class ImageTaskService:
             "base_url": base_url,
             "timeout_secs": self._timeout_secs(),
         }
+        _merge_extra_params(payload, extra_params)
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 
     def list_tasks(self, identity: dict[str, object], task_ids: list[str]) -> dict[str, Any]:

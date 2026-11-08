@@ -103,6 +103,37 @@ class ImageEditsJsonApiTests(unittest.TestCase):
             (b"three", "three.webp", "image/webp"),
         ])
 
+    def test_json_extra_params_are_forwarded_to_handler(self):
+        """客户端多传的 GIF 参数要原样到达 handler，供后续按参数生成。"""
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=AUTH_HEADERS,
+            json={
+                "prompt": "生成 gif", "image": PNG_DATA_URL,
+                "format": "gif", "frames": 16, "frame_ms": 200,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = self.calls[0]
+        self.assertEqual(payload["format"], "gif")
+        self.assertEqual(payload["frames"], 16)
+        self.assertEqual(payload["frame_ms"], 200)
+
+    def test_multipart_extra_params_are_forwarded_to_handler(self):
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=AUTH_HEADERS,
+            data={
+                "prompt": "生成 gif", "format": "gif", "frames": "16", "frame_ms": "200",
+            },
+            files=[("image", ("one.png", b"one", "image/png"))],
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = self.calls[0]
+        self.assertEqual(payload["format"], "gif")
+        self.assertEqual(payload["frames"], "16")
+        self.assertEqual(payload["frame_ms"], "200")
+
     def test_image_edit_rejects_json_without_image(self):
         response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "缺少图片"})
         self.assertEqual(response.status_code, 400, response.text)

@@ -82,6 +82,21 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(payload["status"], "success")
         self.assertEqual(len(self.fake_service.generation_calls), 1)
 
+    def test_generation_task_keeps_extra_params_for_logging(self):
+        """客户端多传的 GIF 参数要透传到任务载荷，内部字段则不能透传。"""
+        response = self.client.post(
+            "/api/image-tasks/generations",
+            headers=AUTH_HEADERS,
+            json={
+                "client_task_id": "gif-1", "prompt": "cat", "model": "gpt-image-2",
+                "format": "gif", "frames": 16, "frame_ms": 200, "timeout_secs": 9999,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        extra_params = self.fake_service.generation_calls[0][1]["extra_params"]
+        self.assertEqual(extra_params, {"format": "gif", "frames": 16, "frame_ms": 200})
+
     def test_create_edit_task_accepts_multiple_images(self):
         """测试图片编辑任务接口支持多个上传图片。"""
         response = self.client.post(

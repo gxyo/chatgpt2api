@@ -411,6 +411,34 @@ class ImageRequestDetailTests(unittest.TestCase):
             "size": "1024x1024", "n": 1, "quality": "auto", "response_format": "b64_json",
         })
 
+    def test_unknown_params_are_flattened_with_prefix(self):
+        """客户端多传的 GIF 参数要能在日志详情里逐项看到。"""
+        detail = image_request_detail({
+            "size": "1024x1024", "quality": "auto",
+            "format": "gif", "frames": 16, "frame_ms": 200, "transparent": False,
+            "prompt": "不该出现", "base_url": "http://x",
+        })
+        self.assertEqual(detail["param.format"], "gif")
+        self.assertEqual(detail["param.frames"], 16)
+        self.assertEqual(detail["param.frame_ms"], 200)
+        self.assertIs(detail["param.transparent"], False)
+        self.assertNotIn("param.prompt", detail)
+        self.assertNotIn("param.base_url", detail)
+
+    def test_long_param_values_are_summarized(self):
+        """误传的图片/base64 不能原样落盘，超长值只留长度。"""
+        inline = "data:image/png;base64," + "A" * 1000
+        detail = image_request_detail({
+            "blob": "x" * 1000,
+            "inline": inline,
+            "nested": {"a": 1},
+        })
+        self.assertTrue(str(detail["param.blob"]).endswith("…<1000 chars>"))
+        self.assertLess(len(str(detail["param.blob"])), 400)
+        self.assertEqual(detail["param.inline"], f"<{len(inline)} chars>")
+        # 数组/对象转成 JSON 字符串，日志页才能渲染。
+        self.assertEqual(detail["param.nested"], '{"a": 1}')
+
 
 class LogExportApiTests(unittest.TestCase):
     """导出接口：带鉴权的 txt 下载，默认 10 条。"""

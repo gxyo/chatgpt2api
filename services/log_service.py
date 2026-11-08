@@ -691,12 +691,52 @@ def image_input_detail(payload: dict[str, Any]) -> dict[str, Any]:
     return detail
 
 
+# 已经单独落进 detail 的字段，以及内部字段：不再当成「客户端额外参数」重复记一遍。
+_IMAGE_KNOWN_KEYS = {
+    "prompt", "model", "n", "size", "quality", "response_format", "stream",
+    "history_disabled", "base_url", "images", "mask", "client_task_id",
+    "timeout_secs", "progress_callback",
+}
+# 单个参数值最多记这么长：GIF 之类的新参数都很短，超长的多半是误传的图片/base64。
+_PARAM_VALUE_MAX_CHARS = 200
+
+
+def _log_param_value(value: object) -> object:
+    """把客户端入参压成日志页能显示的标量；超长/二进制内容只留长度。
+
+    日志页详情弹窗只渲染标量，所以数组、对象要转成 JSON 字符串；图片类内容
+    绝不原样落盘，避免把 logs.jsonl 撑爆。
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return f"<{len(value)} bytes>"
+    if isinstance(value, str):
+        text = value
+        head = text[:32].strip().lower()
+        if head.startswith("data:") or (len(text) > 512 and "base64" in head):
+            return f"<{len(text)} chars>"
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(value)
+    if len(text) > _PARAM_VALUE_MAX_CHARS:
+        return text[:_PARAM_VALUE_MAX_CHARS] + f"…<{len(text)} chars>"
+    return text
+
+
 def image_request_detail(payload: dict[str, Any]) -> dict[str, Any]:
     """生图请求的入参，落进调用日志，方便事后核对客户端到底要了多大的图。
 
     两条生图路径（/v1/images/* 和 /api/image-tasks/*）共用，免得日志字段对不齐。
     /v1/images/edits 路由在读取参考图之前就建好了日志对象，那里还要再补一次
     image_input_detail（参考图是读完之后才有字节数可数的）。
+
+    客户端多传的字段（如 GIF 的格式/帧数/每帧时长）按 `param.<原名>` 平铺，
+    排查「客户端到底发了什么参数」时不用再去翻原始请求。
     """
     detail = {
         "size": payload.get("size"),
@@ -704,6 +744,10 @@ def image_request_detail(payload: dict[str, Any]) -> dict[str, Any]:
         "quality": payload.get("quality"),
         "response_format": payload.get("response_format"),
     }
+    for key, value in payload.items():
+        if key in _IMAGE_KNOWN_KEYS:
+            continue
+        detail[f"param.{key}"] = _log_param_value(value)
     detail.update(image_input_detail(payload))
     return detail
 

@@ -23,6 +23,9 @@ from utils.helper import public_error_message
 
 
 class ImageGenerationRequest(BaseModel):
+    # extra=allow：保留客户端多传的扩展参数（如 GIF 的格式/帧数），否则会被
+    # Pydantic 静默丢掉，日志里就看不到客户端到底发了什么。
+    model_config = ConfigDict(extra="allow")
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     n: int = Field(default=1, ge=1, le=4)
@@ -89,6 +92,9 @@ def create_router() -> APIRouter:
     ):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
+        # 客户端可能误传内部字段：不透传，避免绕过服务端的请求预算。
+        payload.pop("timeout_secs", None)
+        payload.pop("progress_callback", None)
         payload["base_url"] = resolve_image_base_url(request)
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt,
                           extra_detail=image_request_detail(payload))
@@ -100,7 +106,9 @@ def create_router() -> APIRouter:
             authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
-        payload, image_sources, mask_sources = await parse_image_edit_request(request)
+        payload, image_sources, mask_sources, extra_params = await parse_image_edit_request(request)
+        # 扩展参数（GIF 格式/帧数等）一并透传给 handler，并随入参落日志。
+        payload.update(extra_params)
         prompt = str(payload["prompt"])
         model = str(payload["model"])
         call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt,
